@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset and identity codecs, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the one mechanically transferred SHA-256 class listed below, the independently implemented wire and STATUS JSON subsets and identity codecs, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -140,5 +140,11 @@
     "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
     "error_values_added": "RESOURCE_LIMIT = 17 was added additively for the control-payload cap. All pre-existing Error values and the one-byte size are unchanged.",
     "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. No product payload, card/hardware sequence or vendor asset was copied."
+  },
+  "json": {
+    "method": "New independent portable serializer; it consumes the existing typed STATUS records and full canonical-context validator.",
+    "scope": "STATUS JSON size and encode APIs, compact UTF-8 object serialization with a final newline, checked caller-capacity handling, canonical collection ordering, and JSON error-symbol projection. The dtv::json target links dtv::wire and introduces no JSON package, parser, product endpoint, C ABI, hardware dependency, or arbitrary byte cap.",
+    "error_symbols": "A shared u32 error-symbol lookup maps JSON codes 1..20 and 255. Legacy error_string continues to recognize only its previous whitelist; codes 16 and 18..20 remain UNKNOWN there. Unknown JSON codes retain their full u32 value in numeric_code, and present code 0 is rejected by existing record validation.",
+    "provenance": "Independently written from shared/design/json-record-contract.md, shared/implementation/status-json-spec.md, shared/design/wire-record-layout.md, shared/design/adoption-status.md, and shared/examples/json-records.json. The serializer does not modify the source record and validates StatusResponse against StatusContext before sizing and writing."
   }
 }

@@ -33,6 +33,10 @@ enum class Error : std::uint8_t {
 static_assert(sizeof(Error) == sizeof(std::uint8_t));
 
 const char* error_string(Error error) noexcept;
+// Returns the symbol for a recognized u32 code, "OK" for code 0, or nullptr
+// for an unknown code. Present error records still require a nonzero code and
+// reject 0 during record validation.
+const char* error_symbol(std::uint32_t code) noexcept;
 
 template <typename T>
 class Result final {
