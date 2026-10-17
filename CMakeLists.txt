@@ -29,7 +29,7 @@ target_include_directories(dtv_userland_core PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 
-add_library(dtv_userland_wire STATIC src/wire.cpp)
+add_library(dtv_userland_wire STATIC src/wire.cpp src/records.cpp)
 add_library(dtv::wire ALIAS dtv_userland_wire)
 set_target_properties(dtv_userland_wire PROPERTIES
     EXPORT_NAME wire
@@ -118,6 +118,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(wire_tests tests/wire_tests.cpp)
     target_link_libraries(wire_tests PRIVATE dtv::wire)
     add_test(NAME wire_tests COMMAND wire_tests)
+
+    add_executable(records_tests tests/records_tests.cpp)
+    target_link_libraries(records_tests PRIVATE dtv::wire)
+    add_test(NAME records_tests COMMAND records_tests)
 
     if(DTV_USERLAND_BUILD_RECEIVER)
         add_executable(receiver_engine_tests tests/receiver_engine_tests.cpp)

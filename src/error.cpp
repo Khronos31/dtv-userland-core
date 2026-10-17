@@ -38,6 +38,8 @@ const char* error_string(Error error) noexcept
         return "BUFFER_TOO_SMALL";
     case Error::SLOW_CONSUMER:
         return "SLOW_CONSUMER";
+    case Error::RESOURCE_LIMIT:
+        return "RESOURCE_LIMIT";
     case Error::INTERNAL:
         return "INTERNAL";
     }
