@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, and STATUS JSON subsets, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, and tuning subsets, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -174,5 +174,15 @@
         "excluded_scope": "The Q3U4Runtime/SPEC product-specific comment at original lines 31-33, PX4 IPC enum and header dependencies, and all CardAtr/Native protocol/hardware interpretation. Snapshot values remain opaque and are only defaulted, copied, or returned."
       }
     ]
+  },
+  "tuning": {
+    "method": "New independent bounded resolver implementation from the adopted CLI contract and the T1 implementation specification; no product parser or product source was copied.",
+    "authority": [
+      "shared/design/cli-contract-draft.md section 2",
+      "shared/design/adoption-status.md, selection meaning and frequency contract",
+      "shared/implementation/tune-plan-spec.md and tune-plan-spec-review.md"
+    ],
+    "scope": "Pure C++17 channel/typed-Hz/system/selection resolution using the existing wire System and Selection enums. No CLI option parser, repeated-option policy, wire request construction, backend capability checks, hardware quantization, product endpoint, or C ABI.",
+    "new_files": "include/dtv/userland/tuning.h, src/tuning.cpp, tests/tuning_tests.cpp, tests/consumer/tuning/, tests/consumer/missing_receiver/ and docs/tuning.md are independently written and carry MIT."
   }
 }
