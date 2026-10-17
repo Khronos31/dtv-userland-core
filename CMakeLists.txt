@@ -13,6 +13,7 @@ option(DTV_USERLAND_BUILD_TESTING "Build DTV userland core tests" ${_dtv_userlan
 # core and wire configurations keep their dependency footprint; only it
 # requires Threads.
 option(DTV_USERLAND_BUILD_RECEIVER "Build the internal receiver lifecycle engine" OFF)
+option(DTV_USERLAND_BUILD_CARD "Build the internal card ownership engine" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -102,11 +103,38 @@ if(DTV_USERLAND_BUILD_RECEIVER)
     endif()
 endif()
 
+if(DTV_USERLAND_BUILD_CARD)
+    add_library(dtv_userland_card INTERFACE)
+    add_library(dtv::card ALIAS dtv_userland_card)
+    set_target_properties(dtv_userland_card PROPERTIES EXPORT_NAME card)
+    target_compile_features(dtv_userland_card INTERFACE cxx_std_17)
+    target_include_directories(dtv_userland_card INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_card INTERFACE dtv::core)
+endif()
+
 install(TARGETS dtv_userland_core dtv_userland_wire dtv_userland_identity dtv_userland_json
     EXPORT dtv_userland_coreTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-if(DTV_USERLAND_BUILD_RECEIVER)
+if(DTV_USERLAND_BUILD_CARD)
+    install(TARGETS dtv_userland_card EXPORT dtv_userland_coreTargets)
+endif()
+if(DTV_USERLAND_BUILD_RECEIVER AND DTV_USERLAND_BUILD_CARD)
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+elseif(DTV_USERLAND_BUILD_RECEIVER)
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        PATTERN "card_ownership_engine.h" EXCLUDE
+        PATTERN "card_ownership_engine.tpp" EXCLUDE)
+elseif(DTV_USERLAND_BUILD_CARD)
+    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+        PATTERN "detail" EXCLUDE)
+    install(FILES
+        include/dtv/userland/detail/text.h
+        include/dtv/userland/detail/sha256.h
+        include/dtv/userland/detail/card_ownership_engine.h
+        include/dtv/userland/detail/card_ownership_engine.tpp
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
 else()
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         PATTERN "detail" EXCLUDE)
@@ -177,6 +205,19 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_test(NAME receiver_engine_tests COMMAND receiver_engine_tests)
         # Outer bound behind the tests' own finite waits.
         set_tests_properties(receiver_engine_tests PROPERTIES TIMEOUT 120)
+    endif()
+
+    if(DTV_USERLAND_BUILD_CARD)
+        add_executable(card_ownership_engine_tests tests/card_ownership_engine_tests.cpp)
+        target_link_libraries(card_ownership_engine_tests PRIVATE dtv::card)
+        if(MSVC)
+            target_compile_options(card_ownership_engine_tests PRIVATE /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(card_ownership_engine_tests PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME card_ownership_engine_tests COMMAND card_ownership_engine_tests)
+        set_tests_properties(card_ownership_engine_tests PROPERTIES TIMEOUT 120)
     endif()
 
     set(DTV_LEGACY_SOURCE "" CACHE PATH "Fixed PX4 userland source tree for equivalence check")
