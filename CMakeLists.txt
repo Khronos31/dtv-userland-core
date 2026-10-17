@@ -42,12 +42,27 @@ target_include_directories(dtv_userland_wire PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dtv_userland_wire PUBLIC dtv::core)
 
+add_library(dtv_userland_identity STATIC src/identity.cpp)
+add_library(dtv::identity ALIAS dtv_userland_identity)
+set_target_properties(dtv_userland_identity PROPERTIES
+    EXPORT_NAME identity
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS OFF)
+target_compile_features(dtv_userland_identity PUBLIC cxx_std_17)
+target_include_directories(dtv_userland_identity PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(dtv_userland_identity PUBLIC dtv::core)
+
 if(MSVC)
     target_compile_options(dtv_userland_core PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_wire PRIVATE /EHs-c- /GR- /W4)
+    target_compile_options(dtv_userland_identity PRIVATE /EHs-c- /GR- /W4)
 else()
     target_compile_options(dtv_userland_core PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_wire PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    target_compile_options(dtv_userland_identity PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
 endif()
 
 if(DTV_USERLAND_BUILD_RECEIVER)
@@ -72,7 +87,7 @@ if(DTV_USERLAND_BUILD_RECEIVER)
     endif()
 endif()
 
-install(TARGETS dtv_userland_core dtv_userland_wire
+install(TARGETS dtv_userland_core dtv_userland_wire dtv_userland_identity
     EXPORT dtv_userland_coreTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(DTV_USERLAND_BUILD_RECEIVER)
@@ -80,6 +95,12 @@ if(DTV_USERLAND_BUILD_RECEIVER)
 else()
     install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
         PATTERN "detail" EXCLUDE)
+    # The shared identity/wire internals are always installed even though the
+    # optional receiver detail header is excluded above.
+    install(FILES
+        include/dtv/userland/detail/text.h
+        include/dtv/userland/detail/sha256.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
 endif()
 install(EXPORT dtv_userland_coreTargets
     FILE dtv_userland_coreTargets.cmake
@@ -122,6 +143,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(records_tests tests/records_tests.cpp)
     target_link_libraries(records_tests PRIVATE dtv::wire)
     add_test(NAME records_tests COMMAND records_tests)
+
+    add_executable(identity_tests tests/identity_tests.cpp)
+    target_link_libraries(identity_tests PRIVATE dtv::identity)
+    add_test(NAME identity_tests COMMAND identity_tests)
 
     if(DTV_USERLAND_BUILD_RECEIVER)
         add_executable(receiver_engine_tests tests/receiver_engine_tests.cpp)
