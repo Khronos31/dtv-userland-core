@@ -62,7 +62,8 @@ Attachment ReceiverEngine::attachment_for(const Lease& lease,
                                           std::uint64_t attachment_id) const noexcept
 {
     return Attachment{lease.client_id, lease.lease_id, attachment_id,
-                      receivers_[lease.slot], lease.system, lease.token};
+                      receivers_[lease.slot], lease.system, lease.token,
+                      contract_ == StreamContract::v1};
 }
 
 int ReceiverEngine::find_lease_locked(std::uint64_t client_id,

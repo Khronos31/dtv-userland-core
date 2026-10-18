@@ -39,6 +39,10 @@ struct Attachment final {
     ReceiverId receiver = 0U;
     ReceiverSystem system = ReceiverSystem::terrestrial;
     ReceiverToken token{};
+    // Data-plane queue policy chosen by the engine's immutable stream contract:
+    // false keeps the legacy full-ring slow-consumer policy, true selects the
+    // v1 evict-oldest policy.  It is not part of the attachment identity.
+    bool evict_oldest = false;
 };
 
 struct StreamCounters final {

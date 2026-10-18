@@ -347,4 +347,241 @@ StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout) noex
     return result;
 }
 
+namespace {
+
+bool nonzero_uuid(const Uuid& value) noexcept
+{
+    for (const std::uint8_t byte : value) {
+        if (byte != 0U) return true;
+    }
+    return false;
+}
+
+std::uint64_t deadline_after(ClientTransport& transport,
+                             std::uint32_t milliseconds) noexcept
+{
+    const std::uint64_t now = transport.monotonic_ms();
+    return now > std::numeric_limits<std::uint64_t>::max() - milliseconds
+               ? std::numeric_limits<std::uint64_t>::max()
+               : now + milliseconds;
+}
+
+template <typename Request>
+Result<std::size_t> encode_body(const Request& value, MutableByteView output,
+                                Result<std::size_t> (*encode)(const Request&,
+                                                               MutableByteView) noexcept) noexcept
+{
+    return encode(value, output);
+}
+
+}  // namespace
+
+RecordingControlResult begin_recording(ClientTransport& transport,
+                                       const RecordingOptions& options,
+                                       Timeout timeout) noexcept
+{
+    RecordingControlResult result{};
+    if (timeout.milliseconds == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    const auto fail = [&transport, &result](Error error) noexcept {
+        result.error = error;
+        transport.close();
+        return result;
+    };
+
+    // The shared status fetch performs the HELLO, LIST and STATUS sequence on
+    // this same connection and leaves it open on success.
+    const StatusFetchResult status = fetch_status(transport, timeout);
+    if (!status) {
+        result.remote_error_code = status.remote_error_code;
+        return fail(status.error);
+    }
+    RecordingSession& session = result.session;
+    session.epoch = status.snapshot.status.context.epoch;
+
+    const std::uint64_t deadline = deadline_after(transport, timeout.milliseconds);
+    std::array<std::uint8_t, kMaxControlPayload> request_bytes{};
+    std::uint32_t remote_code = 0U;
+
+    AcquireRequest acquire{};
+    acquire.epoch = session.epoch;
+    acquire.receiver_id = options.receiver_id;
+    auto acquire_size = encode_body(
+        acquire, MutableByteView{request_bytes.data(), request_bytes.size()},
+        encode_acquire_request);
+    if (!acquire_size) return fail(acquire_size.error());
+    auto acquire_reply = roundtrip(transport, kOpcodeAcquire, 4U,
+                                   ByteView{request_bytes.data(), acquire_size.value()},
+                                   deadline, remote_code, &session.epoch);
+    if (!acquire_reply) {
+        result.remote_error_code = remote_code;
+        return fail(acquire_reply.error());
+    }
+    const auto acquired = decode_acquire_response(
+        ByteView{acquire_reply.value().payload.data(), acquire_reply.value().length});
+    if (!acquired) return fail(acquired.error());
+    if (acquired.value().epoch != session.epoch || acquired.value().lease_id == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.lease_id = acquired.value().lease_id;
+
+    TuneRequest tune = options.tune;
+    tune.epoch = session.epoch;
+    tune.lease_id = session.lease_id;
+    auto tune_size = encode_body(
+        tune, MutableByteView{request_bytes.data(), request_bytes.size()},
+        encode_tune_request);
+    if (!tune_size) return fail(tune_size.error());
+    remote_code = 0U;
+    auto tune_reply = roundtrip(transport, kOpcodeTune, 5U,
+                                ByteView{request_bytes.data(), tune_size.value()},
+                                deadline, remote_code, &session.epoch);
+    if (!tune_reply) {
+        result.remote_error_code = remote_code;
+        return fail(tune_reply.error());
+    }
+    const auto tuned = decode_tune_result(
+        ByteView{tune_reply.value().payload.data(), tune_reply.value().length});
+    if (!tuned) return fail(tuned.error());
+    if (tuned.value().epoch != session.epoch || tuned.value().tune_revision == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.tune_result = tuned.value();
+    session.tune_revision = tuned.value().tune_revision;
+
+    StartRequest start{};
+    start.epoch = session.epoch;
+    start.lease_id = session.lease_id;
+    start.tune_revision = session.tune_revision;
+    auto start_size = encode_body(
+        start, MutableByteView{request_bytes.data(), request_bytes.size()},
+        encode_start_request);
+    if (!start_size) return fail(start_size.error());
+    remote_code = 0U;
+    auto start_reply = roundtrip(transport, kOpcodeStartStream, 6U,
+                                 ByteView{request_bytes.data(), start_size.value()},
+                                 deadline, remote_code, &session.epoch);
+    if (!start_reply) {
+        result.remote_error_code = remote_code;
+        return fail(start_reply.error());
+    }
+    const auto started = decode_start_response(
+        ByteView{start_reply.value().payload.data(), start_reply.value().length});
+    if (!started) return fail(started.error());
+    if (started.value().epoch != session.epoch || started.value().stream_id == 0U ||
+        !nonzero_uuid(started.value().attach_token) ||
+        started.value().expires_after_ms == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.stream_id = started.value().stream_id;
+    session.attach_token = started.value().attach_token;
+    session.expires_after_ms = started.value().expires_after_ms;
+    session.next_request_id = 7U;
+    result.error = Error::OK;
+    return result;
+}
+
+StopControlResult stop_recording(ClientTransport& transport,
+                                 RecordingSession& session,
+                                 Timeout timeout) noexcept
+{
+    StopControlResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    const std::uint64_t deadline = deadline_after(transport, timeout.milliseconds);
+    StopRequest request{};
+    request.epoch = session.epoch;
+    request.lease_id = session.lease_id;
+    request.stream_id = session.stream_id;
+    std::array<std::uint8_t, kMaxControlPayload> request_bytes{};
+    const auto size = encode_body(
+        request, MutableByteView{request_bytes.data(), request_bytes.size()},
+        encode_stop_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    std::uint32_t remote_code = 0U;
+    auto reply = roundtrip(transport, kOpcodeStopStream, session.next_request_id,
+                           ByteView{request_bytes.data(), size.value()}, deadline,
+                           remote_code, &session.epoch);
+    ++session.next_request_id;
+    if (!reply) {
+        result.remote_error_code = remote_code;
+        result.error = reply.error();
+        transport.close();
+        return result;
+    }
+    const auto stopped = decode_stop_response(
+        ByteView{reply.value().payload.data(), reply.value().length});
+    if (!stopped) {
+        result.error = stopped.error();
+        transport.close();
+        return result;
+    }
+    if (stopped.value().epoch != session.epoch) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = stopped.value();
+    result.error = Error::OK;
+    return result;
+}
+
+ReleaseControlResult release_recording(ClientTransport& transport,
+                                       RecordingSession& session,
+                                       Timeout timeout) noexcept
+{
+    ReleaseControlResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    const std::uint64_t deadline = deadline_after(transport, timeout.milliseconds);
+    ReleaseRequest request{};
+    request.epoch = session.epoch;
+    request.lease_id = session.lease_id;
+    std::array<std::uint8_t, kMaxControlPayload> request_bytes{};
+    const auto size = encode_body(
+        request, MutableByteView{request_bytes.data(), request_bytes.size()},
+        encode_release_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    std::uint32_t remote_code = 0U;
+    auto reply = roundtrip(transport, kOpcodeRelease, session.next_request_id,
+                           ByteView{request_bytes.data(), size.value()}, deadline,
+                           remote_code, &session.epoch);
+    ++session.next_request_id;
+    if (!reply) {
+        result.remote_error_code = remote_code;
+        result.error = reply.error();
+        transport.close();
+        return result;
+    }
+    const auto released = decode_release_response(
+        ByteView{reply.value().payload.data(), reply.value().length});
+    if (!released) {
+        result.error = released.error();
+        transport.close();
+        return result;
+    }
+    if (released.value().epoch != session.epoch || !released.value().released) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = released.value();
+    result.error = Error::OK;
+    return result;
+}
+
 }  // namespace dtv::userland::wire
