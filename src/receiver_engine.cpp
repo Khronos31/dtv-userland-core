@@ -210,6 +210,10 @@ Result<AcquireResult> ReceiverEngine::acquire(std::uint64_t client_id,
     lease.active = true;
     lease.client_id = client_id;
     lease.lease_id = lease_id_value;
+    lease.instance = next_lease_instance_;
+    next_lease_instance_ = next_lease_instance_ == std::numeric_limits<std::uint64_t>::max()
+        ? 1U
+        : next_lease_instance_ + 1U;
     lease.slot = slot;
     lease.system = initial_system(slot);
     lease.token = token_value;
@@ -268,6 +272,13 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
         if (stream == StreamState::armed || stream == StreamState::attaching ||
             stream == StreamState::active)
             leases_[slot].stream_state = StreamState::revoked;
+        // Synchronous logical teardown: drop any admitted ticket, invalidate
+        // current (retaining last-successful history) and keep the receiver
+        // excluded while the hardware cleanup runs.
+        clear_pending_locked(slot);
+        invalidate_current_locked(slot);
+        set_operation_locked(slot, ReceiverTuneOperation::cleanup,
+                             leases_[slot].instance, 0U);
     }
 
     std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
@@ -275,10 +286,12 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const int index = find_lease_locked(client_id, lease_id);
-        if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
+        if (index < 0) {
+            clear_operation_locked(slot);
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
         lease = leases_[static_cast<std::size_t>(index)];
         leases_[static_cast<std::size_t>(index)] = Lease{};
-        set_state_locked(slot, ReceiverState::free);
     }
 
     Error first = Error::OK;
@@ -298,9 +311,24 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
         const auto closed = close_lease(lease);
         if (!closed && first == Error::OK) first = closed.error();
     }
-    if (!detach_clean || !stopped || disconnected) {
+    {
         std::lock_guard<std::mutex> lock(mutex_);
-        set_state_locked(slot, ReceiverState::error);
+        // The receiver is announced free only after a fully successful
+        // hardware cleanup.  It is re-evaluated after receiver serialization,
+        // not from a value sampled before the wait: an in-flight rejected
+        // commit or any other quarantine may have been established in the
+        // interim.  In a strict engine any ambiguous cleanup failure (detach,
+        // stop, close, or transport loss) stays excluded; a nonstrict engine
+        // keeps the old direct close-only compatibility.  A successful close
+        // still returns the receiver to free so an exact RELEASE is reusable.
+        const bool failed = first != Error::OK;
+        if (!failed)
+            set_state_locked(slot, ReceiverState::free);
+        else if (strict_enabled_ || !detach_clean || !stopped || disconnected)
+            set_state_locked(slot, ReceiverState::error);
+        else
+            set_state_locked(slot, ReceiverState::free);
+        clear_operation_locked(slot);
     }
     return first == Error::OK ? Result<void>::success()
                               : Result<void>::failure(first);
@@ -314,17 +342,44 @@ Result<void> ReceiverEngine::release(std::uint64_t client_id,
 
 Result<bool> ReceiverEngine::poll_lock(std::size_t slot, ReceiverSystem system,
                                        std::uint64_t start_ms,
-                                       std::uint32_t timeout_ms) noexcept
+                                       std::uint32_t timeout_ms, bool admitted,
+                                       const AdmittedTune& ticket) noexcept
 {
     const std::size_t max_polls = static_cast<std::size_t>(timeout_ms / 10U) + 1U;
+    // Admitted-only exact ticket/deadline decision.  It is checked before every
+    // hardware poll (covering a cancellation/expiry during the previous
+    // inter-poll sleep) and after every returned poll (true or false).  The
+    // legacy entrance is a no-op here.
+    const auto admitted_gate = [&]() noexcept -> Error {
+        if (!admitted) return Error::OK;
+        bool current = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            current = pending_[slot].valid &&
+                      pending_[slot].ticket.tune_revision == ticket.tune_revision &&
+                      ticket_current_locked(pending_[slot].ticket);
+        }
+        if (!current) return Error::NOT_FOUND;
+        return clock_.monotonic_ms() - ticket.accepted_at_ms >= timeout_ms
+                   ? Error::TIMEOUT
+                   : Error::OK;
+    };
     for (std::size_t count = 0U; count < max_polls; ++count) {
         const std::uint64_t before = clock_.monotonic_ms();
         if (before - start_ms >= timeout_ms) break;
+        // Gate before the next poll (after the previous sleep).
+        const Error pre = admitted_gate();
+        if (pre != Error::OK) return Result<bool>::failure(pre);
         const auto locked = backend_.is_locked(receivers_[slot], system);
         if (!locked) {
+            // Hardware error/transport primary and terminal handling stay
+            // ahead of the success-only admitted metadata gates.
             observe_disconnect(slot, locked.error());
             return Result<bool>::failure(locked.error());
         }
+        // Gate after the returned poll (true or false).
+        const Error post = admitted_gate();
+        if (post != Error::OK) return Result<bool>::failure(post);
         if (locked.value()) return Result<bool>::success(true);
 
         const std::uint64_t now = clock_.monotonic_ms();
@@ -336,6 +391,312 @@ Result<bool> ReceiverEngine::poll_lock(std::size_t slot, ReceiverSystem system,
         clock_.sleep_ms(10U);
     }
     return Result<bool>::success(false);
+}
+
+bool ReceiverEngine::capability_supports_locked(std::size_t slot,
+                                                ReceiverSystem system) const noexcept
+{
+    const ReceiverCapability& capability = strict_capabilities_[slot];
+    if (system == ReceiverSystem::terrestrial) return capability.supports_terrestrial;
+    if (system == ReceiverSystem::satellite) return capability.supports_satellite;
+    // Unknown system numbers are unsupported in the strict descriptor.
+    return false;
+}
+
+void ReceiverEngine::clear_pending_locked(std::size_t slot) noexcept
+{
+    pending_[slot] = PendingTune{};
+}
+
+void ReceiverEngine::invalidate_current_locked(std::size_t slot) noexcept
+{
+    // Logical owner teardown clears the current tune but retains the
+    // last-successful history for observation.
+    tune_metadata_[slot].current_valid = false;
+}
+
+void ReceiverEngine::set_operation_locked(std::size_t slot,
+                                          ReceiverTuneOperation operation,
+                                          std::uint64_t lease_instance,
+                                          std::uint64_t revision) noexcept
+{
+    operations_[slot] = operation;
+    operation_instances_[slot] = operation == ReceiverTuneOperation::idle ? 0U
+                                                                          : lease_instance;
+    operation_revisions_[slot] = operation == ReceiverTuneOperation::idle ? 0U : revision;
+}
+
+void ReceiverEngine::clear_operation_locked(std::size_t slot) noexcept
+{
+    set_operation_locked(slot, ReceiverTuneOperation::idle, 0U, 0U);
+}
+
+bool ReceiverEngine::operation_owned_by_locked(std::size_t slot,
+                                               ReceiverTuneOperation kind,
+                                               std::uint64_t lease_instance,
+                                               std::uint64_t revision) const noexcept
+{
+    return operations_[slot] == kind && kind != ReceiverTuneOperation::idle &&
+           operation_instances_[slot] == lease_instance &&
+           operation_revisions_[slot] == revision;
+}
+
+void ReceiverEngine::clear_operation_if_owner_locked(std::size_t slot,
+                                                     ReceiverTuneOperation kind,
+                                                     std::uint64_t lease_instance,
+                                                     std::uint64_t revision) noexcept
+{
+    if (operation_owned_by_locked(slot, kind, lease_instance, revision))
+        clear_operation_locked(slot);
+}
+
+TuneRecord ReceiverEngine::tune_record(const TuneRequest& request) noexcept
+{
+    TuneRecord record{};
+    record.system = request.system;
+    record.frequency_khz = request.frequency_khz;
+    record.stream_id = request.stream_id;
+    record.slot = request.slot;
+    record.lnb_voltage = request.lnb_voltage;
+    record.timeout_ms = request.timeout_ms;
+    return record;
+}
+
+bool ReceiverEngine::ticket_owns_slot_locked(std::size_t slot,
+                                             const AdmittedTune& ticket) const noexcept
+{
+    if (pending_[slot].valid) {
+        const AdmittedTune& pending = pending_[slot].ticket;
+        return pending.client_id == ticket.client_id &&
+               pending.lease_id == ticket.lease_id &&
+               pending.lease_instance == ticket.lease_instance &&
+               pending.tune_revision == ticket.tune_revision;
+    }
+    // Empty pending metadata does not prove ownership.  The ticket owns the
+    // slot only if it still holds the recorded operation, or no operation is
+    // active and its exact lease instance is still the current one.
+    if (operations_[slot] != ReceiverTuneOperation::idle)
+        return operation_owned_by_locked(slot, ReceiverTuneOperation::tuning,
+                                         ticket.lease_instance, ticket.tune_revision);
+    const int index = find_lease_locked(ticket.client_id, ticket.lease_id);
+    return index >= 0 &&
+           leases_[static_cast<std::size_t>(index)].instance == ticket.lease_instance;
+}
+
+void ReceiverEngine::complete_tune_locked(std::size_t slot,
+                                          const AdmittedTune& ticket) noexcept
+{
+    if (pending_[slot].valid) {
+        const AdmittedTune& pending = pending_[slot].ticket;
+        if (pending.client_id != ticket.client_id ||
+            pending.lease_id != ticket.lease_id ||
+            pending.lease_instance != ticket.lease_instance ||
+            pending.tune_revision != ticket.tune_revision)
+            return;  // a newer admission owns the pending ticket
+    }
+    pending_[slot] = PendingTune{};
+    // Return the operation marker to idle only when this exact ticket started
+    // it (kind tuning, same instance/revision).  A stale ticket must never
+    // clear a replacement lease's active direct tune or a cleanup marker.
+    clear_operation_if_owner_locked(slot, ReceiverTuneOperation::tuning,
+                                    ticket.lease_instance, ticket.tune_revision);
+}
+
+bool ReceiverEngine::ticket_current_locked(const AdmittedTune& ticket) const noexcept
+{
+    if (!pending_[ticket.slot].valid) return false;
+    const AdmittedTune& pending = pending_[ticket.slot].ticket;
+    if (pending.client_id != ticket.client_id ||
+        pending.lease_id != ticket.lease_id ||
+        pending.lease_instance != ticket.lease_instance ||
+        pending.tune_revision != ticket.tune_revision)
+        return false;
+    // The lease instance must still be the one the ticket was admitted for.
+    const int index = find_lease_locked(ticket.client_id, ticket.lease_id);
+    return index >= 0 && leases_[static_cast<std::size_t>(index)].instance ==
+                             ticket.lease_instance;
+}
+
+Result<void> ReceiverEngine::configure_strict_capabilities(
+    const ReceiverCapability* capabilities, std::size_t count) noexcept
+{
+    if (!configured_ || capabilities == nullptr || count != receiver_count_ ||
+        count == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+
+    std::array<ReceiverCapability, kReceiverEngineCapacity> table{};
+    std::array<bool, kReceiverEngineCapacity> seen{};
+    for (std::size_t index = 0U; index < count; ++index) {
+        const int slot = find_slot(capabilities[index].receiver);
+        if (slot < 0 || seen[static_cast<std::size_t>(slot)])
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        if (!capabilities[index].supports_terrestrial &&
+            !capabilities[index].supports_satellite)
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        seen[static_cast<std::size_t>(slot)] = true;
+        table[static_cast<std::size_t>(slot)] = capabilities[index];
+    }
+    for (std::size_t slot = 0U; slot < receiver_count_; ++slot) {
+        if (!seen[slot]) return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+
+    std::lock_guard<std::mutex> lock(mutex_);
+    strict_capabilities_ = table;
+    strict_enabled_ = true;
+    return Result<void>::success();
+}
+
+Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
+                                                    const TuneRequest& request,
+                                                    std::uint64_t accepted_at_ms) noexcept
+{
+    if (!strict_enabled_ || !valid_client(client_id))
+        return Result<AdmittedTune>::failure(Error::NOT_READY);
+    std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
+    if (!lock.owns_lock()) return Result<AdmittedTune>::failure(Error::BUSY);
+
+    const int index = find_lease_locked(client_id, request.lease_id);
+    if (index < 0) return Result<AdmittedTune>::failure(Error::NOT_FOUND);
+    const std::size_t slot = leases_[static_cast<std::size_t>(index)].slot;
+    if (states_[slot] == ReceiverState::error)
+        return Result<AdmittedTune>::failure(Error::NOT_READY);
+    const Lease& lease = leases_[static_cast<std::size_t>(index)];
+    if (lease.stream_state == StreamState::armed ||
+        lease.stream_state == StreamState::attaching ||
+        lease.stream_state == StreamState::active ||
+        lease.stream_state == StreamState::revoked)
+        return Result<AdmittedTune>::failure(Error::BUSY);
+    // An active tune or hardware cleanup on this receiver is BUSY rather than
+    // a blocking wait on the poll thread.
+    if (operations_[slot] != ReceiverTuneOperation::idle)
+        return Result<AdmittedTune>::failure(Error::BUSY);
+    if (!capability_supports_locked(slot, request.system))
+        return Result<AdmittedTune>::failure(Error::INVALID_ARGUMENT);
+    if (request.validation != Error::OK)
+        return Result<AdmittedTune>::failure(request.validation);
+    // Nonwrapping revision issuance: exhaustion fails without state change.
+    // RESOURCE_LIMIT is the existing internal vocabulary for this issuance
+    // limit; facades map it to an existing old-wire code until the v1 wire
+    // carries a dedicated value.
+    if (tune_revisions_[slot] == std::numeric_limits<std::uint64_t>::max())
+        return Result<AdmittedTune>::failure(Error::RESOURCE_LIMIT);
+    const std::uint64_t revision = tune_revisions_[slot] + 1U;
+
+    // This is the admission linearization point: the accepted request
+    // advances the revision and invalidates the current tune.
+    tune_revisions_[slot] = revision;
+    tune_metadata_[slot].revision = revision;
+    tune_metadata_[slot].current_valid = false;
+    set_operation_locked(slot, ReceiverTuneOperation::tuning, lease.instance, revision);
+    pending_[slot].valid = true;
+    pending_[slot].ticket = AdmittedTune{
+        client_id, lease.lease_id, lease.instance, receivers_[slot], slot, revision,
+        accepted_at_ms, request};
+    return Result<AdmittedTune>::success(pending_[slot].ticket);
+}
+
+Result<void> ReceiverEngine::execute_admitted_tune(const AdmittedTune& ticket) noexcept
+{
+    std::size_t slot = ticket.slot;
+    Lease lease;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (slot >= kReceiverEngineCapacity) return Result<void>::failure(Error::NOT_FOUND);
+        if (!ticket_current_locked(ticket)) {
+            // Invalidated before execution started.  Complete only if this
+            // ticket still owns the slot.
+            complete_tune_locked(slot, ticket);
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
+        const int index = find_lease_locked(ticket.client_id, ticket.lease_id);
+        lease = leases_[static_cast<std::size_t>(index)];
+        if (states_[slot] == ReceiverState::error) {
+            complete_tune_locked(slot, ticket);
+            return Result<void>::failure(Error::NOT_READY);
+        }
+    }
+    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Revalidate after receiver serialization: an owner teardown may have
+        // invalidated the ticket while this task waited.
+        if (!ticket_current_locked(ticket)) {
+            complete_tune_locked(slot, ticket);
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
+    }
+    if (lease.stream_state == StreamState::armed ||
+        lease.stream_state == StreamState::attaching ||
+        lease.stream_state == StreamState::active ||
+        lease.stream_state == StreamState::revoked) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_tune_locked(slot, ticket);
+        return Result<void>::failure(Error::BUSY);
+    }
+    const TuneRequest& request = ticket.request;
+    // Strict admission and the admitted helper use only the immutable
+    // capability table; the virtual supports predicate is not consulted.
+    if (!strict_enabled_ || !capability_supports_locked(slot, request.system)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_tune_locked(slot, ticket);
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (request.validation != Error::OK) {
+        const Error decision = request.validation;
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_tune_locked(slot, ticket);
+        return Result<void>::failure(decision);
+    }
+    const auto result = run_tune(slot, request, true, ticket);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        complete_tune_locked(slot, ticket);
+    }
+    return result;
+}
+
+Result<void> ReceiverEngine::abort_unstarted_tune(const AdmittedTune& ticket,
+                                                  Error error) noexcept
+{
+    (void)error;
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    complete_tune_locked(ticket.slot, ticket);
+    return Result<void>::success();
+}
+
+Result<void> ReceiverEngine::revoke_tune_ticket(std::uint64_t client_id,
+                                                std::uint64_t lease_id) noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    // Logical owner teardown invalidates current (retaining last-success
+    // history) and revokes the exact pending ticket for this lease.
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index >= 0) invalidate_current_locked(leases_[static_cast<std::size_t>(index)].slot);
+    for (std::size_t slot = 0U; slot < pending_.size(); ++slot) {
+        if (!pending_[slot].valid) continue;
+        const AdmittedTune& ticket = pending_[slot].ticket;
+        if (ticket.client_id == client_id && ticket.lease_id == lease_id) {
+            clear_pending_locked(slot);
+            return Result<void>::success();
+        }
+    }
+    return Result<void>::success();
+}
+
+// Bounded deterministic seam for the nonwrapping revision-exhaustion path.
+// The symbol is always built so a test translation unit that declares it via
+// DTV_USERLAND_RECEIVER_TEST_ACCESS can link; production does not use it.
+void ReceiverEngine::set_tune_revision_for_test(std::size_t slot,
+                                                std::uint64_t value) noexcept
+{
+    if (slot >= kReceiverEngineCapacity) return;
+    std::lock_guard<std::mutex> lock(mutex_);
+    tune_revisions_[slot] = value;
+    tune_metadata_[slot].revision = value;
 }
 
 Result<void> ReceiverEngine::tune(std::uint64_t client_id,
@@ -359,21 +720,75 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
         lease = leases_[static_cast<std::size_t>(index)];
         if (states_[lease.slot] == ReceiverState::error)
             return Result<void>::failure(Error::NOT_READY);
+        // The legacy direct entrance shares exclusion with a strict pending
+        // ticket: a tuning or cleanup operation is BUSY here too.
+        if (operations_[slot] != ReceiverTuneOperation::idle)
+            return Result<void>::failure(Error::BUSY);
+        // Mark the direct operation active under the registry lock so a
+        // concurrent strict try_admit_tune sees BUSY with no metadata change.
+        // The marker records this exact lease instance with revision 0 so a
+        // stale admitted ticket cannot clear it.
+        set_operation_locked(slot, ReceiverTuneOperation::tuning, lease.instance, 0U);
     }
+    const auto clear_direct_operation = [&]() noexcept {
+        std::lock_guard<std::mutex> lock(mutex_);
+        // Only clear our own tuning marker: a cleanup installed by a
+        // concurrent release during the finite tune must survive.
+        clear_operation_if_owner_locked(slot, ReceiverTuneOperation::tuning,
+                                        lease.instance, 0U);
+    };
     if (lease.stream_state == StreamState::armed ||
         lease.stream_state == StreamState::attaching ||
         lease.stream_state == StreamState::active ||
-        lease.stream_state == StreamState::revoked)
+        lease.stream_state == StreamState::revoked) {
+        clear_direct_operation();
         return Result<void>::failure(Error::BUSY);
+    }
     const ReceiverId receiver = receivers_[slot];
-    if (!backend_.supports(receiver, request.system))
+    if (!backend_.supports(receiver, request.system)) {
+        clear_direct_operation();
         return Result<void>::failure(Error::INVALID_ARGUMENT);
+    }
     // The decision travels with this request; nothing else is consulted.
-    if (request.validation != Error::OK)
-        return Result<void>::failure(request.validation);
+    if (request.validation != Error::OK) {
+        const Error decision = request.validation;
+        clear_direct_operation();
+        return Result<void>::failure(decision);
+    }
 
+    // Legacy direct compatibility entrance: it keeps the old virtual supports
+    // query above and the old post-power timing origin inside the helper.
+    const auto result = run_tune(slot, request, false, AdmittedTune{});
+    clear_direct_operation();
+    return result;
+}
+
+Result<void> ReceiverEngine::run_tune(std::size_t slot, const TuneRequest& request,
+                                      bool admitted, const AdmittedTune& ticket) noexcept
+{
+    const ReceiverId receiver = receivers_[slot];
+    const std::uint64_t accepted_at_ms =
+        admitted ? ticket.accepted_at_ms : 0U;
+    const std::uint64_t revision = admitted ? ticket.tune_revision : 0U;
+    if (admitted) {
+        // An already expired ticket performs no power or front-end I/O.
+        if (clock_.monotonic_ms() - accepted_at_ms >= request.timeout_ms)
+            return Result<void>::failure(Error::TIMEOUT);
+    }
     {
+        // Pre-power registry transition: after any initial clock delay or
+        // registry wait, recheck the exact ticket/owner and deadline before
+        // publishing the leased state or starting power.  An unstarted
+        // cancelled/expired task issues no power/frontend I/O.
         std::lock_guard<std::mutex> lock(mutex_);
+        if (admitted) {
+            const bool current = pending_[slot].valid &&
+                                 pending_[slot].ticket.tune_revision == revision &&
+                                 ticket_current_locked(pending_[slot].ticket);
+            if (!current) return Result<void>::failure(Error::NOT_FOUND);
+            if (clock_.monotonic_ms() - accepted_at_ms >= request.timeout_ms)
+                return Result<void>::failure(Error::TIMEOUT);
+        }
         set_state_locked(slot, ReceiverState::leased);
     }
     const auto power_prepared = backend_.begin_tune_power(
@@ -394,13 +809,37 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
         }
         return Result<void>::failure(primary);
     };
-    const std::uint64_t start_ms = clock_.monotonic_ms();
+    // Admitted-only stage boundary gate.  It rechecks the exact ticket and the
+    // remaining budget after a returned stage and before starting the next
+    // one.  It reads only owned metadata and performs no backend/OS/worker
+    // callback.  The legacy direct entrance is a no-op here.
+    const auto stage_gate = [&]() noexcept -> Error {
+        if (!admitted) return Error::OK;
+        std::lock_guard<std::mutex> lock(mutex_);
+        const bool current = pending_[slot].valid &&
+                             pending_[slot].ticket.tune_revision == revision &&
+                             ticket_current_locked(pending_[slot].ticket);
+        if (!current) return Error::NOT_FOUND;
+        // Sample the deadline while holding the registry lock so registry
+        // acquisition time is accounted for.
+        return clock_.monotonic_ms() - accepted_at_ms >= request.timeout_ms
+                   ? Error::TIMEOUT
+                   : Error::OK;
+    };
+    // The admitted deadline starts at request acceptance; the legacy direct
+    // entrance keeps its post-power origin.
+    const std::uint64_t start_ms = admitted ? accepted_at_ms : clock_.monotonic_ms();
     const auto remaining_before_tune = [&]() noexcept -> std::uint32_t {
         const std::uint64_t elapsed = clock_.monotonic_ms() - start_ms;
         return elapsed >= request.timeout_ms
             ? 0U
             : static_cast<std::uint32_t>(request.timeout_ms - elapsed);
     };
+    // After returned power preparation, before the first frontend stage.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
     const bool select_before_tune = request.system == ReceiverSystem::satellite &&
                                     backend_.selects_satellite_stream_before_tune();
     const auto select_satellite_stream = [&](std::uint32_t remaining) noexcept {
@@ -416,6 +855,14 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
         const auto selected = select_satellite_stream(select_timeout);
         if (!selected)
             return fail_after_power(selected.error());
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
+    // Recompute the relative timeout after the last potentially blocking gate
+    // so registry-wait time is consumed even when a positive budget remains.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
     }
     const std::uint32_t tune_timeout = remaining_before_tune();
     if (tune_timeout == 0U)
@@ -424,14 +871,26 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
                                      tune_timeout);
     if (!tuned)
         return fail_after_power(tuned.error());
+    // A cancellation/budget observed after the returned frontend tune stops
+    // the next stage without starting further hardware I/O.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
 
     // Keep this origin separate from start_ms: the settle interval starts
     // when the lock check begins, after the frontend tune has completed.
     const std::uint64_t lock_poll_start_ms = clock_.monotonic_ms();
-    const auto locked = poll_lock(slot, request.system, start_ms, request.timeout_ms);
+    const auto locked = poll_lock(slot, request.system, start_ms, request.timeout_ms,
+                                  admitted, ticket);
     if (!locked) return fail_after_power(locked.error());
     if (!locked.value())
         return fail_after_power(Error::TIMEOUT);
+    // poll_lock can return true with a late or revoked ticket.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
 
     const std::uint32_t settle_after_lock_ms =
         backend_.lock_settle_ms(receiver, request.system);
@@ -453,6 +912,12 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
         }
     }
 
+    // After settle (which may oversleep) and before the next stage.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
+
     if (request.system == ReceiverSystem::satellite && !select_before_tune) {
         const std::uint64_t elapsed = clock_.monotonic_ms() - start_ms;
         if (elapsed >= request.timeout_ms)
@@ -462,15 +927,82 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
         const auto selected = select_satellite_stream(remaining);
         if (!selected)
             return fail_after_power(selected.error());
-        if (clock_.monotonic_ms() - start_ms >= request.timeout_ms)
+        // Preserve the legacy direct post-select deadline check exactly.
+        if (!admitted &&
+            clock_.monotonic_ms() - start_ms >= request.timeout_ms)
             return fail_after_power(Error::TIMEOUT);
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
+    }
+
+    // Immediate pre-commit gate: a cancellation or exhausted budget found here
+    // is still a pending-transaction failure, so rollback is valid.
+    {
+        const Error gate = stage_gate();
+        if (gate != Error::OK) return fail_after_power(gate);
     }
 
     const auto committed = backend_.commit_tune_power(receiver);
     if (!committed) return fail_after_power(committed.error());
 
+    if (admitted) {
+        // The final exact-ticket/owner/revision and deadline decision and the
+        // success/history publication happen in ONE registry critical section.
+        // The deadline is sampled after acquiring the lock, so registry
+        // acquisition time is accounted for, and a revocation or release that
+        // linearized in the interim cannot be overwritten by a stale success.
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!ticket_owns_slot_locked(slot, ticket)) {
+            // A newer admission owns the slot; leave it completely untouched.
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
+        const bool current = pending_[slot].valid &&
+                             pending_[slot].ticket.tune_revision == revision &&
+                             ticket_current_locked(pending_[slot].ticket);
+        const bool late =
+            clock_.monotonic_ms() - accepted_at_ms >= request.timeout_ms;
+        if (!current || late) {
+            // The power transaction was already consumed by a successful
+            // commit.  Ordinary pending rollback is invalid (Q3/MLT reject it)
+            // or a no-op (A), so it must not be called or interpreted as
+            // compensation.  Quarantine the receiver: preserve the primary
+            // TIMEOUT/owner-cancellation error, keep current invalid, retain
+            // the lease's power reference, and let the existing exact RELEASE
+            // or owner cleanup perform the normal close.
+            set_state_locked(slot, ReceiverState::error);
+            complete_tune_locked(slot, ticket);
+            return Result<void>::failure(current ? Error::TIMEOUT : Error::NOT_FOUND);
+        }
+        // receiver_lock keeps this lease in place since it was copied above.
+        leases_[slot].system = request.system;
+        // A successful tune re-arms a lease whose previous stream ended:
+        // STOP leaves the lease consumed, and a new stream start must be
+        // possible again without release/acquire.  The attach token stays the
+        // one issued at acquire; its validity is per arm.
+        if (leases_[slot].stream_state == StreamState::consumed)
+            leases_[slot].stream_state = StreamState::none;
+        TuneMetadata& metadata = tune_metadata_[slot];
+        metadata.revision = revision;
+        metadata.current = tune_record(request);
+        metadata.current_revision = revision;
+        metadata.current_valid = true;
+        metadata.last_successful = tune_record(request);
+        metadata.last_successful_revision = revision;
+        metadata.last_successful_valid = true;
+        complete_tune_locked(slot, ticket);
+        set_state_locked(slot, ReceiverState::tuned);
+        return Result<void>::success();
+    }
+
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // Strict cleanup exclusion: if logical owner cleanup linearized during
+        // the finite direct tune, do not publish a reusable/`tuned` success.
+        // The cleanup marker and the lease stay in place for the exact release.
+        // Nonstrict legacy direct behaviour is retained unchanged.
+        if (strict_enabled_ &&
+            operations_[slot] == ReceiverTuneOperation::cleanup)
+            return Result<void>::failure(Error::NOT_FOUND);
         // receiver_lock keeps this lease in place since it was copied above.
         leases_[slot].system = request.system;
         // A successful tune re-arms a lease whose previous stream ended:
@@ -494,6 +1026,10 @@ Result<void> ReceiverEngine::start_stream(std::uint64_t client_id,
     if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
     Lease& lease = leases_[static_cast<std::size_t>(index)];
     if (states_[lease.slot] != ReceiverState::tuned)
+        return Result<void>::failure(Error::NOT_READY);
+    // A strict receiver under logical cleanup must not arm a new stream.
+    if (strict_enabled_ &&
+        operations_[lease.slot] != ReceiverTuneOperation::idle)
         return Result<void>::failure(Error::NOT_READY);
     if (lease.stream_state != StreamState::none)
         return Result<void>::failure(Error::BUSY);
@@ -539,6 +1075,9 @@ Result<Attachment> ReceiverEngine::attach_stream(std::uint64_t lease_id,
         }
         if (index < 0) return Result<Attachment>::failure(Error::NOT_FOUND);
         Lease& lease = leases_[static_cast<std::size_t>(index)];
+        // A strict receiver under logical cleanup must not complete ATTACH.
+        if (strict_enabled_ && operations_[slot] != ReceiverTuneOperation::idle)
+            return Result<Attachment>::failure(Error::NOT_READY);
         if (lease.slot != slot || lease.stream_state != StreamState::armed)
             return Result<Attachment>::failure(
                 lease.stream_state == StreamState::none
@@ -878,8 +1417,14 @@ Result<void> ReceiverEngine::revoke_stream(std::uint64_t client_id,
 Result<ReceiverEngineStatus> ReceiverEngine::status() const noexcept
 {
     std::lock_guard<std::mutex> lock(mutex_);
-    return Result<ReceiverEngineStatus>::success(
-        ReceiverEngineStatus{generation_, receiver_count_, receivers_, states_});
+    ReceiverEngineStatus status{};
+    status.generation = generation_;
+    status.receiver_count = receiver_count_;
+    status.receivers = receivers_;
+    status.states = states_;
+    status.operations = operations_;
+    status.tune_metadata = tune_metadata_;
+    return Result<ReceiverEngineStatus>::success(status);
 }
 
 Result<void> ReceiverEngine::cleanup_client(std::uint64_t client_id) noexcept
@@ -898,6 +1443,12 @@ Result<void> ReceiverEngine::cleanup_client(std::uint64_t client_id) noexcept
                 lease.stream_state == StreamState::attaching ||
                 lease.stream_state == StreamState::active)
                 lease.stream_state = StreamState::revoked;
+            // Revoke every targeted pending ticket and invalidate current in
+            // this first metadata phase, before any blocking receiver cleanup.
+            clear_pending_locked(slot);
+            invalidate_current_locked(slot);
+            set_operation_locked(slot, ReceiverTuneOperation::cleanup,
+                                 lease.instance, 0U);
         }
     }
     Error first = Error::OK;
@@ -932,6 +1483,12 @@ Result<void> ReceiverEngine::cleanup_all() noexcept
                 lease.stream_state == StreamState::attaching ||
                 lease.stream_state == StreamState::active)
                 lease.stream_state = StreamState::revoked;
+            // Revoke every pending ticket and invalidate current before the
+            // first potentially blocking backend operation.
+            clear_pending_locked(slot);
+            invalidate_current_locked(slot);
+            set_operation_locked(slot, ReceiverTuneOperation::cleanup,
+                                 lease.instance, 0U);
         }
     }
     Error first = Error::OK;
