@@ -2,6 +2,7 @@
 #ifndef DTV_USERLAND_DETAIL_RECEIVER_ENGINE_H
 #define DTV_USERLAND_DETAIL_RECEIVER_ENGINE_H
 
+#include "dtv/userland/detail/stream_session_types.h"
 #include "dtv/userland/error.h"
 #include "dtv/userland/records.h"
 
@@ -21,24 +22,8 @@
 // declarations may change without notice and are not a stable API.
 namespace dtv::userland::detail {
 
-// Stable receiver identity chosen by the consumer.  It is independent of the
-// storage slot that holds the receiver.
-using ReceiverId = std::uint16_t;
-
 // Resource ceiling of the fixed slot table, not a receiver ID range.
 inline constexpr std::size_t kReceiverEngineCapacity = 8U;
-
-inline constexpr std::size_t kReceiverTokenLength = 16U;
-using ReceiverToken = std::array<std::uint8_t, kReceiverTokenLength>;
-
-// The numbering matches the legacy PX4 values so that a facade may pass any
-// other legacy value through unchanged to backend queries and identity
-// comparisons.  Request validation rejects such values before they are acted
-// on.
-enum class ReceiverSystem : std::uint8_t {
-    terrestrial = 1U,
-    satellite = 2U,
-};
 
 enum class ReceiverState : std::uint8_t {
     free,
@@ -47,9 +32,6 @@ enum class ReceiverState : std::uint8_t {
     streaming,
     error,
 };
-
-// Terminal code a stream reports in its final snapshot after transport loss.
-inline constexpr std::uint8_t kStreamTerminalDisconnected = 6U;
 
 // Common frequency scalar bound: requested Hz is 1..2^53-1.
 inline constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
@@ -223,31 +205,6 @@ struct AdmittedTune final {
 struct AcquireResult final {
     std::uint64_t lease_id = 0U;
     ReceiverToken token{};
-};
-
-struct Attachment final {
-    std::uint64_t owner_client_id = 0U;
-    std::uint64_t lease_id = 0U;
-    std::uint64_t attachment_id = 0U;
-    ReceiverId receiver = 0U;
-    ReceiverSystem system = ReceiverSystem::terrestrial;
-    ReceiverToken token{};
-};
-
-struct StreamCounters final {
-    std::uint64_t packets = 0U;
-    std::uint64_t bytes = 0U;
-    std::uint64_t sync_errors = 0U;
-    std::uint64_t tei_packets = 0U;
-    std::uint64_t continuity_errors = 0U;
-    std::uint64_t queue_drops = 0U;
-    std::uint64_t usb_errors = 0U;
-    std::uint64_t empty_intervals = 0U;
-};
-
-struct StreamFinalSnapshot final {
-    StreamCounters counters{};
-    std::uint8_t terminal = 0U;
 };
 
 struct ReceiverEngineStatus final {

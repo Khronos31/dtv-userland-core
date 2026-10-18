@@ -14,6 +14,10 @@ option(DTV_USERLAND_BUILD_TESTING "Build DTV userland core tests" ${_dtv_userlan
 # requires Threads.
 option(DTV_USERLAND_BUILD_RECEIVER "Build the internal receiver lifecycle engine" OFF)
 option(DTV_USERLAND_BUILD_CARD "Build the internal card ownership engine" OFF)
+# The internal packet-session storage is opt-in and, like the receiver engine,
+# is one of the only targets that requires Threads.  It does not depend on the
+# receiver engine, so a capture-only install never needs the receiver library.
+option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -118,6 +122,31 @@ if(DTV_USERLAND_BUILD_RECEIVER)
     endif()
 endif()
 
+if(DTV_USERLAND_BUILD_CAPTURE)
+    find_package(Threads REQUIRED)
+    add_library(dtv_userland_capture STATIC src/packet_stream_session.cpp)
+    add_library(dtv::capture ALIAS dtv_userland_capture)
+    set_target_properties(dtv_userland_capture PROPERTIES
+        EXPORT_NAME capture
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_capture PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_capture PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    # The capture component uses the shared neutral session types and the
+    # error/result foundation only; the disabled receiver engine is not a
+    # dependency.
+    target_link_libraries(dtv_userland_capture PUBLIC dtv::core Threads::Threads)
+    if(MSVC)
+        target_compile_options(dtv_userland_capture PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_capture PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
 if(DTV_USERLAND_BUILD_CARD)
     add_library(dtv_userland_card INTERFACE)
     add_library(dtv::card ALIAS dtv_userland_card)
@@ -135,29 +164,36 @@ install(TARGETS dtv_userland_core dtv_userland_wire dtv_userland_identity dtv_us
 if(DTV_USERLAND_BUILD_CARD)
     install(TARGETS dtv_userland_card EXPORT dtv_userland_coreTargets)
 endif()
-if(DTV_USERLAND_BUILD_RECEIVER AND DTV_USERLAND_BUILD_CARD)
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
-elseif(DTV_USERLAND_BUILD_RECEIVER)
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        PATTERN "card_ownership_engine.h" EXCLUDE
-        PATTERN "card_ownership_engine.tpp" EXCLUDE)
-elseif(DTV_USERLAND_BUILD_CARD)
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        PATTERN "detail" EXCLUDE)
+# The top-level headers are always installed.  The detail headers are selected
+# so a disabled engine's header never leaks into a consumer: the receiver header
+# only when the receiver is enabled, the capture header only when capture is
+# enabled, and the shared neutral session type header when either needs it.
+install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
+    PATTERN "detail" EXCLUDE)
+# The shared identity/wire internals are always installed.
+install(FILES
+    include/dtv/userland/detail/text.h
+    include/dtv/userland/detail/sha256.h
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+if(DTV_USERLAND_BUILD_RECEIVER OR DTV_USERLAND_BUILD_CAPTURE)
     install(FILES
-        include/dtv/userland/detail/text.h
-        include/dtv/userland/detail/sha256.h
+        include/dtv/userland/detail/stream_session_types.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+endif()
+if(DTV_USERLAND_BUILD_RECEIVER)
+    install(FILES
+        include/dtv/userland/detail/receiver_engine.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+endif()
+if(DTV_USERLAND_BUILD_CAPTURE)
+    install(FILES
+        include/dtv/userland/detail/packet_stream_session.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+endif()
+if(DTV_USERLAND_BUILD_CARD)
+    install(FILES
         include/dtv/userland/detail/card_ownership_engine.h
         include/dtv/userland/detail/card_ownership_engine.tpp
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
-else()
-    install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-        PATTERN "detail" EXCLUDE)
-    # The shared identity/wire internals are always installed even though the
-    # optional receiver detail header is excluded above.
-    install(FILES
-        include/dtv/userland/detail/text.h
-        include/dtv/userland/detail/sha256.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
 endif()
 install(EXPORT dtv_userland_coreTargets
@@ -172,6 +208,17 @@ if(DTV_USERLAND_BUILD_RECEIVER)
         ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
     install(EXPORT dtv_userland_receiverTargets
         FILE dtv_userland_receiverTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+endif()
+if(DTV_USERLAND_BUILD_CAPTURE)
+    # Loaded only for find_package(... COMPONENTS capture), which also finds
+    # Threads for the consumer.
+    install(TARGETS dtv_userland_capture
+        EXPORT dtv_userland_captureTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_captureTargets
+        FILE dtv_userland_captureTargets.cmake
         NAMESPACE dtv::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
 endif()
@@ -243,6 +290,16 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(receiver_hz_tests PRIVATE dtv::receiver)
         add_test(NAME receiver_hz_tests COMMAND receiver_hz_tests)
         set_tests_properties(receiver_hz_tests PROPERTIES TIMEOUT 120)
+    endif()
+
+    if(DTV_USERLAND_BUILD_CAPTURE)
+        add_executable(packet_stream_session_tests
+            tests/packet_stream_session_tests.cpp)
+        target_link_libraries(packet_stream_session_tests PRIVATE dtv::capture)
+        add_test(NAME packet_stream_session_tests
+            COMMAND packet_stream_session_tests)
+        # Outer bound behind the tests' own finite waits.
+        set_tests_properties(packet_stream_session_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_CARD)

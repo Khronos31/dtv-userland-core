@@ -220,5 +220,38 @@
     ],
     "scope": "Pure C++17 channel/typed-Hz/system/selection resolution using the existing wire System and Selection enums. No CLI option parser, repeated-option policy, wire request construction, backend capability checks, hardware quantization, product endpoint, or C ABI.",
     "new_files": "include/dtv/userland/tuning.h, src/tuning.cpp, tests/tuning_tests.cpp, tests/consumer/tuning/, tests/consumer/missing_receiver/ and docs/tuning.md are independently written and carry MIT."
+  },
+  "packet_session": {
+    "method": "Narrow-range extraction of the verified generic PX4 packet-session storage/read/drain/final expressions into the internal capture component, under the recorded independent-code policy. Only the expressions listed under moved_scope are in the destinations; the product keeps its GPL bridge, demux, hardware, startup, continuity, and producer stop/join policy in userland/src/q3u4_stream.cpp, which now composes the common state.",
+    "authority": [
+      "agent-workspace branch design/independent-code-policy.md",
+      "D2a executable extraction specification, shared/implementation/packet-session-spec.md",
+      "Expression provenance closure, shared/implementation/capture-common-origin-review.md (independent-implementation candidate for the selected ranges)",
+      "D2 preparation, shared/implementation/capture-common-preparation.md",
+      "Decision critique and incorporated reader-incarnation exception, shared/implementation/packet-session-decision-critique.md"
+    ],
+    "source_files": [
+      {
+        "path": "userland/src/q3u4_stream.cpp",
+        "sha256": "8952d3c43f896ca24ea851cc90316f2b4ea0966b32f363926b6cdc4cbc67b67f",
+        "destination_path": "src/packet_stream_session.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The independently reviewed generic expressions at fixed lines 100-108 (whole compound attachment equality, hash 43ccce9e13da668d6ebe07df015f0ebd1f4aa27ddb5dd9d799af1d945d2428af); 121-134 (generic queue/read/final state fields, 13b44fcebd616978cca61b0f44da52bb73907463cba85bf1b91842bf2d6ec8ed); 466-488 (BUSY check, checked allocation, session reset and current identity, c3c14d5be6f248c8b8515ef06cc64249abd76837cd2b8db19328c57bd3228f57); 526-543 (detach snapshot/invalidation/drain/wake, 52c3844ec5875af22051131e311c8e88f161e3269eb40b809265725c02859c49); 558-563 (post-cleanup exact-identity final amendment, 482c4a201dfe330d51944028644c18f5c9cb000b805eae9cb51b480fbd8d75cf); 580-581 (read output pointer/alignment validation glue, b212ec4952b12056ffaefb7e7ff66d29f82808475297986b9ead7532be0d0713); 585-630 (read lock/identity/wait/EOF/two-span wrap/result, 7385055d1309823f64d1bd257969bc64d209e0521fc02e83ff3dd4ab8c9fd76a); 638-641 (active counter query, fdc8de41bc37d6921f1ce7442b1e28749aac40128cd32a40bb9e1696f4b7b998); 650-654 (exact-identity retained final query, 7085beca16b89ad8bce4b892e6961df064c85338325ffed0da7c268f6f898e30); 662-669 (exact-identity final release/queue retirement, 63d38471d3886eda713981b35a280dd414c991be015892eb5e0d0d58f18448aa); 694-697 (active terminal query, abd46daac07ec2b521987c51b2de3d98cb3047a70c0a46ffc06a97735e7d31af); 807-818 (packet accounting before overflow rejection, append and wake, ebf72e2aa9bb59a279b4c7bde51bdba82fe374f0168316693e49500deca4bc25); 925-932 (terminal mutation/wake, fb03d629ad76b49174e7b50db3832ed81a20da5f4a52745520ebb8ed3d21c2fa); 939-943 (active terminal assignment/wake, 4e248c84ad78f97677f4f6674255be091f7855565fa59019b96680592e575252); 966-980 (shutdown final snapshot and queue retirement, f4e8ffdd7a88b5919942cf1da78cb36a4a901fd64949956be28b5a6578d82c9c); and 1001-1004 (retained final terminal amendment, 35ec3e9af27371ac85bfc70209f6527c4b24664d89ca888ab464d0b2f82a9bfe).",
+        "excluded_scope": "Product facade declarations, receiver/system/bridge validation and lifecycle locks (444-464, 489-511), bridge locking (514-524), attached-count/last-owner producer stop (545-573), tagged receiver routing, startup stabilization, continuity/TEI observation and TEI predicates (770-806, 828-918), transport cancel/stop, USB error mapping and enclosure shutdown, MLT layout, PSB suppression and the public factory/inheritance header. Hardware, demux, and producer-stop ownership stay GPL."
+      },
+      {
+        "path": "userland/include/px4/q3u4_stream.h",
+        "sha256": "6b138782e51868a00d7ee09b8461866d2d2478b1a8ab9e46b5e4d50fc08054d4",
+        "destination_path": "include/dtv/userland/detail/packet_stream_session.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Only the neutral packet-session state/operation shape behind the product facade (queue, capacity/head/count, active/draining identities, retained-final fields, terminal/counters, one mutex/condition variable and the read/drain/final operations). The public product class, its TunerService aliases/inheritance and factories stay GPL.",
+        "excluded_scope": "TunerAttachment/TunerStreamControl inheritance, kMaxReadBytes ceiling, receiver topology, test-access macro and all hardware/layout declarations. Receiver validity and the legacy read ceiling remain product inputs."
+      }
+    ],
+    "neutral_types": "Attachment, StreamCounters, StreamFinalSnapshot, ReceiverId, ReceiverToken, and ReceiverSystem are the unchanged neutral declarations split from include/dtv/userland/detail/receiver_engine.h into include/dtv/userland/detail/stream_session_types.h so a capture-only build does not depend on the disabled receiver header. StreamTerminal and StreamReadResult preserve the legacy PX4 numbering/field set. Declaration names, layout, defaults, and enum values are preserved and old receiver source compatibility is retained.",
+    "incarnation_exception": "The sole approved behavior exception is a session-local nonwrapping u64 incarnation. It is incremented under the same session mutex at admitted logical attachment publication (including a publication whose later bridge startup fails) and never on validation/BUSY/allocation rejection. A read captures it when it first validates the attachment, includes the mismatch in its wait predicate, and checks it immediately after wait/reacquisition before any packet, counter, draining, or final access, returning NOT_FOUND without touching the replacement session. A same-incarnation empty detach keeps the old already-validated reader EOF. Incarnation exhaustion rejects the next logical attach with RESOURCE_LIMIT after the external validation/BUSY checks and before allocating or mutating state; there is no wrap, global shutdown, or physical reset. This is not the old source expression and has no existing oracle.",
+    "new_files": "include/dtv/userland/detail/stream_session_types.h, include/dtv/userland/detail/packet_stream_session.h, src/packet_stream_session.cpp, tests/packet_stream_session_tests.cpp, tests/consumer/capture/, tests/consumer/capture_receiver/, tests/consumer/missing_capture/ and the capture CMake/install wiring are new and carry MIT. The product adapter changes and the instrumented fixed-old test copy remain GPL-2.0-only in px4-userland."
   }
 }
