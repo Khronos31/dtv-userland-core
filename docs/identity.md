@@ -1,44 +1,63 @@
-# Portable identity codecs (I1)
+# ポータブル識別子コーデック (dtv::identity)
 
-`dtv::identity` (`include/dtv/userland/identity.h`, `src/identity.cpp`) implements the adopted
-portable identity representation once, without OS discovery, security or daemon cutover. It is
-pure and bounded: no allocation, no exceptions/RTTI, no USB/OS state. Physical discovery, serial
-trust/uniqueness, permissions/ACL and USB FD ownership stay in the OS adapters.
+本ドキュメントは、`dtv_userland_identity` ターゲット（ヘッダー: `include/dtv/userland/identity.h`、実装: `src/identity.cpp`）が提供するポータブルなデバイス識別子表現およびコーデック仕様を解説する。
 
-## Device selector
+本モジュールは純粋関数かつ有界であり、動的メモリ確保、例外、RTTI、および OS/USB 状態への依存を持たない。物理的なデバイス検出、シリアル番号の信頼性・一意性判定、アクセス権限（ACL）、および USB ファイルディスクリプタの所有権管理は OS アダプタ側の責務である。
 
-`parse_device_selector` accepts the adopted grammar:
+---
 
-- `serial:<string>`: one nonempty strict UTF-8 suffix up to 512 bytes, no NUL or ASCII control.
-  Spaces, colons, commas and non-ASCII are serial bytes; there is no trim, percent-decode,
-  normalization or case fold.
-- `usb:<path>[,<path>...]`: 1..8 paths of `bus-port[.port...]`, each a positive ASCII decimal
-  (no leading zeros, u32 range) at most 64 bytes. The whole suffix is bounded by a shared
-  `kMaxFunctions*kMaxUsbPathBytes + (kMaxFunctions-1)` before the delimiter scan, so an
-  overlong input is rejected without scanning. Duplicate paths are rejected before the canonical
-  ASCII byte sort; paths are never silently deduplicated. The order is the path order, not the
-  input function-role numbering.
+## 1. デバイスセレクタ構文解析 (`parse_device_selector`)
 
-Parsing proves syntax only. It never proves enclosure grouping or OS location existence.
+デバイスを指定するための文字列セレクタを構文解析する。以下の 2 つの文法を受理する：
 
-## Instance
+### 1.1 シリアルセレクタ (`serial:<string>`)
+- プレフィックス `serial:` に続く 1 バイト以上の厳密な UTF-8 文字列（最大 512 バイト）。
+- NUL バイト（`0x00`）および ASCII 制御文字（`0x01`〜`0x1F`, `0x7F`）は拒否される。
+- 空白文字、コロン、カンマ、および非 ASCII 文字はシリアル番号の構成バイトとしてそのまま維持される。トリミング、パーセントエンコーディング復号、正規化、および大文字小文字の変換は行わない。
 
-`canonicalize_instance` accepts 1..64 ASCII characters, first alphanumeric, rest
-alphanumeric/underscore/dot/hyphen, lowercased for canonical use on every OS. It rejects a
-terminal dot and the reserved first-dot stems `con/prn/aux/nul/com1..com9/lpt1..lpt9`.
+### 1.2 USB トポロジセレクタ (`usb:<path>[,<path>...]`)
+- プレフィックス `usb:` に続く 1〜8 個のカンマ区切りパスリスト。
+- 各パスは `bus-port[.port...]` 形式であり、各要素は正の ASCII 10 進数（先頭ゼロ禁止、32 ビット符号なし整数範囲）、1 パスあたり最大 64 バイト。
+- 区切り文字の走査前に、共有上限値 `kMaxFunctions * kMaxUsbPathBytes + (kMaxFunctions - 1)` による全体長チェックを行い、超過入力を即座に拒否する。
+- 重複するパスが含まれている場合は拒否される（暗黙の重複排除は行わない）。
+- **パスリストのソート順序**:
+  パスリストは、各パストークンの `std::string_view` による**カノニカルな ASCII 辞書順（byte 順）**で昇順ソートされて保持される。
+  - これは辞書順比較であるため、例えば `1-10` は `1-2` よりも前に配置される（`'-'` の次の文字 `'1'` と `'2'` の ASCII 比較による）。
+  - この順序は入力パスの指定順序に依存しない決定論的な正準バイト列（canonical encoding）を生成するための直列化規則であり、ポートの数値的な昇順、物理的な配線順、あるいはデバイスの機能ロール番号順序を表すものではない。
 
-## Descriptors
+> **注意**: セレクタの解析は構文の妥当性のみを検証するものであり、同一筐体への所属や OS 上の物理的な存在を保証するものではない。
 
-`decode_langid_first` and `decode_string_descriptor` use the exact actual-transfer span: the
-declared `bLength` must equal the supplied span, the type must be 3, and lengths must be even.
-The LANGID table needs at least one language. The string decoder performs strict UTF-16LE to
-lossless UTF-8, rejecting isolated or invalid surrogate pairs, and never inserts replacement
-characters. An empty decoded string is valid here; `make_serial_selector` applies the serial
-rules (nonempty, no NUL/control, at most 512 bytes) separately.
+---
 
-## Auto-identity
+## 2. インスタンス名の正規化 (`canonicalize_instance`)
 
-`encode_identity` writes the versioned little-endian representation:
+デーモンインスタンス名文字列をカノニカル形式へ変換・検証する。
+- 長さは 1〜64 文字の ASCII 文字列。
+- 先頭文字は英数字（`0-9`, `a-z`, `A-Z`）。以降の文字は英数字、アンダースコア（`_`）、ドット（`.`）、またはハイフン（`-`）。
+- すべての OS で統一して扱えるよう、英大文字は小文字へ正規化される。
+- 末尾のドット、および Windows 等で予約語となる先頭ドット語幹（`con`, `prn`, `aux`, `nul`, `com1`〜`com9`, `lpt1`〜`lpt9`）は拒否される。
+
+---
+
+## 3. USB ディスクリプタの復号
+
+### 3.1 LANGID テーブルの復号 (`decode_langid_first`)
+USB コントロール転送で取得したバイナリから最初の言語 ID（LANGID）を復号する。
+- 転送バッファの長さと `bLength` が一致していること、`bDescriptorType` が 3（STRING）であること、および長さが偶数であることを検証する。
+- 少なくとも 1 つの LANGID が含まれている必要がある。
+
+### 3.2 文字列ディスクリプタの復号 (`decode_string_descriptor`)
+指定された LANGID に基づいて取得した USB 文字列ディスクリプタを復号する。
+- 厳密な UTF-16LE から損失のない UTF-8 文字列へ変換する。
+- 孤立サロゲートや不正なサロゲートペアは拒否され、置換文字（`U+FFFD` 等）を勝手に補完することはない。
+- 空文字列も復号結果としては許容される（空文字をシリアル番号として受け入れるか否かは `make_serial_selector` 側で判定する）。
+
+---
+
+## 4. 自動識別子符号化 (`DTVI` フォーマット)
+
+### 4.1 バイナリ表現 (`encode_identity`)
+デバイスの製品種別とセレクタから、バージョン管理されたリトルエンディアン形式のバイナリ識別子を生成する：
 
 ```
 4 bytes ASCII "DTVI"
@@ -48,30 +67,27 @@ u8 identity_kind                # 1 = serial, 2 = usb-topology
 kind=1: LP(serial UTF-8)
 kind=2: u32 path_count; LP(canonical ASCII path) * path_count
 ```
+※ `LP(x)` は 4 バイト（u32）の長さプレフィックスに続く UTF-8 バイト列を示す。
+種別（kind）は 1（シリアル）または 2（トポロジ）のみが受理され、それ以外の値は出力バッファへの書き込み前に拒否される。
 
-`LP(x)` is a u32 byte length followed by the bytes. Only kinds 1 and 2 are accepted; any other
-discriminator (0/3/255) is rejected before any output byte is written, by `encode_identity`,
-`encode_identity_bytes` and `auto_instance` alike.
+### 4.2 セレクタ解決 (`resolve_selector`)
+製品スラグと解析済みセレクタから、検証済みのカノニカル識別子構造体を構築する。不正な製品名、未定義のセレクタ種別、不正なシリアル、および不正なトポロジはエラーとなる。
 
-`resolve_selector(product, selector)` is a validated conversion: it rejects an undefined
-`SelectorKind`, an invalid product, a malformed serial and an invalid topology, reuses the same
-serial/topology validators as the encoder (duplicate rejection and canonical ASCII sorting), and
-returns the validated resolved value. It does not establish enclosure grouping, OS presence or
-serial trust.
+### 4.3 自動インスタンス名の導出 (`auto_instance`)
+符号化された `DTVI` 正準バイナリの SHA-256 ダイジェストを計算し、先頭 16 バイト（128 ビット）を 32 桁の小文字 16 進数文字列に変換して、プレフィックス `auto-` を付与した文字列（計 37 文字：`auto-<32hex>`）を生成する。
+- **決定論的な命名**: トポロジパスはカノニカルな ASCII 昇順で直列化されるため、セレクタの入力順序に依存せず同一の正準エンコーディングから決定論的な名前が得られる。
+- **保証の範囲と境界**: 本機能が提供するのは決定論的な正準化と名前生成であり、ハッシュの一意性（128 ビット短縮ダイジェストにおける数学的な衝突の不存在）を保証するものではない。また、同一・共有シリアル番号を持つ複数デバイスの衝突回避や、実際の物理個体・OS デバイスノードとの対応づけ（物理個体の一意性保証）はライブラリ単体では行わず、上位の OS / udev アダプタ側の責務である。
+- **フォールバックの排除**: モデル名、VID:PID、受信機数、あるいは乱数によるフォールバックは行わない。
 
-`auto_instance` returns `auto-` plus the first 16 SHA-256 bytes of the encoded identity as 32
-lowercase hex characters. Product, kind or identity changes produce independent names; topology is
-canonical ASCII-sorted. There is no model/VID:PID/receiver-count/random fallback.
+---
 
-## Shared internals
+## 5. 共有内部モジュール
 
-`include/dtv/userland/detail/text.h` holds the single shared capacity definitions (8 functions,
-64-byte paths, 512-byte serial, 64-byte instance) and the strict UTF-8 validator used by both the
-wire records and the identity codecs; the wire byte set is unchanged by this extraction.
-`include/dtv/userland/detail/sha256.h` is the neutral SHA-256 class extracted under the standing
-independent-code policy (class-body sha256 `4117bc2b38ac968a5b1519a3e30fc5224aa94f15ddfb02a8b38d34590a35279b`).
+- `dtv/userland/detail/text.h`: 最大機能数（8）、最大 USB パス長（64 バイト）、最大シリアル長（512 バイト）、最大インスタンス長（64 バイト）の共通定数、および厳密 UTF-8 バリデータを定義。ワイヤ層レコードと共有される。
+- `dtv/userland/detail/sha256.h`: 独立コードポリシーに基づいて導入されたニュートラルな SHA-256 計算クラス。
 
-## Not in this increment
+---
 
-Physical discovery, serial trust/uniqueness decisions, OS string fetching, Windows argv
-conversion, permissions/ACL, USB FD ownership, and any CLI/daemon/JSON/endpoint cutover.
+## 6. 本モジュールに含まれない境界
+
+OS レベルでの物理デバイス列挙、シリアル番号の信頼性判定、OS からの文字列取得、Windows コマンドライン引数変換、パーミッション設定、USB ファイルディスクリプタの管理、および特定デーモンや CLI への接続は、本ライブラリの範囲外である。

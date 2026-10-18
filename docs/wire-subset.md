@@ -1,139 +1,71 @@
-# UDTV 1.0 wire subset
+# UDTV 1.0 ワイヤ層エンベロープとフレーム送受信 (dtv::wire)
 
-`dtv::wire` (`include/dtv/userland/wire.h`, `src/wire.cpp`) is a new, independently written
-implementation of the first slice of the common UDTV wire. It covers the envelope, a
-fragment-tolerant frame receiver, and three typed payloads. It is not a complete protocol and is
-not connected to any existing product client, daemon, or IPC file.
+本ドキュメントは、`dtv_userland_wire` ターゲット（ヘッダー: `include/dtv/userland/wire.h`、実装: `src/wire.cpp`）が提供する UDTV 1.0 プロトコルの基本ワイヤ層、20 バイト固定長エンベロープ仕様、および断片化対応フレーム受信機（`FrameReceiver`）を解説する。
 
-## Envelope
+---
 
-Every integer is little-endian. Fields are written and read byte by byte; no struct is copied to
-or from the wire, so host endianness, padding, and ABI do not leak.
+## 1. 20 バイト固定長エンベロープ仕様
 
-| Offset | Size | Field | Rule |
+ワイヤ上の全フィールドはリトルエンディアンでバイト単位に送受信される。ホストアーキテクチャの構造体パディングやエンディアンの差異がワイヤ上に露出することはない。
+
+| オフセット | サイズ | フィールド名 | 検証規則 |
 |---:|---:|---|---|
-| 0 | 4 | magic | ASCII `UDTV`. The legacy `PX4U` and `ASCN` magics are rejected and reported separately as `HeaderStatus::legacy_magic`; their payloads are never interpreted. |
-| 4 | 2 | major | Must be 1. |
-| 6 | 2 | minor | Must be 0. Any other major or minor is `VERSION_MISMATCH`. |
-| 8 | 2 | opcode | Raw u16. Unknown values are accepted. |
-| 10 | 2 | flags | 0, 1, or 3; anything else is rejected. |
-| 12 | 4 | request_id | See kinds below. |
-| 16 | 4 | payload_length | Checked against the cap before any payload byte is read or stored. |
+| 0 | 4 | `magic` | ASCII 文字列 `UDTV`。旧レガシーマジック（`PX4U`、`ASCN`）は即座に拒否され、`HeaderStatus::legacy_magic` として区別される（ペイロードは一切解釈しない）。 |
+| 4 | 2 | `major` | メジャーバージョン。`1` でなければならない。 |
+| 6 | 2 | `minor` | マイナーバージョン。`0` でなければならない。1.0 以外のバージョンは `VERSION_MISMATCH` となる。 |
+| 8 | 2 | `opcode` | 要求・応答・イベントを識別する 16 ビット符号なし整数。未知のオペコードもエンベロープレベルでは受理される。 |
+| 10 | 2 | `flags` | フレーム種別フラグ。`0`、`1`、または `3` のみ受理。それ以外の値は拒否。 |
+| 12 | 4 | `request_id` | 要求・応答の対応識別子（32 ビット符号なし整数）。後述の種別規則に従う。 |
+| 16 | 4 | `payload_length` | 後続するペイロード長（バイト数）。上限値超過はペイロード受信前に拒否される。 |
 
-Bit 15 of the opcode marks an event (`is_event_opcode`). This rule applies to every opcode,
-known or not. These are the only valid combinations:
+### 1.1 種別 (Kind) とオペコードの規則
 
-| Kind | opcode bit 15 | flags | request_id |
-|---|---:|---:|---|
-| request | 0 | 0 | nonzero |
-| response | 0 | 1 | nonzero |
-| error_response | 0 | 3 | nonzero |
-| event | 1 | 0 | 0 |
+オペコードの最上位ビット（bit 15）はイベントフラグ（`is_event_opcode`）として予約されている。エンベロープにおいて有効な組み合わせは以下の 4 通りに厳格に限定される：
 
-Every other combination is a malformed envelope (`PROTOCOL_ERROR`), even when payload dispatch for
-that opcode is out of scope:
+| 種別 (Kind) | オペコード bit 15 | flags | request_id | 役割 |
+|---|---:|---:|---|---|
+| **`request`** | 0 | 0 | 1 以上の整数 | 通常の要求フレーム |
+| **`response`** | 0 | 1 | 1 以上の整数 | 正常応答フレーム |
+| **`error_response`** | 0 | 3 | 1 以上の整数 | エラー応答フレーム |
+| **`event`** | 1 | 0 | 0 固定 | 一方向イベント通知フレーム |
 
-- Flags 2 or any reserved bit: `bad_flags`.
-- An event opcode with flags 1 or 3: `bad_kind_for_opcode`. Example: STREAM_END `0x80ff` with
-  flags 1 and id 1.
-- A normal opcode with request_id 0, or an event opcode with a nonzero request_id:
-  `bad_request_id`. Example: `0x0010` with flags 0 and id 0.
+これら以外の組み合わせはすべて不正なエンベロープ（`PROTOCOL_ERROR`）として拒否される：
+- `bad_flags`: `flags` が 2、または未定義の予約ビットが立っている場合。
+- `bad_kind_for_opcode`: イベントオペコード（bit 15 = 1）に `flags` 1 または 3 が指定されている場合（例: STREAM_END イベントに response フラグを付与）。
+- `bad_request_id`: 通常オペコードで `request_id` が 0、またはイベントオペコードで `request_id` が非ゼロの場合。
 
-A valid envelope with an unknown opcode, whether a normal opcode with a nonzero id or an event
-opcode with flags 0 and id 0, is accepted and reaches the dispatcher unchanged. Answering it with
-`UNSUPPORTED` is the dispatcher's job. The encoder enforces the same table.
+未知のオペコードであっても、上記の組み合わせを満たしていればエンベロープとしては受理され、ディスパッチャ層へ渡される（未知オペコードに対して `UNSUPPORTED` エラーを返すのはディスパッチャの責務である）。
 
-### Payload caps
+### 1.2 ペイロード長の上限 (Payload Caps)
 
-- TS_DATA event: `kMaxTsDataPayload` = 1,048,476 + 28 = 1,048,504 bytes. 1,048,476 is the
-  largest multiple of 188 that does not exceed 1 MiB, and 28 bytes are the fixed TS_DATA fields
-  before the packets. The cap applies to the whole payload, not to the raw packet bytes, and the
-  envelope does not check how many packets there are or whether the count is a multiple of 188.
-  That belongs to the TS_DATA codec, which is not part of this subset.
-- Every other frame, including unknown opcodes and other events: `kMaxControlPayload` = 65,536.
+バッファ枯渇攻撃を防ぐため、ペイロード長には以下の厳格な上限が適用される：
 
-The legacy PX4 TS_DATA cap (1,048,596) is above the UDTV cap and is rejected.
+- **TS_DATA イベント**: `kMaxTsDataPayload` = 1,048,476 + 28 = **1,048,504 バイト**。
+  （1,048,476 バイトは 1 MiB を超えない最大の 188 の倍数であり、28 バイトは TS_DATA イベントの固定ヘッダー長である。旧 PX4 実装の 1,048,596 バイトは上限超過として拒否される）。
+- **その他の全フレーム (制御系・未知オペコード・他イベント)**: `kMaxControlPayload` = **65,536 バイト**。
 
-## API
+---
 
-- `check_header(ByteView, Header*)` returns a detailed `HeaderStatus`, and
-  `decode_header(ByteView)` returns `Result<Header>` with the status mapped by `header_error()`:
-  a view error or a size other than 20 is `INVALID_ARGUMENT`, a version error is
-  `VERSION_MISMATCH`, and everything else is `PROTOCOL_ERROR`. Exactly 20 bytes are required,
-  and the payload is never touched.
-- `encode_header` and `encode_frame` enforce the same rules as decode. Invalid headers are
-  `INVALID_ARGUMENT`, a short output is `BUFFER_TOO_SMALL`, and nothing is written on failure.
-  `encode_frame` requires `payload.size == header.payload_length`.
-- `decode_frame(ByteView)` requires exactly `20 + payload_length` bytes; a short or long input
-  is `PROTOCOL_ERROR`. The returned `Frame::payload` aliases the input.
-- `FrameReceiver` reassembles frames from fragments of any size, coalesced frames included,
-  without sockets or allocation. The caller supplies payload storage. The header is checked as
-  soon as its 20 bytes are present, so an oversized or malformed length is rejected before any
-  payload byte is copied. A payload larger than the caller storage is `BUFFER_TOO_SMALL`. Each
-  complete frame goes to `FrameHandler::on_frame` unchanged, including frames with unknown
-  opcodes; that is the dispatcher seam. Any failure, including a handler failure, poisons the
-  receiver until `reset()`, the in-memory equivalent of closing the connection.
-  `header_status()` tells the caller why a header was rejected.
-- Call `FrameReceiver::finish()` when the input reaches EOF. It succeeds only on a clean frame
-  boundary (`pending_size() == 0`). EOF inside a header or payload means the protocol ended in
-  the middle of a frame: `finish()` returns `PROTOCOL_ERROR`, sets `truncated()`, and poisons
-  the receiver. Bytes fed afterwards are refused, and there is no attempt to resynchronize to a
-  new frame. On a receiver that has already failed, `finish()` returns that failure unchanged.
-  `pending_size()` reports how many bytes of the incomplete frame are buffered, bounded by
-  20 + payload cap and the caller storage.
-- Null-pointer views with a nonzero size are rejected everywhere with `INVALID_ARGUMENT`. A null
-  view with size 0 is a valid empty view.
+## 2. API と送受信ヘルパー
 
-A receiver that would rather allocate per frame can read 20 bytes, call `decode_header`, and
-allocate only `payload_length` bytes after it succeeds. The cap guarantees the allocation is
-bounded.
+### 2.1 ヘッダーおよびフレームの直接コーデック
 
-## Typed payloads
+- **`decode_header(ByteView input)`**:
+  ヘッダーを復号する。**入力スパン `input.size` は厳密に `kHeaderSize`（20 バイト）でなければならない**。任意長のバッファから自動的に先頭 20 バイトを切り出す仕様ではないため、サイズが 20 でない場合は `Error::INVALID_ARGUMENT`（内部ステータス `HeaderStatus::wrong_size`）となる。ペイロード領域には一切触れない。
+- **`encode_header(const Header&, MutableByteView)`**:
+  20 バイトのヘッダーを書き出す。不正なヘッダー値は拒否される。
+- **`decode_frame(ByteView input)`**:
+  フレーム全体を復号する。`input.size` が `20 + payload_length` と厳密に一致することを要求し、先頭 20 バイトの subview を作って `decode_header` を呼び出す。復号された `Frame::payload` は入力バッファのスパンを直接別名参照（alias）する。
 
-All typed decoders require the exact payload size and return `PROTOCOL_ERROR` otherwise. Values
-that have the right size but are semantically invalid are `INVALID_ARGUMENT`. Encoders return
-`BUFFER_TOO_SMALL` for a short output and never write a partial value.
+### 2.2 断片化対応フレーム受信機 (`FrameReceiver`)
 
-| Payload | Layout | Size |
-|---|---|---:|
-| `HelloRequest` | `u16 min_major, u16 min_minor, u16 max_major, u16 max_minor, u64 required_features, u64 optional_features` | 24 |
-| `AcquireRequest` | `u8 epoch[16], u16 receiver_id` | 18 |
-| `AcquireResponse` | `u8 epoch[16], u64 lease_id` | 24 |
+`FrameReceiver` は、TCP ストリームや UNIX ドメインソケットから届く任意のサイズの断片（フラグメント）や、複数フレームが結合した受信バッファから、メモリ確保を行わずにフレームを再構築するクラスである。
 
-### HELLO version range
-
-- Versions are compared as (major, minor). The encoder and decoder reject a range with
-  min > max as `INVALID_ARGUMENT`.
-- `negotiate_version` returns 1.0 when min <= 1.0 <= max. Otherwise it returns
-  `VERSION_MISMATCH`, and an inverted range is `INVALID_ARGUMENT`. 1.0 is the only version
-  this subset can select. The spec picks the highest minor both sides share within a major;
-  since this implementation supports only 1.0, that minor is always 0.
-- `required_features` and `optional_features` are carried unchanged, unknown and high bits
-  included. The codec does not judge them; feature policy belongs to the dispatcher.
-
-### ACQUIRE
-
-- `epoch` is opaque and copied verbatim in both directions.
-- `receiver_id` can be any u16, including 0 and values above 255. Whether the ID is in the
-  public receiver set is decided by the daemon, not the codec.
-- `AcquireResponse::lease_id` must be nonzero: both the encoder and decoder reject 0 with
-  `INVALID_ARGUMENT`, whatever the epoch. Any other u64 is valid. There is no nonce; the attach
-  token belongs to START in the later wire.
-
-## Not in this subset
-
-- HELLO response, error-response payload (code and detail), RELEASE, TUNE, START/STOP, STATS,
-  LIST/STATUS records, card operations, ATTACH, and the TS_DATA payload codec, including the
-  188-byte packet alignment check and the meaning of the 28-byte prefix. These come in later
-  codecs.
-- Connection state: HELLO or ATTACH_STREAM as the first frame, header version matching the
-  negotiated version, one outstanding request per connection, rejecting reused or past
-  request_ids (PROTOCOL_ERROR in the spec), matching a response to its request, UNSUPPORTED for
-  missing required features, and STATE_EVENT subscription. These need a dispatcher and are not
-  in this subset.
-- Time limits: the 5-second limit on an incomplete frame and on an unfinished HELLO.
-  `FrameReceiver` has no clock; the OS adapter must enforce these and then call `finish()` or
-  close.
-- Sockets, timeouts, and daemon or hardware integration.
-- `FrameReceiver` is single-threaded and not reentrant; a handler must not call `feed` on the
-  same receiver.
+1. **早期ヘッダー検証**: 受信バイト数が 20 バイトに達した瞬間にヘッダー検査を実行する。ペイロード長が上限を超えている場合やエンベロープが不正な場合、ペイロードバイトをコピーすることなく即座にエラーとする。
+2. **ゼロ動的確保**: 呼び出し元がペイロード格納用の固定バッファを提供する。バッファ容量を超えるペイロードは `BUFFER_TOO_SMALL` として拒否される。
+3. **ハンドラ通知と借用ペイロードの寿命**:
+   フレームが完全に揃うと、呼び出し元の `FrameHandler::on_frame(const Frame& frame)` を直接呼び出す。
+   - **重要（借用寿命の制約）**: `frame.payload` は `FrameReceiver` の内部ストレージを別名参照（alias）しており、**`on_frame` が return するまでのみ有効**である。
+   - コールバックを抜けた後は次の受信データによってストレージが上書きされるため、非同期ワーカや別スレッドへペイロードを保持する場合は、コールバック内で呼び出し元が所有権を持つバッファへデータをコピーする必要がある。直接 `decode_frame` を利用する場合も、呼び出し元が渡した入力バッファの寿命と不変性に拘束される。
+4. **ポイズン状態**: 受信処理やハンドラ内でエラーが発生した場合、受信機はポイズン状態（無効状態）となり、`reset()` が呼ばれるまで以降の全入力を拒否する（ネットワーク接続の切断に相当）。
+5. **接続完了検証 (`finish`)**: ソケット EOF 到達時に呼び出す。フレーム境界（未完了の保留バイトが 0）で終了した場合のみ成功し、途中で切断された場合は `PROTOCOL_ERROR` を返して `truncated()` フラグを立てる。
