@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, and tuning subsets, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, and tuning subsets, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -113,6 +113,42 @@
         "excluded_scope": "The px4_drv-referenced 340 ms terrestrial settle constant and its citation (11-14), which the product supplies through the backend seam; the PX4 wire request validation table valid_tune (59-78), whose per-request decision the product passes in the tune request; the fixed tune response payload construction (503-504)."
       }
     ]
+  },
+  "receiver_hz": {
+    "method": "Independent neutral implementation of the adopted exact-Hz request, immutable profile-preparation, existing strict-lane execution, and final publication contract. No product frontend, tuner, or PLL arithmetic was copied into the common engine; source-derived arithmetic and references remain in the separately licensed GPL product drivers.",
+    "authority": [
+      "agent-workspace branch design/independent-code-policy.md and user's 2026-10-18 continuation policy",
+      "shared/implementation/receiver-hz-code-task.md, requirements 1-7",
+      "shared/implementation/receiver-hz-profile-table.md and profile review/clarifications",
+      "shared/implementation/receiver-hz-execution-seams.md and review",
+      "implementation/reports/receiver-hz-code.md, accepted incoming Opus inventory and continuation record"
+    ],
+    "source_baseline": "core-hz revision 4af047b1665190b6560652415bd435ccba545258; the R3 source additions were authored in the recorded accepted continuation and this revision does not claim it contains R3.",
+    "implementation_authors": [
+      {
+        "author": "Claude Opus 5.5",
+        "scope": "The common R3 engine/header/CMake and new receiver-Hz test additions recorded in the accepted incoming-opus inventory and the receiver-hz-code report."
+      }
+    ],
+    "files": [
+      {
+        "path": "CMakeLists.txt",
+        "scope": "Adds the receiver-Hz test target when the existing receiver component and test options are enabled."
+      },
+      {
+        "path": "include/dtv/userland/detail/receiver_engine.h",
+        "scope": "Adds exact-u64-Hz strict requests and results, immutable prepared-profile state, bounded programming output, and the strict-Hz backend seam while retaining the existing kHz API."
+      },
+      {
+        "path": "src/receiver_engine.cpp",
+        "scope": "Consumes the immutable profile outcome prepared by the product facade at the existing admission validation position, carries the exact request through the existing admission/tune flow, derives only the compatibility kHz projection, and publishes the result through the existing final ticket/owner/revision check."
+      },
+      {
+        "path": "tests/receiver_hz_tests.cpp",
+        "scope": "New focused tests for exact-Hz admission, profile preparation, request/result propagation, validation precedence, and guarded publication."
+      }
+    ],
+    "license_scope": "These listed neutral engine, build-target, and new test additions are independently implemented under the adopted policy and carry MIT in this candidate. The GPL product PLL arithmetic, frontend transforms, and source-derived references are excluded."
   },
   "identity": {
     "method": "The selector, instance, USB descriptor and auto-identity codecs are a new independent implementation of the adopted byte representation. The only mechanical transfer is the neutral SHA-256 class, extracted under the standing independent-code policy; no selector/discovery/hardware source was copied.",

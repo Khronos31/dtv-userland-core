@@ -343,7 +343,8 @@ Result<void> ReceiverEngine::release(std::uint64_t client_id,
 Result<bool> ReceiverEngine::poll_lock(std::size_t slot, ReceiverSystem system,
                                        std::uint64_t start_ms,
                                        std::uint32_t timeout_ms, bool admitted,
-                                       const AdmittedTune& ticket) noexcept
+                                       const AdmittedTune& ticket,
+                                       std::uint64_t* sampled_ms) noexcept
 {
     const std::size_t max_polls = static_cast<std::size_t>(timeout_ms / 10U) + 1U;
     // Admitted-only exact ticket/deadline decision.  It is checked before every
@@ -380,7 +381,10 @@ Result<bool> ReceiverEngine::poll_lock(std::size_t slot, ReceiverSystem system,
         // Gate after the returned poll (true or false).
         const Error post = admitted_gate();
         if (post != Error::OK) return Result<bool>::failure(post);
-        if (locked.value()) return Result<bool>::success(true);
+        if (locked.value()) {
+            if (sampled_ms != nullptr) *sampled_ms = before;
+            return Result<bool>::success(true);
+        }
 
         const std::uint64_t now = clock_.monotonic_ms();
         const std::uint64_t elapsed = now - start_ms;
@@ -450,15 +454,41 @@ void ReceiverEngine::clear_operation_if_owner_locked(std::size_t slot,
         clear_operation_locked(slot);
 }
 
-TuneRecord ReceiverEngine::tune_record(const TuneRequest& request) noexcept
+AdmittedRequest ReceiverEngine::legacy_request(const TuneRequest& request) noexcept
+{
+    AdmittedRequest admitted{};
+    admitted.entrance = TuneEntrance::legacy_khz;
+    admitted.system = request.system;
+    // Checked ingress: any 32-bit kHz value times 1000 fits 64 bits exactly.
+    admitted.requested_hz = static_cast<std::uint64_t>(request.frequency_khz) * 1000U;
+    admitted.stream_id = request.stream_id;
+    admitted.slot = request.slot;
+    admitted.lnb_voltage = request.lnb_voltage;
+    admitted.timeout_ms = request.timeout_ms;
+    admitted.validation = request.validation;
+    return admitted;
+}
+
+TuneRecord ReceiverEngine::tune_record(const AdmittedRequest& request,
+                                       const TuneProgramming& programming,
+                                       wire::Verification verification,
+                                       const wire::Measurement<bool>& lock) noexcept
 {
     TuneRecord record{};
     record.system = request.system;
-    record.frequency_khz = request.frequency_khz;
+    const std::uint64_t khz = request.requested_hz / 1000U;
+    record.frequency_khz = khz <= std::numeric_limits<std::uint32_t>::max()
+        ? static_cast<std::uint32_t>(khz)
+        : 0U;
     record.stream_id = request.stream_id;
     record.slot = request.slot;
     record.lnb_voltage = request.lnb_voltage;
     record.timeout_ms = request.timeout_ms;
+    record.entrance = request.entrance;
+    record.requested_hz = request.requested_hz;
+    record.programmed_hz = programming.programmed_hz;
+    record.verification = verification;
+    record.lock = lock;
     return record;
 }
 
@@ -546,16 +576,54 @@ Result<void> ReceiverEngine::configure_strict_capabilities(
     return Result<void>::success();
 }
 
+Error ReceiverEngine::admission_decision_locked(std::size_t slot,
+                                                const AdmittedRequest& request) const noexcept
+{
+    if (!capability_supports_locked(slot, request.system)) return Error::INVALID_ARGUMENT;
+    if (request.entrance == TuneEntrance::strict_hz) {
+        if (!strict_capabilities_[slot].native_hz) return Error::UNSUPPORTED;
+        // Common scalar check on the canonical value before any narrowing.
+        if (request.requested_hz == 0U || request.requested_hz > kMaxRequestedHz)
+            return Error::INVALID_ARGUMENT;
+        if (request.prepared_receiver != receivers_[slot]) return Error::INVALID_ARGUMENT;
+    }
+    return request.validation;
+}
+
 Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
                                                     const TuneRequest& request,
                                                     std::uint64_t accepted_at_ms) noexcept
+{
+    return admit(client_id, request.lease_id, legacy_request(request), accepted_at_ms);
+}
+
+Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
+                                                    const HzTuneRequest& request,
+                                                    std::uint64_t accepted_at_ms) noexcept
+{
+    AdmittedRequest admitted{};
+    admitted.entrance = TuneEntrance::strict_hz;
+    admitted.prepared_receiver = request.prepared_receiver;
+    admitted.system = request.system;
+    admitted.requested_hz = request.requested_hz;
+    admitted.stream_id = request.stream_id;
+    admitted.slot = request.slot;
+    admitted.lnb_voltage = request.lnb_voltage;
+    admitted.timeout_ms = request.timeout_ms;
+    admitted.validation = request.validation;
+    return admit(client_id, request.lease_id, admitted, accepted_at_ms);
+}
+
+Result<AdmittedTune> ReceiverEngine::admit(std::uint64_t client_id, std::uint64_t lease_id,
+                                           const AdmittedRequest& request,
+                                           std::uint64_t accepted_at_ms) noexcept
 {
     if (!strict_enabled_ || !valid_client(client_id))
         return Result<AdmittedTune>::failure(Error::NOT_READY);
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
     if (!lock.owns_lock()) return Result<AdmittedTune>::failure(Error::BUSY);
 
-    const int index = find_lease_locked(client_id, request.lease_id);
+    const int index = find_lease_locked(client_id, lease_id);
     if (index < 0) return Result<AdmittedTune>::failure(Error::NOT_FOUND);
     const std::size_t slot = leases_[static_cast<std::size_t>(index)].slot;
     if (states_[slot] == ReceiverState::error)
@@ -570,10 +638,9 @@ Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
     // a blocking wait on the poll thread.
     if (operations_[slot] != ReceiverTuneOperation::idle)
         return Result<AdmittedTune>::failure(Error::BUSY);
-    if (!capability_supports_locked(slot, request.system))
-        return Result<AdmittedTune>::failure(Error::INVALID_ARGUMENT);
-    if (request.validation != Error::OK)
-        return Result<AdmittedTune>::failure(request.validation);
+    // Support, strict-Hz entrance and validation decisions at R2's position.
+    const Error decision = admission_decision_locked(slot, request);
+    if (decision != Error::OK) return Result<AdmittedTune>::failure(decision);
     // Nonwrapping revision issuance: exhaustion fails without state change.
     // RESOURCE_LIMIT is the existing internal vocabulary for this issuance
     // limit; facades map it to an existing old-wire code until the v1 wire
@@ -633,7 +700,7 @@ Result<void> ReceiverEngine::execute_admitted_tune(const AdmittedTune& ticket) n
         complete_tune_locked(slot, ticket);
         return Result<void>::failure(Error::BUSY);
     }
-    const TuneRequest& request = ticket.request;
+    const AdmittedRequest& request = ticket.request;
     // Strict admission and the admitted helper use only the immutable
     // capability table; the virtual supports predicate is not consulted.
     if (!strict_enabled_ || !capability_supports_locked(slot, request.system)) {
@@ -641,11 +708,13 @@ Result<void> ReceiverEngine::execute_admitted_tune(const AdmittedTune& ticket) n
         complete_tune_locked(slot, ticket);
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
-    if (request.validation != Error::OK) {
-        const Error decision = request.validation;
-        std::lock_guard<std::mutex> lock(mutex_);
-        complete_tune_locked(slot, ticket);
-        return Result<void>::failure(decision);
+    {
+        const Error decision = admission_decision_locked(slot, request);
+        if (decision != Error::OK) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            complete_tune_locked(slot, ticket);
+            return Result<void>::failure(decision);
+        }
     }
     const auto result = run_tune(slot, request, true, ticket);
     {
@@ -758,12 +827,12 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
 
     // Legacy direct compatibility entrance: it keeps the old virtual supports
     // query above and the old post-power timing origin inside the helper.
-    const auto result = run_tune(slot, request, false, AdmittedTune{});
+    const auto result = run_tune(slot, legacy_request(request), false, AdmittedTune{});
     clear_direct_operation();
     return result;
 }
 
-Result<void> ReceiverEngine::run_tune(std::size_t slot, const TuneRequest& request,
+Result<void> ReceiverEngine::run_tune(std::size_t slot, const AdmittedRequest& request,
                                       bool admitted, const AdmittedTune& ticket) noexcept
 {
     const ReceiverId receiver = receivers_[slot];
@@ -867,10 +936,22 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const TuneRequest& reque
     const std::uint32_t tune_timeout = remaining_before_tune();
     if (tune_timeout == 0U)
         return fail_after_power(Error::TIMEOUT);
-    const auto tuned = backend_.tune(receiver, request.system, request.frequency_khz,
-                                     tune_timeout);
-    if (!tuned)
-        return fail_after_power(tuned.error());
+    // The only entrance-specific stage.  The legacy entrance passes back the
+    // exact legacy kHz value (requested_hz is that value times 1000).
+    TuneProgramming programming{};
+    if (request.entrance == TuneEntrance::legacy_khz) {
+        const auto tuned = backend_.tune(
+            receiver, request.system, static_cast<std::uint32_t>(request.requested_hz / 1000U),
+            tune_timeout);
+        if (!tuned)
+            return fail_after_power(tuned.error());
+    } else {
+        const auto programmed =
+            backend_.program_hz(receiver, request.system, request.requested_hz, tune_timeout);
+        if (!programmed)
+            return fail_after_power(programmed.error());
+        programming = programmed.value();
+    }
     // A cancellation/budget observed after the returned frontend tune stops
     // the next stage without starting further hardware I/O.
     {
@@ -878,15 +959,56 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const TuneRequest& reque
         if (gate != Error::OK) return fail_after_power(gate);
     }
 
+    // The legacy entrance always polls lock, as before.
+    const TuneReadiness readiness = request.entrance == TuneEntrance::legacy_khz
+        ? TuneReadiness::lock_poll
+        : strict_capabilities_[slot].readiness;
+    wire::Verification verification = wire::Verification::lock;
+    wire::Measurement<bool> lock_evidence{};
     // Keep this origin separate from start_ms: the settle interval starts
     // when the lock check begins, after the frontend tune has completed.
     const std::uint64_t lock_poll_start_ms = clock_.monotonic_ms();
-    const auto locked = poll_lock(slot, request.system, start_ms, request.timeout_ms,
-                                  admitted, ticket);
-    if (!locked) return fail_after_power(locked.error());
-    if (!locked.value())
-        return fail_after_power(Error::TIMEOUT);
-    // poll_lock can return true with a late or revoked ticket.
+    if (readiness == TuneReadiness::lock_poll) {
+        std::uint64_t sampled_ms = 0U;
+        const auto locked = poll_lock(slot, request.system, start_ms, request.timeout_ms,
+                                      admitted, ticket, &sampled_ms);
+        if (!locked) return fail_after_power(locked.error());
+        if (!locked.value())
+            return fail_after_power(Error::TIMEOUT);
+        // Valid only after the real predicate returned true; the sample time
+        // is that poll's engine-clock reading, converted with a range check.
+        lock_evidence.value = true;
+        if (sampled_ms <= std::numeric_limits<std::uint64_t>::max() / 1000000U) {
+            lock_evidence.state = wire::MeasureState::valid;
+            lock_evidence.sampled_at_ns = sampled_ms * 1000000U;
+        } else {
+            lock_evidence.state = wire::MeasureState::unknown;
+            lock_evidence.reason = wire::UnknownReason::not_sampled;
+            lock_evidence.value = false;
+        }
+    } else if (readiness == TuneReadiness::terminal_lock) {
+        // The backend's own bounded poll for this exact invocation; no fake
+        // second poll and no promotion of missing evidence to a lock.
+        if (programming.lock.state != wire::MeasureState::valid)
+            return fail_after_power(Error::PROTOCOL_ERROR);
+        if (!programming.lock.value)
+            return fail_after_power(Error::TIMEOUT);
+        lock_evidence = programming.lock;
+    } else if (readiness == TuneReadiness::commands) {
+        // Command completion only: never a lock claim.
+        verification = wire::Verification::commands;
+        lock_evidence.state = strict_capabilities_[slot].lock_measurement
+            ? wire::MeasureState::unknown
+            : wire::MeasureState::unsupported;
+        lock_evidence.reason = wire::UnknownReason::not_sampled;
+    } else {
+        // ts_sync needs actual synchronized-TS evidence from this invocation.
+        if (!programming.ts_synchronized)
+            return fail_after_power(Error::TIMEOUT);
+        verification = wire::Verification::ts_sync;
+        lock_evidence = programming.lock;
+    }
+    // A poll or backend report can return with a late or revoked ticket.
     {
         const Error gate = stage_gate();
         if (gate != Error::OK) return fail_after_power(gate);
@@ -981,12 +1103,15 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const TuneRequest& reque
         // one issued at acquire; its validity is per arm.
         if (leases_[slot].stream_state == StreamState::consumed)
             leases_[slot].stream_state = StreamState::none;
+        // Request, programmed value and evidence are published only here.
         TuneMetadata& metadata = tune_metadata_[slot];
+        const TuneRecord record =
+            tune_record(request, programming, verification, lock_evidence);
         metadata.revision = revision;
-        metadata.current = tune_record(request);
+        metadata.current = record;
         metadata.current_revision = revision;
         metadata.current_valid = true;
-        metadata.last_successful = tune_record(request);
+        metadata.last_successful = record;
         metadata.last_successful_revision = revision;
         metadata.last_successful_valid = true;
         complete_tune_locked(slot, ticket);
