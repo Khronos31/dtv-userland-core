@@ -224,6 +224,20 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_test(NAME receiver_engine_tests COMMAND receiver_engine_tests)
         # Outer bound behind the tests' own finite waits.
         set_tests_properties(receiver_engine_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(receiver_r2_tests tests/receiver_r2_tests.cpp)
+        target_link_libraries(receiver_r2_tests PRIVATE dtv::receiver)
+        # Test-binary-only real-mutex observer for the registry rendezvous
+        # proofs.  Linux GNU/Clang only; other platforms compile it out and the
+        # portable tests remain unchanged.
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux"
+           AND CMAKE_CXX_COMPILER_ID MATCHES "GNU|Clang")
+            target_compile_definitions(receiver_r2_tests PRIVATE DTV_R2_LOCK_OBSERVER=1)
+            target_link_options(receiver_r2_tests PRIVATE
+                "LINKER:--wrap=pthread_mutex_lock")
+        endif()
+        add_test(NAME receiver_r2_tests COMMAND receiver_r2_tests)
+        set_tests_properties(receiver_r2_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_CARD)

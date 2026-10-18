@@ -64,6 +64,64 @@ struct TuneRequest final {
     Error validation = Error::OK;
 };
 
+// Immutable per-receiver capability descriptor for strict admission.  The
+// product supplies the audited model/count metadata once before its workers
+// start; strict admission then never calls the virtual supports predicate.
+struct ReceiverCapability final {
+    ReceiverId receiver = 0U;
+    bool supports_terrestrial = false;
+    bool supports_satellite = false;
+};
+
+// Conservative per-receiver strict operation marker.  It is independent of
+// the legacy ReceiverState vocabulary so an admission can exclude an
+// in-flight tune or cleanup without changing the old status values.
+enum class ReceiverTuneOperation : std::uint8_t {
+    idle = 0U,
+    tuning = 1U,
+    cleanup = 2U,
+};
+
+// Permitted internal R2 tune fields in kHz.  It deliberately excludes the
+// lease ID, client identity, token, and validation credential that a request
+// carries, so a status snapshot can never expose them.
+struct TuneRecord final {
+    ReceiverSystem system = ReceiverSystem::terrestrial;
+    std::uint32_t frequency_khz = 0U;
+    std::uint16_t stream_id = 0xffffU;
+    std::uint16_t slot = 0xffffU;
+    std::uint8_t lnb_voltage = 0U;
+    std::uint32_t timeout_ms = 0U;
+};
+
+// Internal R2 tune metadata in kHz.  It is not the adopted public v1 Hz
+// record and is never presented as a completed wire record.
+struct TuneMetadata final {
+    std::uint64_t revision = 0U;
+    bool current_valid = false;
+    std::uint64_t current_revision = 0U;
+    TuneRecord current{};
+    bool last_successful_valid = false;
+    std::uint64_t last_successful_revision = 0U;
+    TuneRecord last_successful{};
+};
+
+// Immutable admitted-ticket value owned by the worker queue.  It stores no
+// pointer or reference into a caller; execution revalidates it against the
+// registry before and after the hardware stages.
+struct AdmittedTune final {
+    std::uint64_t client_id = 0U;
+    std::uint64_t lease_id = 0U;
+    // Lease-instance identity.  It changes on every ACQUIRE, so a stale
+    // queued ticket cannot match a later lease that reuses the numeric ID.
+    std::uint64_t lease_instance = 0U;
+    ReceiverId receiver = 0U;
+    std::size_t slot = 0U;
+    std::uint64_t tune_revision = 0U;
+    std::uint64_t accepted_at_ms = 0U;
+    TuneRequest request{};
+};
+
 struct AcquireResult final {
     std::uint64_t lease_id = 0U;
     ReceiverToken token{};
@@ -100,6 +158,10 @@ struct ReceiverEngineStatus final {
     std::size_t receiver_count = 0U;
     std::array<ReceiverId, kReceiverEngineCapacity> receivers{};
     std::array<ReceiverState, kReceiverEngineCapacity> states{};
+    // Token-free strict operation and tune metadata.  It is internal kHz
+    // compatibility state, not a completed public v1 record.
+    std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
+    std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata{};
 };
 
 // Physical receiver seam.  Methods receive the stable receiver ID.
@@ -208,6 +270,40 @@ public:
     Result<void> disconnect_client(std::uint64_t client_id) noexcept;
     Result<void> shutdown() noexcept;
 
+    // One-time strict capability setup.  It replaces the legacy virtual
+    // supports query with the supplied immutable table for admission.  It
+    // must list exactly the configured receiver slots, each supported in at
+    // least one system, with no duplicates; otherwise it fails and legacy
+    // mode is unchanged.  It performs no backend, clock, or ID-source call.
+    Result<void> configure_strict_capabilities(const ReceiverCapability* capabilities,
+                                               std::size_t count) noexcept;
+    bool strict_capabilities_configured() const noexcept { return strict_enabled_; }
+
+    // Callback-free metadata admission for the lane submission path.  It
+    // takes the registry lock with try_lock only: contention returns BUSY
+    // before any state change, and the caller must not wait.  It takes no
+    // receiver lock and performs no backend, clock, ID-source, or worker call.
+    Result<AdmittedTune> try_admit_tune(std::uint64_t client_id,
+                                        const TuneRequest& request,
+                                        std::uint64_t accepted_at_ms) noexcept;
+    // Executes one admitted ticket with the shared tune algorithm and the
+    // admitted end-to-end budget.  It rechecks ticket identity, revision and
+    // cancellation before the hardware stages and at the final commit.
+    Result<void> execute_admitted_tune(const AdmittedTune& ticket) noexcept;
+    // Aborts an admitted ticket that will never execute (publication or stop
+    // failure after admission).  It keeps the advanced revision and clears
+    // the pending metadata exactly once, without hardware I/O.
+    Result<void> abort_unstarted_tune(const AdmittedTune& ticket, Error error) noexcept;
+    // Synchronous logical-teardown invalidation of a pending admitted ticket.
+    // The receiver stays excluded until the existing hardware cleanup runs.
+    Result<void> revoke_tune_ticket(std::uint64_t client_id,
+                                    std::uint64_t lease_id) noexcept;
+
+    // Bounded deterministic seam for the nonwrapping revision-exhaustion path.
+    // It is an internal detail helper used only by the R2 core test; production
+    // code never calls it.
+    void set_tune_revision_for_test(std::size_t slot, std::uint64_t value) noexcept;
+
 private:
     enum class StreamState : std::uint8_t {
         none,
@@ -218,10 +314,18 @@ private:
         consumed,
     };
 
+    struct PendingTune final {
+        bool valid = false;
+        AdmittedTune ticket{};
+    };
+
     struct Lease final {
         bool active = false;
         std::uint64_t client_id = 0U;
         std::uint64_t lease_id = 0U;
+        // Monotonic lease-instance identity, assigned at ACQUIRE.  It is not
+        // the wire lease ID and never repeats for two live leases.
+        std::uint64_t instance = 0U;
         std::size_t slot = 0U;
         ReceiverSystem system = ReceiverSystem::terrestrial;
         ReceiverToken token{};
@@ -254,8 +358,50 @@ private:
     Result<void> cleanup_client(std::uint64_t client_id) noexcept;
     Result<void> cleanup_all() noexcept;
     void observe_disconnect(std::size_t slot, Error error) noexcept;
+    // The admitted identity is threaded through the shared lock-poll loop so an
+    // admitted cancellation/deadline is honored after every returned is_locked
+    // (true or false) and before another poll/sleep.  The legacy entrance
+    // passes admitted=false and keeps its exact old sampling and traces.
     Result<bool> poll_lock(std::size_t slot, ReceiverSystem system, std::uint64_t start_ms,
-                           std::uint32_t timeout_ms) noexcept;
+                           std::uint32_t timeout_ms, bool admitted,
+                           const AdmittedTune& ticket) noexcept;
+    bool capability_supports_locked(std::size_t slot, ReceiverSystem system) const noexcept;
+    bool ticket_current_locked(const AdmittedTune& ticket) const noexcept;
+    // True when this exact ticket owns the slot: a matching pending ticket, or
+    // the operation this ticket started (same lease instance and revision).
+    // Empty pending metadata alone is not ownership.
+    bool ticket_owns_slot_locked(std::size_t slot,
+                                 const AdmittedTune& ticket) const noexcept;
+    void set_operation_locked(std::size_t slot, ReceiverTuneOperation operation,
+                              std::uint64_t lease_instance,
+                              std::uint64_t revision) noexcept;
+    void clear_operation_locked(std::size_t slot) noexcept;
+    // Ownership includes the operation kind, so a cancelled direct (tuning,
+    // revision 0) completion can never erase a cleanup marker recorded for the
+    // same lease instance.
+    bool operation_owned_by_locked(std::size_t slot, ReceiverTuneOperation kind,
+                                   std::uint64_t lease_instance,
+                                   std::uint64_t revision) const noexcept;
+    void clear_operation_if_owner_locked(std::size_t slot, ReceiverTuneOperation kind,
+                                         std::uint64_t lease_instance,
+                                         std::uint64_t revision) noexcept;
+    // Invalidate current while retaining the last-successful history.
+    void invalidate_current_locked(std::size_t slot) noexcept;
+    static TuneRecord tune_record(const TuneRequest& request) noexcept;
+    // Drops the pending ticket but leaves the operation marker alone, so a
+    // synchronous logical-teardown invalidation keeps the receiver excluded
+    // until the in-flight execution returns.
+    void clear_pending_locked(std::size_t slot) noexcept;
+    // Completes the exact ticket: drops its pending metadata and returns the
+    // operation marker to idle.  It is a no-op when a newer admission already
+    // owns the slot, so a stale task can never disturb a replacement ticket.
+    void complete_tune_locked(std::size_t slot, const AdmittedTune& ticket) noexcept;
+    // One shared tune execution helper for both entrances.  It runs with the
+    // receiver lock held and implements the exact legacy hardware sequence.
+    // Admitted tickets use the acceptance origin and end-to-end budget; the
+    // legacy direct entrance keeps its post-power origin.
+    Result<void> run_tune(std::size_t slot, const TuneRequest& request, bool admitted,
+                          const AdmittedTune& ticket) noexcept;
 
     ReceiverBackend& backend_;
     ReceiverTokenSource& token_source_;
@@ -269,11 +415,24 @@ private:
     std::uint64_t next_lease_id_ = 1U;
     std::uint64_t next_attachment_id_ = 1U;
     std::uint64_t last_attachment_id_ = 0U;
+    std::uint64_t next_lease_instance_ = 1U;
     std::uint64_t generation_ = 1U;
     std::array<Lease, kReceiverEngineCapacity> leases_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_lease_ids_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_attachment_ids_{};
     std::array<ReceiverState, kReceiverEngineCapacity> states_{};
+    bool strict_enabled_ = false;
+    std::array<ReceiverCapability, kReceiverEngineCapacity> strict_capabilities_{};
+    std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations_{};
+    // Identity of the operation recorded in operations_.  A direct legacy tune
+    // records revision 0; a strict admission records its tune revision; a
+    // cleanup records the lease instance.  This lets a stale ticket finalize
+    // only its own operation and never a replacement lease's.
+    std::array<std::uint64_t, kReceiverEngineCapacity> operation_instances_{};
+    std::array<std::uint64_t, kReceiverEngineCapacity> operation_revisions_{};
+    std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata_{};
+    std::array<std::uint64_t, kReceiverEngineCapacity> tune_revisions_{};
+    std::array<PendingTune, kReceiverEngineCapacity> pending_{};
     mutable std::mutex mutex_;
     mutable std::array<std::mutex, kReceiverEngineCapacity> receiver_mutexes_{};
 };
