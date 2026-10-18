@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, tuning, and control-connection subsets, the leased receiver snapshot observation listed below, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, tuning, control-connection, and control-client subsets, the leased receiver snapshot observation listed below, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -196,12 +196,12 @@
       },
       {
         "path": "src/control_connection.cpp",
-        "sha256": "fe6b658194483d7c040a766d4633bf5c4f9c2f669d5e30f60e89cbf91abf033e",
+        "sha256": "b66976ed84e7134cc4d8c858ae862491610d8f923674d1743dfc458b6867082d",
         "spdx": "MIT"
       },
       {
         "path": "tests/control_connection_tests.cpp",
-        "sha256": "31b768fde2ba515b2c288323293ab8f325e42f60f3df4aac5547c65d41bc1a8f",
+        "sha256": "859a16597c8d7dae83d10d430c31f6a9c87f3ca3680c5e630744fc21a2af236e",
         "spdx": "MIT"
       },
       {
@@ -226,6 +226,32 @@
       ]
     },
     "contributors": "Existing pre-correction component work was authored by Opus. Incremental implementation work in the handoff execution was authored by GPT-6-Luna according to the parent subagent history/CLI invocation; the worker self-label is not used for attribution."
+  },
+  "control_client": {
+    "method": "Independent portable UDTV client orchestration over the accepted wire codec, typed records, and JSON exporter. Product transport remains behind the ClientTransport byte interface.",
+    "authority": [
+      "implementation/reports/next-client-migration-facts.md",
+      "implementation/reports/client-runtime-publisher-gap-facts.md",
+      "shared/design/common-wire-draft.md",
+      "shared/design/wire-record-layout.md",
+      "shared/design/common-api-contract.md",
+      "shared/design/adoption-status.md",
+      "shared/design/independent-code-policy.md"
+    ],
+    "scope": "One bounded HELLO, LIST, and STATUS sequence on one byte transport, with response ID/opcode checks, epoch binding, typed error mapping, one outstanding request, timeout and failure close, and immutable list/status snapshot output. No socket, product endpoint, CLI, or device implementation is in this MIT component.",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_client.h",
+        "sha256": "9b94793c6ad3ca68819e1c11612a722c134d380a56124d2797fd95b42c680b6c",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/control_client.cpp",
+        "sha256": "a3f3c87d42deedda0841b2a3d89a710bc14bcb0f70158ea9c633256e943235ac",
+        "spdx": "MIT"
+      }
+    ],
+    "contributors": "GPT-6-Luna, identified from the parent subagent history/CLI invocation."
   },
   "json": {
     "method": "New independent portable serializer; it consumes the existing typed STATUS records and full canonical-context validator.",

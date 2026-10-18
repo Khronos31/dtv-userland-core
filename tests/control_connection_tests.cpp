@@ -476,6 +476,8 @@ void test_status_shell()
 
     CHECK(w::build_status_shell(*list, context, snapshot, w::Scope{w::ScopeKind::enclosure, 0U},
                                 *status) == Error::OK);
+    CHECK(status->enclosure.present &&
+          status->enclosure.value.identity.uniqueness == w::Uniqueness::not_applicable);
     CHECK(status->functions.present && status->functions.value.count == 1U);
     CHECK(status->receivers.present && status->receivers.value.count == 3U);
     CHECK(status->readers.present && status->readers.value.count == 0U);
@@ -493,6 +495,19 @@ void test_status_shell()
                   decoded.value().snapshot.sequence == 3U);
         }
     }
+
+    w::ListResponse unique_list = *list;
+    unique_list.enclosure.value.identity.serial_state = w::IdentitySerialState::present;
+    unique_list.enclosure.value.identity.serial.present = true;
+    set_text(unique_list.enclosure.value.identity.serial.value, "scan-unique-serial");
+    unique_list.enclosure.value.identity.uniqueness = w::Uniqueness::unique_in_scan;
+    CHECK(w::validate_list_response(unique_list) == Error::OK);
+    CHECK(w::build_status_shell(unique_list, context, snapshot,
+                                w::Scope{w::ScopeKind::enclosure, 0U}, *status) == Error::OK);
+    CHECK(status->enclosure.present &&
+          status->enclosure.value.identity.serial_state == w::IdentitySerialState::present &&
+          status->enclosure.value.identity.uniqueness == w::Uniqueness::unknown);
+    CHECK(w::encode_status_frame(13U, *status, unique_list, out));
 
     CHECK(w::build_status_shell(*list, context, snapshot, w::Scope{w::ScopeKind::receiver, 7U},
                                 *status) == Error::OK);

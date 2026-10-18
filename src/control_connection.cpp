@@ -305,6 +305,12 @@ Error build_status_shell(const ListResponse& canonical, const Context& context,
     out.snapshot = snapshot;
     out.scope = scope;
     out.enclosure = canonical.enclosure;
+    if (out.enclosure.present) {
+        Identity& identity = out.enclosure.value.identity;
+        identity.uniqueness = identity.serial_state == IdentitySerialState::absent
+                                  ? Uniqueness::not_applicable
+                                  : Uniqueness::unknown;
+    }
     out.topology = canonical.topology;
     out.functions.present = false;
     out.receivers.present = false;
