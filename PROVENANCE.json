@@ -215,12 +215,12 @@
       "source_files": [
         {
           "path": "include/dtv/userland/detail/receiver_engine.h",
-          "sha256": "e7d87bbe2234293fae4df11170249edc31b3e1d6d0591142fe4c63e8f42184f5",
+          "sha256": "ca0212b9368149276eb9c44d8af65175c6e68a6e7f61944121599351678bd941",
           "spdx": "MIT"
         },
         {
           "path": "src/receiver_engine.cpp",
-          "sha256": "dac6daad549a6fe63aa24ce0fa8ff8888bc5e1d2e37858c30fb3eca907d76f6c",
+          "sha256": "a104d04c0b4ec7ae42884bdd8012a4ac5a383494941ef29519d8b0ab7c3b37f8",
           "spdx": "MIT"
         }
       ]
@@ -329,5 +329,29 @@
     "neutral_types": "Attachment, StreamCounters, StreamFinalSnapshot, ReceiverId, ReceiverToken, and ReceiverSystem are the unchanged neutral declarations split from include/dtv/userland/detail/receiver_engine.h into include/dtv/userland/detail/stream_session_types.h so a capture-only build does not depend on the disabled receiver header. StreamTerminal and StreamReadResult preserve the legacy PX4 numbering/field set. Declaration names, layout, defaults, and enum values are preserved and old receiver source compatibility is retained.",
     "incarnation_exception": "The sole approved behavior exception is a session-local nonwrapping u64 incarnation. It is incremented under the same session mutex at admitted logical attachment publication (including a publication whose later bridge startup fails) and never on validation/BUSY/allocation rejection. A read captures it when it first validates the attachment, includes the mismatch in its wait predicate, and checks it immediately after wait/reacquisition before any packet, counter, draining, or final access, returning NOT_FOUND without touching the replacement session. A same-incarnation empty detach keeps the old already-validated reader EOF. Incarnation exhaustion rejects the next logical attach with RESOURCE_LIMIT after the external validation/BUSY checks and before allocating or mutating state; there is no wrap, global shutdown, or physical reset. This is not the old source expression and has no existing oracle.",
     "new_files": "include/dtv/userland/detail/stream_session_types.h, include/dtv/userland/detail/packet_stream_session.h, src/packet_stream_session.cpp, tests/packet_stream_session_tests.cpp, tests/consumer/capture/, tests/consumer/capture_receiver/, tests/consumer/missing_capture/ and the capture CMake/install wiring are new and carry MIT. The product adapter changes and the instrumented fixed-old test copy remain GPL-2.0-only in px4-userland."
+   },
+  "stream_v1_authority": {
+    "method": "New independent portable implementation of the adopted v1 stream lifecycle in the existing common ReceiverEngine and a v1 per-attachment queue policy in the existing PacketStreamSession. No product poll loop, socket, worker, device, or GPL implementation was copied; the common component keeps its core+Threads dependency and adds no wire/card/capture requirement.",
+    "authority": [
+      "reports/runtime-stream-decision-brief.md and reports/runtime-stream-ownership-design.md",
+      "reports/runtime-stream-preimplementation-critique.md and the 2026-10-18 user standalone-exit decision",
+      "shared/design/adoption-status.md, common-api-contract.md, common-wire-draft.md, wire-record-layout.md, ownership-security-contract.md",
+      "reports/stream-v1-authority-code-task.md and reports/stream-v1-authority-correction-task.md"
+    ],
+    "scope": "Immutable stream contract mode selected before the first ACQUIRE; typed v1 START/reserve/prepare/commit/abort over an owned ticket carrying epoch/owner/lease-instance/slot/stream/reservation; a successful-current-tune revision binding; nonwrapping stream ID and reservation issuance; a two-phase metadata/worker STOP with a once-issued cleanup ticket and a retained unquiesced typed final; and a v1 per-attachment queue policy that evicts the oldest unread complete packet with a saturating eviction count. The legacy entrances and the strict-Hz, card and packet-session behavior are preserved.",
+    "excluded_scope": "The product P poll/worker loop, sockets, ACK writing, OS transports, process shutdown, native Windows/Android execution, writer sequence/partial-frame accounting, CARD/data clients and the final release pin remain outside this phase-1 unit.",
+    "known_limitations": [{
+      "issue": "https://github.com/Khronos31/dtv-userland-core/issues/1",
+      "scope": "Concurrent queued prepare and cleanup before backend start can execute in reverse receiver-mutex order, leaving a live capture after cleanup reported quiescence. Release remains excluded; repeated physical cleanup is unavailable for that ticket.",
+      "disposition": "Deferred under the user's limited-reach issue policy. Existing product sources do not yet call these v1 prepare/cleanup entrances. Product wire/worker integration must evaluate actual reachability and preserve prepare-to-cleanup ordering or address the issue; generic concurrent API acceptance remains limited."
+    }],
+    "source_files": [
+      { "path": "include/dtv/userland/detail/receiver_engine.h", "sha256": "ca0212b9368149276eb9c44d8af65175c6e68a6e7f61944121599351678bd941", "spdx": "MIT" },
+      { "path": "src/receiver_engine.cpp", "sha256": "a104d04c0b4ec7ae42884bdd8012a4ac5a383494941ef29519d8b0ab7c3b37f8", "spdx": "MIT" },
+      { "path": "include/dtv/userland/detail/packet_stream_session.h", "sha256": "bc7341e7d0baa0d0e1a2c2b475381372cab0ac26cfcd4c2ab5a0540cea13e925", "spdx": "MIT" },
+      { "path": "src/packet_stream_session.cpp", "sha256": "3cd961eb5bd1de987cbf4bb69708a5c0c18dad45fcf1cd82921a0807f8641c4e", "spdx": "MIT" },
+      { "path": "CMakeLists.txt", "sha256": "6262e4de43b771c30c25417c0a5af96163abfb268e1538058acf91366c120b5a", "spdx": "MIT" }
+    ],
+    "new_files": "tests/stream_v1_authority_tests.cpp, tests/stream_v1_store_tests.cpp, tests/stream_v1_owner_cleanup_tests.cpp and tests/stream_v1_late_prepare_tests.cpp are new MIT tests; only the records above are the independent v1 authority and store policy."
   }
 }

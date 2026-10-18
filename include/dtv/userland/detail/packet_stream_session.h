@@ -25,6 +25,18 @@
 // are not a stable API.
 namespace dtv::userland::detail {
 
+// Per-attachment packet-queue policy for the shared store.  The legacy policy
+// keeps the accepted behavior: a full ring rejects the incoming packet and
+// sets the slow-consumer terminal.  The v1 policy evicts the oldest unread
+// complete packet and continues, counting each actual eviction so a small
+// overflow does not by itself end the stream.  It is an internal policy knob,
+// not the adopted public capture contract, and it changes no public counter
+// vocabulary.
+enum class StreamQueuePolicy : std::uint8_t {
+    legacy = 0U,
+    evict_oldest = 1U,
+};
+
 class PacketStreamSession {
 public:
     // Fixed complete-packet granularity of the queue payload.
@@ -50,7 +62,9 @@ public:
     // observes a mismatch after a detach/reuse.  A later product bridge-start
     // failure calls abandon_attach_locked() and keeps the increment.
     Result<void> begin_attach_locked(const Attachment& identity,
-                                     std::size_t queue_packets) noexcept;
+                                     std::size_t queue_packets,
+                                     StreamQueuePolicy policy =
+                                         StreamQueuePolicy::legacy) noexcept;
 
     // Compensation for a failed product startup after publication.  The
     // logical publication already happened, so this only clears the active
@@ -66,8 +80,12 @@ public:
 
     // Generic packet append after the product's continuity/TEI observation:
     // accounting precedes a full-ring rejection, the slow-consumer terminal is
-    // set once, and a normal append writes the tail and wakes readers.
+    // set once, and a normal append writes the tail and wakes readers.  Under
+    // the v1 policy a full ring instead evicts the oldest unread complete
+    // packet and stores the incoming one; the eviction is counted separately
+    // and the slow-consumer terminal is not set.
     void append_locked(ByteView packet) noexcept;
+
 
     // Amend the retained final terminal for an exact still-valid identity.
     void amend_final_terminal_locked(const Attachment& identity,
@@ -127,6 +145,11 @@ public:
     StreamFinalSnapshot final_snapshot{};
     StreamTerminal terminal = StreamTerminal::none;
     StreamCounters counters{};
+    StreamQueuePolicy queue_policy = StreamQueuePolicy::legacy;
+    // Actual evictions performed by the v1 evict-oldest policy.  Saturating
+    // with an explicit overflow flag; it never wraps.
+    std::uint64_t evicted_packets = 0U;
+    bool evicted_overflow = false;
     // Session-local replacement identity.  It is never zero-after-wrap: a
     // logged publication increments it, and exhaustion quarantines the
     // session's attachments rather than resetting.

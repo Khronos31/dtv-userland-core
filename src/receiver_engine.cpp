@@ -180,6 +180,9 @@ Result<AcquireResult> ReceiverEngine::acquire(std::uint64_t client_id,
     std::uint64_t lease_id_value = 0U;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The first ACQUIRE freezes the stream contract mode even when the
+        // product never called configure_stream_contract.
+        contract_locked_ = true;
         if (leases_[slot].active)
             return Result<AcquireResult>::failure(Error::BUSY);
         if (states_[slot] == ReceiverState::error)
@@ -265,6 +268,20 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
         const int index = find_lease_locked(client_id, lease_id);
         if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
         slot = leases_[static_cast<std::size_t>(index)].slot;
+        // A v1 lease is reclaimed only after its exact ticket cleanup has been
+        // recorded complete.  Until then the legacy teardown must not silently
+        // detach the v1 data plane with the ACQUIRE-token identity.
+        if (contract_ == StreamContract::v1) {
+            const Lease& v1lease = leases_[slot];
+            if (v1lease.stream_state == StreamState::armed ||
+                v1lease.stream_state == StreamState::attaching ||
+                v1lease.stream_state == StreamState::active ||
+                v1lease.stream_state == StreamState::revoked ||
+                v1lease.stream_state == StreamState::closing ||
+                v1lease.stream_cleanup_pending ||
+                v1lease.capture_maybe_active || v1lease.stream_maybe_attached)
+                return Result<void>::failure(Error::NOT_READY);
+        }
         // Linearize cleanup with ATTACH before waiting for the receiver
         // operation.  ATTACH will compensate if its finite start is already
         // in progress.
@@ -632,7 +649,9 @@ Result<AdmittedTune> ReceiverEngine::admit(std::uint64_t client_id, std::uint64_
     if (lease.stream_state == StreamState::armed ||
         lease.stream_state == StreamState::attaching ||
         lease.stream_state == StreamState::active ||
-        lease.stream_state == StreamState::revoked)
+        lease.stream_state == StreamState::revoked ||
+        lease.stream_state == StreamState::closing ||
+        lease.stream_cleanup_pending)
         return Result<AdmittedTune>::failure(Error::BUSY);
     // An active tune or hardware cleanup on this receiver is BUSY rather than
     // a blocking wait on the poll thread.
@@ -695,7 +714,9 @@ Result<void> ReceiverEngine::execute_admitted_tune(const AdmittedTune& ticket) n
     if (lease.stream_state == StreamState::armed ||
         lease.stream_state == StreamState::attaching ||
         lease.stream_state == StreamState::active ||
-        lease.stream_state == StreamState::revoked) {
+        lease.stream_state == StreamState::revoked ||
+        lease.stream_state == StreamState::closing ||
+        lease.stream_cleanup_pending) {
         std::lock_guard<std::mutex> lock(mutex_);
         complete_tune_locked(slot, ticket);
         return Result<void>::failure(Error::BUSY);
@@ -756,9 +777,646 @@ Result<void> ReceiverEngine::revoke_tune_ticket(std::uint64_t client_id,
     return Result<void>::success();
 }
 
+StreamPhase ReceiverEngine::phase_of(StreamState state) noexcept
+{
+    switch (state) {
+    case StreamState::none: return StreamPhase::none;
+    case StreamState::armed: return StreamPhase::armed;
+    case StreamState::attaching: return StreamPhase::attaching;
+    case StreamState::active: return StreamPhase::active;
+    case StreamState::closing: return StreamPhase::closing;
+    case StreamState::revoked:
+    case StreamState::consumed: return StreamPhase::ended;
+    }
+    return StreamPhase::none;
+}
+
+Result<void> ReceiverEngine::configure_stream_contract(StreamContract contract,
+                                                       std::uint64_t context_epoch) noexcept
+{
+    if (contract != StreamContract::legacy && contract != StreamContract::v1)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    if (context_epoch == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_locked_) return Result<void>::failure(Error::BUSY);
+    for (const Lease& lease : leases_) {
+        if (lease.active) return Result<void>::failure(Error::BUSY);
+    }
+    contract_ = contract;
+    context_epoch_ = context_epoch;
+    contract_locked_ = true;
+    return Result<void>::success();
+}
+
+StreamContract ReceiverEngine::stream_contract() const noexcept
+{
+    return contract_;
+}
+
+bool ReceiverEngine::stream_ticket_matches_locked(std::size_t slot,
+                                                  const StreamAttachTicket& ticket,
+                                                  StreamState expected) const noexcept
+{
+    if (slot >= kReceiverEngineCapacity) return false;
+    const Lease& lease = leases_[slot];
+    return lease.active && lease.stream_id == ticket.stream_id &&
+           lease.instance == ticket.lease_instance &&
+           lease.stream_reservation == ticket.reservation &&
+           lease.stream_state == expected && ticket.epoch == context_epoch_ &&
+           lease.client_id == ticket.client_id &&
+           lease.stream_revision == ticket.revision &&
+           lease.stream_deadline_ms == ticket.deadline_ms &&
+           lease.stream_consumed_token == ticket.token;
+}
+
+bool ReceiverEngine::stream_cleanup_ticket_matches_locked(
+    std::size_t slot, const StreamAttachTicket& ticket) const noexcept
+{
+    if (slot >= kReceiverEngineCapacity) return false;
+    const Lease& lease = leases_[slot];
+    return lease.active && lease.stream_id == ticket.stream_id &&
+           lease.instance == ticket.lease_instance &&
+           lease.stream_reservation == ticket.reservation &&
+           ticket.epoch == context_epoch_ && lease.client_id == ticket.client_id &&
+           lease.stream_revision == ticket.revision &&
+           lease.stream_deadline_ms == ticket.deadline_ms &&
+           lease.stream_consumed_token == ticket.token;
+}
+
+StreamStopResult ReceiverEngine::stop_result_of(const Lease& lease) noexcept
+{
+    StreamStopResult result{};
+    result.final_valid = lease.stream_final_valid;
+    result.terminal = lease.stream_final_terminal;
+    result.quiesced = lease.stream_quiesced;
+    result.cleanup_error = lease.stream_cleanup_error;
+    result.stream_id = lease.stream_final_stream_id;
+    return result;
+}
+
+void ReceiverEngine::record_stream_cleanup_locked(std::size_t slot, Error result,
+                                                  bool quiesced) noexcept
+{
+    Lease& lease = leases_[slot];
+    const bool first = !lease.stream_cleanup_completed;
+    if (first) lease.stream_cleanup_completed = true;
+    // The primary error is the first non-OK outcome and is never cleared.
+    if (result != Error::OK && lease.stream_cleanup_error == Error::OK)
+        lease.stream_cleanup_error = result;
+    // Physical quiescence is an independent observation: a late successful
+    // cleanup may update it even when a primary error is retained.
+    if (quiesced) lease.stream_quiesced = true;
+    // A stream becomes reusable only for a fully clean, quiesced outcome.
+    if (result == Error::OK && quiesced && lease.stream_cleanup_error == Error::OK) {
+        lease.stream_cleanup_pending = false;
+        lease.stream_prepared = false;
+        lease.stream_prepare_inflight = false;
+        lease.stream_maybe_attached = false;
+        lease.capture_maybe_active = false;
+        lease.attachment_id = 0U;
+        lease.stream_state = StreamState::none;
+        set_state_locked(slot, ReceiverState::tuned);
+    } else {
+        // Retain the cleanup responsibility, ownership and exclusion.
+        lease.stream_cleanup_pending = true;
+        lease.stream_state = StreamState::closing;
+        set_state_locked(slot, ReceiverState::error);
+    }
+    // Keep the lease-lifetime last terminal consistent with this stream's
+    // retained final on every completion.  A primary error discovered on a
+    // late completion must be visible through both observations; the next START
+    // preserves this finalized tuple for the previous stream.
+    lease.last_final_valid = lease.stream_final_valid;
+    lease.last_final_stream_id = lease.stream_final_stream_id;
+    lease.last_terminal = lease.stream_final_terminal;
+    lease.last_error = lease.stream_cleanup_error;
+    lease.last_quiesced = lease.stream_quiesced;
+    (void)first;
+}
+
+Result<StreamStartResult> ReceiverEngine::start_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t revision,
+    std::uint64_t now_ms, std::uint64_t arm_budget_ms) noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<StreamStartResult>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_ != StreamContract::v1)
+        return Result<StreamStartResult>::failure(Error::UNSUPPORTED);
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index < 0) return Result<StreamStartResult>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[static_cast<std::size_t>(index)];
+    const std::size_t slot = lease.slot;
+    if (states_[slot] != ReceiverState::tuned)
+        return Result<StreamStartResult>::failure(Error::NOT_READY);
+    if (strict_enabled_ && operations_[slot] != ReceiverTuneOperation::idle)
+        return Result<StreamStartResult>::failure(Error::NOT_READY);
+    if (lease.stream_state != StreamState::none || lease.stream_cleanup_pending)
+        return Result<StreamStartResult>::failure(Error::BUSY);
+    // The revision must be the receiver's successful current tune revision.
+    // Admission alone advances the counter but invalidates current until the
+    // execution succeeds, so START is bound to current_valid/current_revision
+    // rather than to the admission counter.
+    if (revision == 0U || !tune_metadata_[slot].current_valid ||
+        tune_metadata_[slot].current_revision != revision)
+        return Result<StreamStartResult>::failure(Error::INVALID_ARGUMENT);
+    // Nonwrapping stream-ID and reservation issuance before any mutation.
+    if (next_stream_id_ == std::numeric_limits<std::uint64_t>::max())
+        return Result<StreamStartResult>::failure(Error::RESOURCE_LIMIT);
+    if (next_reservation_ == std::numeric_limits<std::uint64_t>::max())
+        return Result<StreamStartResult>::failure(Error::RESOURCE_LIMIT);
+    const auto token = token_source_.generate();
+    if (!token) return Result<StreamStartResult>::failure(token.error());
+    const std::uint64_t stream_id = next_stream_id_;
+    ++next_stream_id_;
+    const std::uint64_t reservation = next_reservation_;
+    ++next_reservation_;
+    // Overflow-safe, nonwrapping armed deadline.
+    const std::uint64_t expires_at_ms =
+        now_ms > std::numeric_limits<std::uint64_t>::max() - arm_budget_ms
+            ? std::numeric_limits<std::uint64_t>::max()
+            : now_ms + arm_budget_ms;
+    // Preserve the previous stream's terminal for the lease lifetime before
+    // the current-stream final is reset for the new stream.
+    if (lease.stream_final_valid) {
+        lease.last_final_valid = true;
+        lease.last_final_stream_id = lease.stream_final_stream_id;
+        lease.last_terminal = lease.stream_final_terminal;
+        lease.last_error = lease.stream_cleanup_error;
+        lease.last_quiesced = lease.stream_quiesced;
+    }
+    lease.stream_id = stream_id;
+    lease.stream_revision = revision;
+    lease.stream_reservation = reservation;
+    lease.stream_deadline_ms = expires_at_ms;
+    lease.stream_token = token.value();
+    lease.stream_consumed_token = ReceiverToken{};
+    lease.stream_cleanup_pending = false;
+    lease.stream_cleanup_issued = false;
+    lease.stream_cleanup_started = false;
+    lease.stream_cleanup_completed = false;
+    lease.stream_quiesced = false;
+    lease.stream_cleanup_error = Error::OK;
+    lease.stream_final_valid = false;
+    lease.stream_final_terminal = 0U;
+    lease.stream_final_stream_id = 0U;
+    lease.stream_state = StreamState::armed;
+    StreamStartResult result{};
+    result.epoch = context_epoch_;
+    result.stream_id = stream_id;
+    result.token = lease.stream_token;
+    result.expires_at_ms = expires_at_ms;
+    return Result<StreamStartResult>::success(result);
+}
+
+Result<StreamAttachTicket> ReceiverEngine::reserve_attach_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t epoch,
+    std::uint64_t stream_id, const ReceiverToken& token, std::uint64_t now_ms) noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<StreamAttachTicket>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_ != StreamContract::v1)
+        return Result<StreamAttachTicket>::failure(Error::UNSUPPORTED);
+    if (epoch != context_epoch_)
+        return Result<StreamAttachTicket>::failure(Error::INVALID_ARGUMENT);
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index < 0) return Result<StreamAttachTicket>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[static_cast<std::size_t>(index)];
+    if (lease.stream_state != StreamState::armed ||
+        lease.stream_id != stream_id || !(lease.stream_token == token))
+        return Result<StreamAttachTicket>::failure(Error::NOT_FOUND);
+    // Armed expiry closes only the stream, retains a terminal and keeps the
+    // lease.
+    if (now_ms >= lease.stream_deadline_ms) {
+        lease.stream_state = StreamState::none;
+        lease.stream_token = ReceiverToken{};
+        lease.stream_final_valid = true;
+        lease.stream_final_terminal = static_cast<std::uint8_t>(StreamTerminal::stopped);
+        lease.stream_final_stream_id = lease.stream_id;
+        lease.stream_quiesced = true;
+        lease.last_final_valid = true;
+        lease.last_final_stream_id = lease.stream_id;
+        lease.last_terminal = lease.stream_final_terminal;
+        lease.last_error = Error::OK;
+        lease.last_quiesced = true;
+        lease.stream_id = 0U;
+        return Result<StreamAttachTicket>::failure(Error::TIMEOUT);
+    }
+    if (next_reservation_ == std::numeric_limits<std::uint64_t>::max())
+        return Result<StreamAttachTicket>::failure(Error::RESOURCE_LIMIT);
+    const std::uint64_t reservation = next_reservation_;
+    ++next_reservation_;
+    const std::size_t slot = lease.slot;
+    // Consume the token exactly once; a replayed ATTACH cannot match again.
+    // The consumed value is retained as the exact D2 attachment identity.
+    lease.stream_consumed_token = token;
+    lease.stream_token = ReceiverToken{};
+    lease.stream_reservation = reservation;
+    lease.stream_prepare_inflight = false;
+    lease.stream_prepared = false;
+    lease.stream_state = StreamState::attaching;
+    StreamAttachTicket ticket{};
+    ticket.epoch = epoch;
+    ticket.client_id = lease.client_id;
+    ticket.lease_instance = lease.instance;
+    ticket.slot = slot;
+    ticket.stream_id = lease.stream_id;
+    ticket.revision = lease.stream_revision;
+    ticket.reservation = reservation;
+    ticket.token = token;
+    ticket.deadline_ms = lease.stream_deadline_ms;
+    return Result<StreamAttachTicket>::success(ticket);
+}
+
+Result<void> ReceiverEngine::prepare_attach_v1(const StreamAttachTicket& ticket) noexcept
+{
+    if (contract_ != StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    const std::size_t slot = ticket.slot;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stream_ticket_matches_locked(slot, ticket, StreamState::attaching))
+            return Result<void>::failure(Error::NOT_FOUND);
+        // A strict cleanup marker on the slot excludes a new prepare.
+        if (strict_enabled_ && operations_[slot] != ReceiverTuneOperation::idle)
+            return Result<void>::failure(Error::BUSY);
+        // Exactly one physical prepare claim per reservation.  A second
+        // prepare for the same ticket is refused before any backend call.
+        if (leases_[slot].stream_prepared || leases_[slot].stream_prepare_inflight)
+            return Result<void>::failure(Error::BUSY);
+        leases_[slot].stream_prepare_inflight = true;
+    }
+    // The worker serializes the physical start against release.  The engine
+    // never blocks the poll-side metadata entrance here.
+    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
+    Lease pending;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const Lease& lease = leases_[slot];
+        // A STOP/abort may have moved the stream to closing while this worker
+        // waited for receiver serialization.  The reservation identity must
+        // still match so the late prepare is folded into the same cleanup.
+        if (lease.stream_id != ticket.stream_id ||
+            lease.instance != ticket.lease_instance ||
+            lease.stream_reservation != ticket.reservation ||
+            ticket.epoch != context_epoch_)
+            return Result<void>::failure(Error::NOT_FOUND);
+        pending = lease;
+    }
+    const ReceiverId receiver = receivers_[slot];
+    Attachment attachment = attachment_for(pending, pending.stream_reservation);
+    attachment.token = ticket.token;
+    const auto started = backend_.start_capture(receiver, pending.system);
+    observe_disconnect(slot, started.error());
+    Error data_error = Error::OK;
+    bool data_attached = false;
+    if (started && stream_control_ != nullptr) {
+        const auto attached = stream_control_->attach(attachment);
+        observe_disconnect(slot, attached.error());
+        if (!attached)
+            data_error = attached.error();
+        else
+            data_attached = true;
+    }
+    const Error failure = !started ? started.error() : data_error;
+    bool prepared = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        Lease& lease = leases_[slot];
+        if (lease.stream_id != ticket.stream_id ||
+            lease.instance != ticket.lease_instance ||
+            lease.stream_reservation != ticket.reservation) {
+            // release serializes on receiver_lock and cannot replace the lease
+            // under us, so this is a defensive guard only.
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
+        lease.stream_prepare_inflight = false;
+        // Record physical ownership conservatively even when a STOP/abort
+        // already won or the call failed: a failed start may have partially
+        // enabled capture, and a failed attach may have retained a session.
+        // The exact-ticket cleanup compensates this once.
+        lease.capture_maybe_active = true;
+        if (stream_control_ != nullptr) {
+            lease.stream_maybe_attached = true;
+            lease.attachment_id = ticket.reservation;
+        }
+        (void)data_attached;
+        if (failure != Error::OK) {
+            if (lease.stream_state == StreamState::attaching)
+                lease.stream_state = StreamState::closing;
+            if (!lease.stream_cleanup_pending) {
+                lease.stream_cleanup_pending = true;
+                lease.stream_cleanup_issued = true;
+                lease.stream_final_valid = true;
+                lease.stream_final_terminal =
+                    static_cast<std::uint8_t>(StreamTerminal::stopped);
+                lease.stream_final_stream_id = lease.stream_id;
+            }
+            if (lease.stream_cleanup_error == Error::OK)
+                lease.stream_cleanup_error = failure;
+            set_state_locked(slot, ReceiverState::error);
+            return Result<void>::failure(failure);
+        }
+        if (lease.stream_state == StreamState::attaching) {
+            lease.stream_prepared = true;
+            prepared = true;
+        }
+    }
+    if (!prepared) {
+        // A STOP/abort/expiry linearized while the backend prepared: the
+        // stream is closing, ownership is retained, and this late prepare must
+        // not be converted to active.  Ensure the cleanup ticket is issued.
+        std::lock_guard<std::mutex> lock(mutex_);
+        Lease& lease = leases_[slot];
+        if (!lease.stream_cleanup_pending) {
+            lease.stream_cleanup_pending = true;
+            lease.stream_cleanup_issued = true;
+            lease.stream_final_valid = true;
+            lease.stream_final_terminal =
+                static_cast<std::uint8_t>(StreamTerminal::stopped);
+            lease.stream_final_stream_id = lease.stream_id;
+        }
+        lease.stream_state = StreamState::closing;
+        return Result<void>::failure(Error::NOT_FOUND);
+    }
+    return Result<void>::success();
+}
+
+Result<void> ReceiverEngine::commit_attach_v1(const StreamAttachTicket& ticket) noexcept
+{
+    if (contract_ != StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t slot = ticket.slot;
+    // Commit is valid only for a ticket whose prepare succeeded; a reserved
+    // ticket cannot publish active on its own.
+    if (!stream_ticket_matches_locked(slot, ticket, StreamState::attaching) ||
+        !leases_[slot].stream_prepared)
+        return Result<void>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[slot];
+    lease.stream_state = StreamState::active;
+    lease.capture_maybe_active = true;
+    set_state_locked(slot, ReceiverState::streaming);
+    return Result<void>::success();
+}
+
+Result<void> ReceiverEngine::abort_attach_v1(const StreamAttachTicket& ticket,
+                                             Error cause) noexcept
+{
+    if (contract_ != StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t slot = ticket.slot;
+    if (!stream_ticket_matches_locked(slot, ticket, StreamState::attaching) &&
+        !stream_ticket_matches_locked(slot, ticket, StreamState::armed))
+        return Result<void>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[slot];
+    // The cleanup ticket is issued once; a repeated abort does not re-issue it
+    // and never clears an already recorded primary error.
+    if (!lease.stream_cleanup_pending) {
+        lease.stream_cleanup_pending = true;
+        lease.stream_cleanup_issued = true;
+        lease.stream_final_valid = true;
+        lease.stream_final_terminal =
+            static_cast<std::uint8_t>(StreamTerminal::stopped);
+        lease.stream_final_stream_id = lease.stream_id;
+    }
+    if (cause != Error::OK && lease.stream_cleanup_error == Error::OK)
+        lease.stream_cleanup_error = cause;
+    lease.stream_state = StreamState::closing;
+    return Result<void>::success();
+}
+
+Result<StreamStopResult> ReceiverEngine::stop_stream_v1(std::uint64_t client_id,
+                                                        std::uint64_t lease_id,
+                                                        std::uint64_t stream_id) noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_ != StreamContract::v1)
+        return Result<StreamStopResult>::failure(Error::UNSUPPORTED);
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index < 0) return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[static_cast<std::size_t>(index)];
+    // Foreign or older stream IDs never touch a replacement stream.
+    if (stream_id == 0U || lease.stream_id != stream_id)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    if (lease.stream_cleanup_completed)
+        return Result<StreamStopResult>::success(stop_result_of(lease));
+    if (lease.stream_state == StreamState::armed) {
+        // Nothing was attached yet: cancel immediately, retain the terminal and
+        // keep the lease.
+        lease.stream_state = StreamState::none;
+        lease.stream_token = ReceiverToken{};
+        lease.stream_final_valid = true;
+        lease.stream_final_terminal = static_cast<std::uint8_t>(StreamTerminal::stopped);
+        lease.stream_final_stream_id = lease.stream_id;
+        lease.stream_quiesced = true;
+        lease.last_final_valid = true;
+        lease.last_final_stream_id = lease.stream_id;
+        lease.last_terminal = lease.stream_final_terminal;
+        lease.last_error = Error::OK;
+        lease.last_quiesced = true;
+        lease.stream_id = 0U;
+        StreamStopResult result = stop_result_of(lease);
+        result.final_valid = true;
+        result.quiesced = true;
+        result.stream_id = lease.last_final_stream_id;
+        return Result<StreamStopResult>::success(result);
+    }
+    bool issued_now = false;
+    if (lease.stream_state == StreamState::attaching ||
+        lease.stream_state == StreamState::active ||
+        lease.stream_state == StreamState::revoked ||
+        lease.stream_state == StreamState::closing) {
+        if (!lease.stream_cleanup_pending) {
+            lease.stream_cleanup_pending = true;
+            lease.stream_final_valid = true;
+            lease.stream_final_terminal =
+                static_cast<std::uint8_t>(StreamTerminal::stopped);
+            lease.stream_final_stream_id = lease.stream_id;
+        }
+        // The physical cleanup work is issued exactly once; repeated STOP
+        // returns the same retained observation without re-issuing it.
+        if (!lease.stream_cleanup_issued) {
+            lease.stream_cleanup_issued = true;
+            issued_now = true;
+        }
+        lease.stream_state = StreamState::closing;
+    }
+    StreamStopResult result = stop_result_of(lease);
+    result.cleanup_owner = issued_now;
+    return Result<StreamStopResult>::success(result);
+}
+
+Result<StreamStopResult> ReceiverEngine::expire_armed_v1(std::uint64_t client_id,
+                                                         std::uint64_t lease_id,
+                                                         std::uint64_t stream_id,
+                                                         std::uint64_t now_ms) noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_ != StreamContract::v1)
+        return Result<StreamStopResult>::failure(Error::UNSUPPORTED);
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index < 0) return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    Lease& lease = leases_[static_cast<std::size_t>(index)];
+    if (stream_id == 0U || lease.stream_id != stream_id)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    if (lease.stream_state != StreamState::armed || now_ms < lease.stream_deadline_ms)
+        return Result<StreamStopResult>::failure(Error::NOT_READY);
+    // Caller-owned finite deadline: cancel only the exact armed stream, retain
+    // the terminal and keep the lease.  No backend I/O and no receiver wait.
+    lease.stream_state = StreamState::none;
+    lease.stream_token = ReceiverToken{};
+    lease.stream_final_valid = true;
+    lease.stream_final_terminal = static_cast<std::uint8_t>(StreamTerminal::stopped);
+    lease.stream_final_stream_id = lease.stream_id;
+    lease.stream_quiesced = true;
+    lease.last_final_valid = true;
+    lease.last_final_stream_id = lease.stream_id;
+    lease.last_terminal = lease.stream_final_terminal;
+    lease.last_error = Error::OK;
+    lease.last_quiesced = true;
+    lease.stream_id = 0U;
+    StreamStopResult result = stop_result_of(lease);
+    result.final_valid = true;
+    result.quiesced = true;
+    result.stream_id = lease.last_final_stream_id;
+    return Result<StreamStopResult>::success(result);
+}
+
+Result<void> ReceiverEngine::complete_stream_cleanup_v1(const StreamAttachTicket& ticket,
+                                                        Error result, bool quiesced) noexcept
+{
+    if (contract_ != StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    const std::size_t slot = ticket.slot;
+    // Full-stamp revalidation includes the owner client ID.
+    if (!stream_cleanup_ticket_matches_locked(slot, ticket))
+        return Result<void>::failure(Error::NOT_FOUND);
+    if (!leases_[slot].stream_cleanup_pending &&
+        !leases_[slot].stream_cleanup_completed)
+        return Result<void>::failure(Error::NOT_FOUND);
+    record_stream_cleanup_locked(slot, result, quiesced);
+    return Result<void>::success();
+}
+
+Result<void> ReceiverEngine::run_stream_cleanup_v1(
+    const StreamAttachTicket& ticket) noexcept
+{
+    if (contract_ != StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    const std::size_t slot = ticket.slot;
+    std::uint64_t client_id = 0U;
+    std::uint64_t lease_id = 0U;
+    bool capture_maybe = false;
+    bool attached_maybe = false;
+    ReceiverSystem system = ReceiverSystem::terrestrial;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stream_cleanup_ticket_matches_locked(slot, ticket))
+            return Result<void>::failure(Error::NOT_FOUND);
+        Lease& lease = leases_[slot];
+        if (!lease.stream_cleanup_pending)
+            return Result<void>::failure(Error::NOT_FOUND);
+        // Exactly one physical worker cleanup claim.
+        if (lease.stream_cleanup_started)
+            return Result<void>::failure(Error::NOT_FOUND);
+        lease.stream_cleanup_started = true;
+        client_id = lease.client_id;
+        lease_id = lease.lease_id;
+        system = lease.system;
+    }
+    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
+    Attachment attachment{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stream_cleanup_ticket_matches_locked(slot, ticket))
+            return Result<void>::failure(Error::NOT_FOUND);
+        // Re-read the physical ownership after the receiver-serialization wait:
+        // a held prepare publishes start/attach ownership while this cleanup is
+        // waiting behind the same receiver mutex.  Snapshotting before the wait
+        // could miss that work entirely.
+        capture_maybe = leases_[slot].capture_maybe_active;
+        attached_maybe = leases_[slot].stream_maybe_attached;
+        attachment = attachment_for(leases_[slot], ticket.reservation);
+        // The exact START token, not the ACQUIRE token, is the D2 identity.
+        attachment.token = ticket.token;
+    }
+    Error first = Error::OK;
+    if (capture_maybe) {
+        const auto stopped = backend_.stop_capture(receivers_[slot], system);
+        observe_disconnect(slot, stopped.error());
+        if (!stopped) first = stopped.error();
+    }
+    bool detach_clean = true;
+    if (attached_maybe && stream_control_ != nullptr) {
+        const auto detached = stream_control_->detach(attachment);
+        observe_disconnect(slot, detached.error());
+        detach_clean = detached || detached.error() == Error::NOT_FOUND;
+        if (!detach_clean && first == Error::OK) first = detached.error();
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        const int index = find_lease_locked(client_id, lease_id);
+        if (index >= 0 && leases_[static_cast<std::size_t>(index)].instance ==
+                              ticket.lease_instance) {
+            record_stream_cleanup_locked(slot, first, detach_clean && first == Error::OK);
+        }
+    }
+    return first == Error::OK ? Result<void>::success()
+                              : Result<void>::failure(first);
+}
+
+Result<StreamStopResult> ReceiverEngine::stream_last_terminal_v1(
+    std::uint64_t client_id, std::uint64_t lease_id) const noexcept
+{
+    if (!valid_client(client_id) || lease_id == 0U)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (contract_ != StreamContract::v1)
+        return Result<StreamStopResult>::failure(Error::UNSUPPORTED);
+    const int index = find_lease_locked(client_id, lease_id);
+    if (index < 0) return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    const Lease& lease = leases_[static_cast<std::size_t>(index)];
+    if (!lease.last_final_valid)
+        return Result<StreamStopResult>::failure(Error::NOT_FOUND);
+    StreamStopResult result{};
+    result.final_valid = true;
+    result.stream_id = lease.last_final_stream_id;
+    result.terminal = lease.last_terminal;
+    result.cleanup_error = lease.last_error;
+    result.quiesced = lease.last_quiesced;
+    return Result<StreamStopResult>::success(result);
+}
+
 // Bounded deterministic seam for the nonwrapping revision-exhaustion path.
 // The symbol is always built so a test translation unit that declares it via
 // DTV_USERLAND_RECEIVER_TEST_ACCESS can link; production does not use it.
+void ReceiverEngine::set_stream_issuance_for_test(std::uint64_t next_stream_id,
+                                                  std::uint64_t next_reservation) noexcept
+{
+    std::lock_guard<std::mutex> lock(mutex_);
+    next_stream_id_ = next_stream_id;
+    next_reservation_ = next_reservation;
+}
+
 void ReceiverEngine::set_tune_revision_for_test(std::size_t slot,
                                                 std::uint64_t value) noexcept
 {
@@ -809,7 +1467,9 @@ Result<void> ReceiverEngine::tune(std::uint64_t client_id,
     if (lease.stream_state == StreamState::armed ||
         lease.stream_state == StreamState::attaching ||
         lease.stream_state == StreamState::active ||
-        lease.stream_state == StreamState::revoked) {
+        lease.stream_state == StreamState::revoked ||
+        lease.stream_state == StreamState::closing ||
+        lease.stream_cleanup_pending) {
         clear_direct_operation();
         return Result<void>::failure(Error::BUSY);
     }
@@ -1147,6 +1807,9 @@ Result<void> ReceiverEngine::start_stream(std::uint64_t client_id,
     if (!valid_client(client_id) || lease_id == 0U)
         return Result<void>::failure(Error::NOT_FOUND);
     std::lock_guard<std::mutex> lock(mutex_);
+    // The legacy lease-only entrance is rejected before any mutation in v1.
+    if (contract_ == StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
     const int index = find_lease_locked(client_id, lease_id);
     if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
     Lease& lease = leases_[static_cast<std::size_t>(index)];
@@ -1173,6 +1836,9 @@ Result<Attachment> ReceiverEngine::attach_stream(std::uint64_t lease_id,
     Lease pending;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The legacy ACQUIRE-token ATTACH is rejected before any mutation in v1.
+        if (contract_ == StreamContract::v1)
+            return Result<Attachment>::failure(Error::UNSUPPORTED);
         int index = -1;
         for (std::size_t candidate = 0U; candidate < leases_.size(); ++candidate) {
             const Lease& lease = leases_[candidate];
@@ -1341,6 +2007,9 @@ Result<StreamFinalSnapshot> ReceiverEngine::stop_stream(
     std::size_t slot = 0U;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The legacy lease-only STOP is rejected before any mutation in v1.
+        if (contract_ == StreamContract::v1)
+            return Result<StreamFinalSnapshot>::failure(Error::UNSUPPORTED);
         const int index = find_lease_locked(client_id, lease_id);
         if (index < 0)
             return Result<StreamFinalSnapshot>::failure(Error::NOT_FOUND);
@@ -1449,6 +2118,10 @@ Result<void> ReceiverEngine::detach_stream(const Attachment& attachment) noexcep
     const auto slot = static_cast<std::size_t>(found);
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        // The legacy auxiliary detach is rejected in v1; the v1 cleanup path
+        // uses the ticket-scoped helpers instead.
+        if (contract_ == StreamContract::v1)
+            return Result<void>::failure(Error::UNSUPPORTED);
         const Lease& lease = leases_[slot];
         if (!lease.active || lease.client_id != attachment.owner_client_id ||
             lease.lease_id != attachment.lease_id ||
@@ -1511,6 +2184,9 @@ Result<void> ReceiverEngine::revoke_stream(std::uint64_t client_id,
     if (!valid_client(client_id) || lease_id == 0U)
         return Result<void>::failure(Error::NOT_FOUND);
     std::lock_guard<std::mutex> lock(mutex_);
+    // The legacy metadata revoke entrance is rejected in v1.
+    if (contract_ == StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
     const int index = find_lease_locked(client_id, lease_id);
     if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
     Lease& lease = leases_[static_cast<std::size_t>(index)];
@@ -1528,6 +2204,9 @@ Result<void> ReceiverEngine::revoke_stream(std::uint64_t client_id,
     if (!valid_client(client_id) || lease_id == 0U)
         return Result<void>::failure(Error::NOT_FOUND);
     std::lock_guard<std::mutex> lock(mutex_);
+    // The legacy token revoke entrance (EOF helper) is rejected in v1.
+    if (contract_ == StreamContract::v1)
+        return Result<void>::failure(Error::UNSUPPORTED);
     const int index = find_lease_locked(client_id, lease_id);
     if (index < 0) return Result<void>::failure(Error::NOT_FOUND);
     Lease& lease = leases_[static_cast<std::size_t>(index)];
@@ -1549,8 +2228,11 @@ Result<ReceiverEngineStatus> ReceiverEngine::status() const noexcept
     status.states = states_;
     status.operations = operations_;
     status.tune_metadata = tune_metadata_;
-    for (std::size_t slot = 0U; slot < leases_.size(); ++slot)
+    for (std::size_t slot = 0U; slot < leases_.size(); ++slot) {
         status.leased[slot] = leases_[slot].active;
+        status.stream_phases[slot] =
+            static_cast<std::uint8_t>(phase_of(leases_[slot].stream_state));
+    }
     return Result<ReceiverEngineStatus>::success(status);
 }
 
@@ -1558,7 +2240,9 @@ Result<void> ReceiverEngine::cleanup_client(std::uint64_t client_id) noexcept
 {
     if (!valid_client(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     std::array<std::uint64_t, kReceiverEngineCapacity> lease_ids{};
-    // Revoke the complete connection atomically before any receiver I/O.  A
+    std::array<bool, kReceiverEngineCapacity> retained{};
+    bool any_retained = false;
+    // Revoke the connection metadata atomically before any receiver I/O.  A
     // slow cleanup on one bridge must not leave another lease attachable.
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1566,10 +2250,48 @@ Result<void> ReceiverEngine::cleanup_client(std::uint64_t client_id) noexcept
             Lease& lease = leases_[slot];
             if (!lease.active || lease.client_id != client_id) continue;
             lease_ids[slot] = lease.lease_id;
-            if (lease.stream_state == StreamState::armed ||
-                lease.stream_state == StreamState::attaching ||
-                lease.stream_state == StreamState::active)
-                lease.stream_state = StreamState::revoked;
+            const bool v1_stream =
+                contract_ == StreamContract::v1 &&
+                (lease.stream_state == StreamState::armed ||
+                 lease.stream_state == StreamState::attaching ||
+                 lease.stream_state == StreamState::active ||
+                 lease.stream_state == StreamState::revoked ||
+                 lease.stream_state == StreamState::closing ||
+                 lease.stream_cleanup_pending || lease.stream_prepared ||
+                 lease.stream_prepare_inflight || lease.capture_maybe_active ||
+                 lease.stream_maybe_attached);
+            if (v1_stream) {
+                // Integrate the owner teardown with the v1 exact-ticket
+                // cleanup: revoke the metadata and retain the lease until the
+                // worker cleanup is reconciled.  Never fall through to the
+                // legacy ACQUIRE-token detach.
+                if (lease.stream_state == StreamState::armed) {
+                    lease.stream_state = StreamState::none;
+                    lease.stream_token = ReceiverToken{};
+                    lease.stream_final_valid = true;
+                    lease.stream_final_terminal =
+                        static_cast<std::uint8_t>(StreamTerminal::stopped);
+                    lease.stream_final_stream_id = lease.stream_id;
+                    lease.stream_id = 0U;
+                } else {
+                    if (!lease.stream_cleanup_pending) {
+                        lease.stream_cleanup_pending = true;
+                        lease.stream_final_valid = true;
+                        lease.stream_final_terminal =
+                            static_cast<std::uint8_t>(StreamTerminal::stopped);
+                        lease.stream_final_stream_id = lease.stream_id;
+                    }
+                    lease.stream_cleanup_issued = true;
+                    lease.stream_state = StreamState::closing;
+                }
+                retained[slot] = true;
+                any_retained = true;
+            } else {
+                if (lease.stream_state == StreamState::armed ||
+                    lease.stream_state == StreamState::attaching ||
+                    lease.stream_state == StreamState::active)
+                    lease.stream_state = StreamState::revoked;
+            }
             // Revoke every targeted pending ticket and invalidate current in
             // this first metadata phase, before any blocking receiver cleanup.
             clear_pending_locked(slot);
@@ -1580,10 +2302,11 @@ Result<void> ReceiverEngine::cleanup_client(std::uint64_t client_id) noexcept
     }
     Error first = Error::OK;
     for (std::size_t slot = 0U; slot < lease_ids.size(); ++slot) {
-        if (lease_ids[slot] == 0U) continue;
+        if (lease_ids[slot] == 0U || retained[slot]) continue;
         const auto result = release_lease(client_id, lease_ids[slot]);
         if (first == Error::OK && !result) first = result.error();
     }
+    if (any_retained && first == Error::OK) first = Error::NOT_READY;
     return first == Error::OK ? Result<void>::success()
                               : Result<void>::failure(first);
 }
@@ -1597,6 +2320,8 @@ Result<void> ReceiverEngine::cleanup_all() noexcept
 {
     std::array<std::uint64_t, kReceiverEngineCapacity> client_ids{};
     std::array<std::uint64_t, kReceiverEngineCapacity> lease_ids{};
+    std::array<bool, kReceiverEngineCapacity> retained{};
+    bool any_retained = false;
     // Same two-phase rule as connection cleanup: revoke all logical stream
     // credentials before the first potentially blocking backend operation.
     {
@@ -1606,12 +2331,44 @@ Result<void> ReceiverEngine::cleanup_all() noexcept
             if (!lease.active) continue;
             client_ids[slot] = lease.client_id;
             lease_ids[slot] = lease.lease_id;
-            if (lease.stream_state == StreamState::armed ||
-                lease.stream_state == StreamState::attaching ||
-                lease.stream_state == StreamState::active)
-                lease.stream_state = StreamState::revoked;
-            // Revoke every pending ticket and invalidate current before the
-            // first potentially blocking backend operation.
+            const bool v1_stream =
+                contract_ == StreamContract::v1 &&
+                (lease.stream_state == StreamState::armed ||
+                 lease.stream_state == StreamState::attaching ||
+                 lease.stream_state == StreamState::active ||
+                 lease.stream_state == StreamState::revoked ||
+                 lease.stream_state == StreamState::closing ||
+                 lease.stream_cleanup_pending || lease.stream_prepared ||
+                 lease.stream_prepare_inflight || lease.capture_maybe_active ||
+                 lease.stream_maybe_attached);
+            if (v1_stream) {
+                if (lease.stream_state == StreamState::armed) {
+                    lease.stream_state = StreamState::none;
+                    lease.stream_token = ReceiverToken{};
+                    lease.stream_final_valid = true;
+                    lease.stream_final_terminal =
+                        static_cast<std::uint8_t>(StreamTerminal::stopped);
+                    lease.stream_final_stream_id = lease.stream_id;
+                    lease.stream_id = 0U;
+                } else {
+                    if (!lease.stream_cleanup_pending) {
+                        lease.stream_cleanup_pending = true;
+                        lease.stream_final_valid = true;
+                        lease.stream_final_terminal =
+                            static_cast<std::uint8_t>(StreamTerminal::stopped);
+                        lease.stream_final_stream_id = lease.stream_id;
+                    }
+                    lease.stream_cleanup_issued = true;
+                    lease.stream_state = StreamState::closing;
+                }
+                retained[slot] = true;
+                any_retained = true;
+            } else {
+                if (lease.stream_state == StreamState::armed ||
+                    lease.stream_state == StreamState::attaching ||
+                    lease.stream_state == StreamState::active)
+                    lease.stream_state = StreamState::revoked;
+            }
             clear_pending_locked(slot);
             invalidate_current_locked(slot);
             set_operation_locked(slot, ReceiverTuneOperation::cleanup,
@@ -1620,12 +2377,17 @@ Result<void> ReceiverEngine::cleanup_all() noexcept
     }
     Error first = Error::OK;
     for (std::size_t slot = 0U; slot < client_ids.size(); ++slot) {
-        if (client_ids[slot] == 0U) continue;
+        if (client_ids[slot] == 0U || retained[slot]) continue;
         const auto result = release_lease(client_ids[slot], lease_ids[slot]);
         if (first == Error::OK && !result) first = result.error();
     }
-    const auto backend_shutdown = backend_.shutdown();
-    if (first == Error::OK && !backend_shutdown) first = backend_shutdown.error();
+    // Do not announce backend shutdown while a v1 physical owner is retained
+    // or any release failed.
+    if (any_retained && first == Error::OK) first = Error::NOT_READY;
+    if (first == Error::OK) {
+        const auto backend_shutdown = backend_.shutdown();
+        if (!backend_shutdown) first = backend_shutdown.error();
+    }
     return first == Error::OK ? Result<void>::success()
                               : Result<void>::failure(first);
 }

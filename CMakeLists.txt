@@ -315,6 +315,26 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(receiver_hz_tests PRIVATE dtv::receiver)
         add_test(NAME receiver_hz_tests COMMAND receiver_hz_tests)
         set_tests_properties(receiver_hz_tests PROPERTIES TIMEOUT 120)
+
+        # v1 stream authority: immutable contract mode, typed START/reserve/
+        # prepare/commit/abort/STOP, two-phase cleanup and oldA->newB isolation.
+        add_executable(stream_v1_authority_tests tests/stream_v1_authority_tests.cpp)
+        target_link_libraries(stream_v1_authority_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_authority_tests COMMAND stream_v1_authority_tests)
+        set_tests_properties(stream_v1_authority_tests PROPERTIES TIMEOUT 120)
+
+        # v1 owner cleanup: exact-ticket physical stop/detach, owner death and
+        # shutdown retention, expiry/last terminal and full-stamp validation.
+        add_executable(stream_v1_owner_cleanup_tests tests/stream_v1_owner_cleanup_tests.cpp)
+        target_link_libraries(stream_v1_owner_cleanup_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_owner_cleanup_tests COMMAND stream_v1_owner_cleanup_tests)
+        set_tests_properties(stream_v1_owner_cleanup_tests PROPERTIES TIMEOUT 120)
+
+        # Late-prepare/cleanup ownership regression and Final/quiescence tuples.
+        add_executable(stream_v1_late_prepare_tests tests/stream_v1_late_prepare_tests.cpp)
+        target_link_libraries(stream_v1_late_prepare_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_late_prepare_tests COMMAND stream_v1_late_prepare_tests)
+        set_tests_properties(stream_v1_late_prepare_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)
@@ -325,6 +345,12 @@ if(DTV_USERLAND_BUILD_TESTING)
             COMMAND packet_stream_session_tests)
         # Outer bound behind the tests' own finite waits.
         set_tests_properties(packet_stream_session_tests PROPERTIES TIMEOUT 120)
+
+        # v1 per-attachment queue policy on the same store.
+        add_executable(stream_v1_store_tests tests/stream_v1_store_tests.cpp)
+        target_link_libraries(stream_v1_store_tests PRIVATE dtv::capture)
+        add_test(NAME stream_v1_store_tests COMMAND stream_v1_store_tests)
+        set_tests_properties(stream_v1_store_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_CARD)

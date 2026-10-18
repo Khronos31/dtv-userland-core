@@ -18,7 +18,8 @@ bool PacketStreamSession::same_identity(const Attachment& left,
 }
 
 Result<void> PacketStreamSession::begin_attach_locked(
-    const Attachment& new_identity, std::size_t queue_packets) noexcept
+    const Attachment& new_identity, std::size_t queue_packets,
+    StreamQueuePolicy policy) noexcept
 {
     if (attached || draining) return Result<void>::failure(Error::BUSY);
     // Exhaustion is internal-resource failure after the external BUSY check and
@@ -43,6 +44,11 @@ Result<void> PacketStreamSession::begin_attach_locked(
     final_snapshot = StreamFinalSnapshot{};
     terminal = StreamTerminal::none;
     counters = StreamCounters{};
+    // The queue policy is an immutable per-attachment selection made at
+    // publication.  Existing callers keep the legacy default.
+    queue_policy = policy;
+    evicted_packets = 0U;
+    evicted_overflow = false;
     ++incarnation;
     return Result<void>::success();
 }
@@ -81,16 +87,30 @@ void PacketStreamSession::append_locked(ByteView packet) noexcept
     ++counters.packets;
     counters.bytes += packet_size;
     if (count == capacity) {
-        ++counters.queue_drops;
-        terminal = StreamTerminal::slow_consumer;
-        changed.notify_all();
-        return;
+        if (queue_policy == StreamQueuePolicy::legacy) {
+            ++counters.queue_drops;
+            terminal = StreamTerminal::slow_consumer;
+            changed.notify_all();
+            return;
+        }
+        // v1 evict-oldest: drop the oldest unread complete packet and keep the
+        // incoming one.  The eviction is counted separately, saturating with an
+        // explicit overflow flag, and never sets the slow-consumer terminal.
+        if (capacity != 0U) {
+            head = (head + 1U) % capacity;
+            --count;
+            if (evicted_packets == std::numeric_limits<std::uint64_t>::max())
+                evicted_overflow = true;
+            else
+                ++evicted_packets;
+        }
     }
     const std::size_t tail = (head + count) % capacity;
     std::memcpy(packets.get() + tail * packet_size, packet.data, packet_size);
     ++count;
     changed.notify_all();
 }
+
 
 void PacketStreamSession::amend_final_terminal_locked(
     const Attachment& amend_identity, StreamTerminal reason) noexcept
