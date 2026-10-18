@@ -218,10 +218,13 @@ struct ReceiverEngineStatus final {
     // v1 record.
     std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
     std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata{};
-    // Whether a logical lease is registered on the slot, taken under the same
-    // registry lock.  It carries no lease ID, owner or token.  A lease is
-    // removed when its release begins, so a slot under cleanup reports false
-    // here and ReceiverTuneOperation::cleanup in operations.
+    // Whether a logical lease is registered on the slot, projected from
+    // leases_[slot].active under the same registry lock.  It carries no lease
+    // ID, owner or token.  A release first revokes the streams and marks the
+    // slot with ReceiverTuneOperation::cleanup under that lock, then clears
+    // the Lease only after the receiver-serialization wait, so a slot whose
+    // release is in progress still reports true here; false does not by
+    // itself prove the physical cleanup has completed.
     std::array<bool, kReceiverEngineCapacity> leased{};
 };
 
