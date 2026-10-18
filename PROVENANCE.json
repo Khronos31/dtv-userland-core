@@ -191,17 +191,17 @@
     "source_files": [
       {
         "path": "include/dtv/userland/control_connection.h",
-        "sha256": "8252d62b6a861b47ec3b052cbcc6a8d0c34ab91d1f8d53a724acaa920e256b37",
+        "sha256": "d7fe525cda58cf9aad4f36cc2065a3514d0cca7f058449b6a683c226cc82fde3",
         "spdx": "MIT"
       },
       {
         "path": "src/control_connection.cpp",
-        "sha256": "b66976ed84e7134cc4d8c858ae862491610d8f923674d1743dfc458b6867082d",
+        "sha256": "87905897b61c2be256d09f2af6ddf4a20536b7d6d1f35a1bf636e908f1889c0c",
         "spdx": "MIT"
       },
       {
         "path": "tests/control_connection_tests.cpp",
-        "sha256": "859a16597c8d7dae83d10d430c31f6a9c87f3ca3680c5e630744fc21a2af236e",
+        "sha256": "48e6e22b6bebb8548e50802a3881e1ef20c222582412defead443f0dd7cc3089",
         "spdx": "MIT"
       },
       {
@@ -215,17 +215,26 @@
       "source_files": [
         {
           "path": "include/dtv/userland/detail/receiver_engine.h",
-          "sha256": "ca0212b9368149276eb9c44d8af65175c6e68a6e7f61944121599351678bd941",
+          "sha256": "0ec1e23bb37f268c4069e49f8329cd8d2ab76f245938dc165f02b29a7d6bc0df",
           "spdx": "MIT"
         },
         {
           "path": "src/receiver_engine.cpp",
-          "sha256": "a104d04c0b4ec7ae42884bdd8012a4ac5a383494941ef29519d8b0ab7c3b37f8",
+          "sha256": "ef43ffecf7410e678260165a1cc0c02ed3951df39892ed8a13bacbfbf1006389",
           "spdx": "MIT"
         }
       ]
     },
-    "contributors": "Existing pre-correction component work was authored by Opus. Incremental implementation work in the handoff execution was authored by GPT-6-Luna according to the parent subagent history/CLI invocation; the worker self-label is not used for attribution."
+    "contributors": "Existing pre-correction component work was authored by Opus. Incremental implementation work in the handoff execution was authored by GPT-6-Luna according to the parent subagent history/CLI invocation; the worker self-label is not used for attribution. The later typed START/STOP dispatch and its served-request and full-epoch tests were authored by DeepSeek V4.1 Flash.",
+    "stream_control_increment": {
+      "authority": [
+        "reports/px4-stream-wire-v1-stage1-task.md",
+        "reports/px4-stream-wire-v1-stage1-correction-task.md",
+        "reports/px4-stream-wire-v1-stage1-correction-acceptance-review.md"
+      ],
+      "scope": "Owned typed START_STREAM and STOP_STREAM dispatch through the existing negotiation, request-order and full 16-byte epoch checks; a token-free successful tune revision in StreamStopResult; and the corresponding control tests.",
+      "excluded_scope": "Product data ATTACH, ACK/commit ordering, writer and TS client, armed deadline driving, control-disconnect cleanup, and stream/last_stream STATUS publication remain product integration work. This common increment does not certify a complete recording path or a release candidate."
+    }
   },
   "control_client": {
     "method": "Independent portable UDTV client orchestration over the accepted wire codec, typed records, and JSON exporter. Product transport remains behind the ClientTransport byte interface.",
@@ -346,8 +355,8 @@
       "disposition": "Deferred under the user's limited-reach issue policy. Existing product sources do not yet call these v1 prepare/cleanup entrances. Product wire/worker integration must evaluate actual reachability and preserve prepare-to-cleanup ordering or address the issue; generic concurrent API acceptance remains limited."
     }],
     "source_files": [
-      { "path": "include/dtv/userland/detail/receiver_engine.h", "sha256": "ca0212b9368149276eb9c44d8af65175c6e68a6e7f61944121599351678bd941", "spdx": "MIT" },
-      { "path": "src/receiver_engine.cpp", "sha256": "a104d04c0b4ec7ae42884bdd8012a4ac5a383494941ef29519d8b0ab7c3b37f8", "spdx": "MIT" },
+      { "path": "include/dtv/userland/detail/receiver_engine.h", "sha256": "0ec1e23bb37f268c4069e49f8329cd8d2ab76f245938dc165f02b29a7d6bc0df", "spdx": "MIT" },
+      { "path": "src/receiver_engine.cpp", "sha256": "ef43ffecf7410e678260165a1cc0c02ed3951df39892ed8a13bacbfbf1006389", "spdx": "MIT" },
       { "path": "include/dtv/userland/detail/packet_stream_session.h", "sha256": "bc7341e7d0baa0d0e1a2c2b475381372cab0ac26cfcd4c2ab5a0540cea13e925", "spdx": "MIT" },
       { "path": "src/packet_stream_session.cpp", "sha256": "3cd961eb5bd1de987cbf4bb69708a5c0c18dad45fcf1cd82921a0807f8641c4e", "spdx": "MIT" },
       { "path": "CMakeLists.txt", "sha256": "6262e4de43b771c30c25417c0a5af96163abfb268e1538058acf91366c120b5a", "spdx": "MIT" }

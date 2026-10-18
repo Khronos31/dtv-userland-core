@@ -37,6 +37,8 @@ enum class ControlRequestKind : std::uint8_t {
     acquire,
     release,
     tune,
+    start_stream,
+    stop_stream,
 };
 
 // Owned decoded request; only the member selected by kind is meaningful.  It
@@ -51,6 +53,8 @@ struct ControlRequest final {
     AcquireRequest acquire{};
     ReleaseRequest release{};
     TuneRequest tune{};
+    StartRequest start_stream{};
+    StopRequest stop_stream{};
 };
 
 enum class InboundAction : std::uint8_t {

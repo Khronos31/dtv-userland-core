@@ -288,6 +288,8 @@ struct StreamStopResult final {
     bool cleanup_owner = false;
     // Token-free identity of the retained final.  It never carries a token.
     std::uint64_t stream_id = 0U;
+    // Successful tune revision bound to the stream, when known.
+    std::uint64_t revision = 0U;
 };
 
 // Physical receiver seam.  Methods receive the stable receiver ID.

@@ -36,6 +36,8 @@ const char* operation_name(std::uint16_t opcode) noexcept
     case kOpcodeAcquire: return "acquire";
     case kOpcodeRelease: return "release";
     case kOpcodeTune: return "tune";
+    case kOpcodeStartStream: return "start_stream";
+    case kOpcodeStopStream: return "stop_stream";
     default: return "request";
     }
 }
@@ -225,6 +227,26 @@ Inbound ControlConnection::accept(const Frame& frame, ControlRequest& request,
             request.kind = ControlRequestKind::tune;
             request.tune = value.value();
             epoch = &request.tune.epoch;
+        }
+        break;
+    }
+    case kOpcodeStartStream: {
+        const auto value = decode_start_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::start_stream;
+            request.start_stream = value.value();
+            epoch = &request.start_stream.epoch;
+        }
+        break;
+    }
+    case kOpcodeStopStream: {
+        const auto value = decode_stop_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::stop_stream;
+            request.stop_stream = value.value();
+            epoch = &request.stop_stream.epoch;
         }
         break;
     }

@@ -287,21 +287,43 @@ void test_request_rules()
                             2U));
         CHECK(!inbound.close_after_reply);
         h.connection->complete();
+        // START_STREAM is served: it dispatches an owned decoded request and
+        // keeps the one-outstanding rule.
         w::StartRequest start;
         start.epoch = h.server.epoch;
-        start.lease_id = 1U;
-        start.tune_revision = 1U;
+        start.lease_id = 7U;
+        start.tune_revision = 5U;
         CHECK(make_request(*h.frame, w::kOpcodeStartStream, 3U, start,
                            &w::encode_start_request));
         inbound = h.accept();
-        CHECK(h.error_reply(inbound, static_cast<std::uint32_t>(Error::UNSUPPORTED),
-                            w::kOpcodeStartStream, 3U));
+        CHECK(inbound.action == w::InboundAction::dispatch);
+        CHECK(h.request->kind == w::ControlRequestKind::start_stream &&
+              h.request->request_id == 3U && h.request->opcode == w::kOpcodeStartStream &&
+              h.request->start_stream.lease_id == 7U &&
+              h.request->start_stream.tune_revision == 5U);
+        CHECK(h.connection->outstanding());
+        // Complete the outstanding request before the next one; the
+        // one-outstanding close is covered by the framing tests.
+        h.connection->complete();
+        // STOP_STREAM now dispatches too, with its exact stream identity.
+        w::StopRequest stop;
+        stop.epoch = h.server.epoch;
+        stop.lease_id = 7U;
+        stop.stream_id = 9U;
+        CHECK(make_request(*h.frame, w::kOpcodeStopStream, 5U, stop,
+                           &w::encode_stop_request));
+        inbound = h.accept();
+        CHECK(inbound.action == w::InboundAction::dispatch);
+        CHECK(h.request->kind == w::ControlRequestKind::stop_stream &&
+              h.request->request_id == 5U && h.request->opcode == w::kOpcodeStopStream &&
+              h.request->stop_stream.lease_id == 7U &&
+              h.request->stop_stream.stream_id == 9U);
         h.connection->complete();
         w::ListRequest list;
         list.epoch = h.server.epoch;
-        CHECK(make_request(*h.frame, w::kOpcodeList, 4U, list, &w::encode_list_request));
+        CHECK(make_request(*h.frame, w::kOpcodeList, 6U, list, &w::encode_list_request));
         CHECK(h.accept().action == w::InboundAction::dispatch);
-        CHECK(h.request->kind == w::ControlRequestKind::list && h.request->request_id == 4U);
+        CHECK(h.request->kind == w::ControlRequestKind::list && h.request->request_id == 6U);
     }
     {
         // Malformed payload of a served opcode closes; a semantically invalid
@@ -375,6 +397,48 @@ void test_epoch_binding_and_dispatch()
     inbound = h.accept();
     CHECK(inbound.action == w::InboundAction::dispatch &&
           h.request->kind == w::ControlRequestKind::release && h.request->release.lease_id == 9U);
+    h.connection->complete();
+
+    // START/STOP carry the same 16-byte epoch authority as the other served
+    // operations; a one-byte difference is STALE_HANDLE.
+    w::StartRequest start;
+    start.epoch = h.server.epoch;
+    start.epoch[0] ^= 0x80U;
+    start.lease_id = 9U;
+    start.tune_revision = 3U;
+    CHECK(make_request(*h.frame, w::kOpcodeStartStream, 6U, start,
+                       &w::encode_start_request));
+    inbound = h.accept();
+    CHECK(h.error_reply(inbound, w::kWireErrorStaleHandle, w::kOpcodeStartStream, 6U));
+    h.connection->complete();
+    start.epoch = h.server.epoch;
+    CHECK(make_request(*h.frame, w::kOpcodeStartStream, 7U, start,
+                       &w::encode_start_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch &&
+          h.request->kind == w::ControlRequestKind::start_stream &&
+          h.request->start_stream.lease_id == 9U &&
+          h.request->start_stream.tune_revision == 3U);
+    h.connection->complete();
+
+    w::StopRequest stop;
+    stop.epoch = h.server.epoch;
+    stop.epoch[8] ^= 0x04U;
+    stop.lease_id = 9U;
+    stop.stream_id = 11U;
+    CHECK(make_request(*h.frame, w::kOpcodeStopStream, 8U, stop,
+                       &w::encode_stop_request));
+    inbound = h.accept();
+    CHECK(h.error_reply(inbound, w::kWireErrorStaleHandle, w::kOpcodeStopStream, 8U));
+    h.connection->complete();
+    stop.epoch = h.server.epoch;
+    CHECK(make_request(*h.frame, w::kOpcodeStopStream, 9U, stop,
+                       &w::encode_stop_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch &&
+          h.request->kind == w::ControlRequestKind::stop_stream &&
+          h.request->stop_stream.lease_id == 9U &&
+          h.request->stop_stream.stream_id == 11U);
 }
 
 void test_pid_filter_requires_negotiation()

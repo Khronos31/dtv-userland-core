@@ -852,6 +852,7 @@ StreamStopResult ReceiverEngine::stop_result_of(const Lease& lease) noexcept
     result.quiesced = lease.stream_quiesced;
     result.cleanup_error = lease.stream_cleanup_error;
     result.stream_id = lease.stream_final_stream_id;
+    result.revision = lease.stream_revision;
     return result;
 }
 
