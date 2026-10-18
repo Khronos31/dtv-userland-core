@@ -218,6 +218,11 @@ struct ReceiverEngineStatus final {
     // v1 record.
     std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
     std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata{};
+    // Whether a logical lease is registered on the slot, taken under the same
+    // registry lock.  It carries no lease ID, owner or token.  A lease is
+    // removed when its release begins, so a slot under cleanup reports false
+    // here and ReceiverTuneOperation::cleanup in operations.
+    std::array<bool, kReceiverEngineCapacity> leased{};
 };
 
 // Physical receiver seam.  Methods receive the stable receiver ID.

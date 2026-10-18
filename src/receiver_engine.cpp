@@ -1549,6 +1549,8 @@ Result<ReceiverEngineStatus> ReceiverEngine::status() const noexcept
     status.states = states_;
     status.operations = operations_;
     status.tune_metadata = tune_metadata_;
+    for (std::size_t slot = 0U; slot < leases_.size(); ++slot)
+        status.leased[slot] = leases_[slot].active;
     return Result<ReceiverEngineStatus>::success(status);
 }
 

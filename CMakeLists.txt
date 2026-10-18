@@ -86,18 +86,34 @@ target_include_directories(dtv_userland_json PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dtv_userland_json PUBLIC dtv::wire)
 
+# Portable UDTV control-connection serializer shared by the product daemons.
+add_library(dtv_userland_control STATIC src/control_connection.cpp)
+add_library(dtv::control ALIAS dtv_userland_control)
+set_target_properties(dtv_userland_control PROPERTIES
+    EXPORT_NAME control
+    CXX_STANDARD 17
+    CXX_STANDARD_REQUIRED YES
+    CXX_EXTENSIONS OFF)
+target_compile_features(dtv_userland_control PUBLIC cxx_std_17)
+target_include_directories(dtv_userland_control PUBLIC
+    $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+    $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+target_link_libraries(dtv_userland_control PUBLIC dtv::wire)
+
 if(MSVC)
     target_compile_options(dtv_userland_core PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_wire PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_identity PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_tuning PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_json PRIVATE /EHs-c- /GR- /W4)
+    target_compile_options(dtv_userland_control PRIVATE /EHs-c- /GR- /W4)
 else()
     target_compile_options(dtv_userland_core PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_wire PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_identity PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_tuning PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_json PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    target_compile_options(dtv_userland_control PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
 endif()
 
 if(DTV_USERLAND_BUILD_RECEIVER)
@@ -159,6 +175,7 @@ if(DTV_USERLAND_BUILD_CARD)
 endif()
 
 install(TARGETS dtv_userland_core dtv_userland_wire dtv_userland_identity dtv_userland_tuning dtv_userland_json
+        dtv_userland_control
     EXPORT dtv_userland_coreTargets
     ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 if(DTV_USERLAND_BUILD_CARD)
@@ -256,6 +273,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(tuning_tests tests/tuning_tests.cpp)
     target_link_libraries(tuning_tests PRIVATE dtv::tuning)
     add_test(NAME tuning_tests COMMAND tuning_tests)
+
+    add_executable(control_connection_tests tests/control_connection_tests.cpp)
+    target_link_libraries(control_connection_tests PRIVATE dtv::control)
+    add_test(NAME control_connection_tests COMMAND control_connection_tests)
 
     add_executable(status_json_tests tests/status_json_tests.cpp)
     target_link_libraries(status_json_tests PRIVATE dtv::json)

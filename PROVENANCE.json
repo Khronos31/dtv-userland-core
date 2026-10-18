@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, and tuning subsets, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, tuning, and control-connection subsets, the leased receiver snapshot observation listed below, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -176,6 +176,56 @@
     "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
     "error_values_added": "RESOURCE_LIMIT = 17 was added additively for the control-payload cap. All pre-existing Error values and the one-byte size are unchanged.",
     "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. No product payload, card/hardware sequence or vendor asset was copied."
+  },
+  "control_connection": {
+    "method": "Independent portable connection state and dispatch-input implementation over the accepted typed wire/record codecs. No PX4 control-server, socket, worker, device, or GPL product implementation was copied.",
+    "authority": [
+      "implementation/reports/runtime-server-next-code-task.md",
+      "shared/design/common-wire-draft.md",
+      "shared/design/wire-record-layout.md",
+      "shared/design/common-api-contract.md",
+      "shared/design/adoption-status.md",
+      "shared/design/independent-code-policy.md"
+    ],
+    "scope": "The dtv::control target provides one-connection HELLO/version/feature negotiation, request-ID and single-outstanding-request state, epoch checks, typed request decoding, typed unsupported/error replies, PID_FILTER selection enforcement before service dispatch, and bounded STATUS snapshot helpers. The product event loop, socket writes, scheduling, ownership, target receiver capability checks, timers, JSON/CLI translation and device work remain outside this common component.",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_connection.h",
+        "sha256": "8252d62b6a861b47ec3b052cbcc6a8d0c34ab91d1f8d53a724acaa920e256b37",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/control_connection.cpp",
+        "sha256": "fe6b658194483d7c040a766d4633bf5c4f9c2f669d5e30f60e89cbf91abf033e",
+        "spdx": "MIT"
+      },
+      {
+        "path": "tests/control_connection_tests.cpp",
+        "sha256": "31b768fde2ba515b2c288323293ab8f325e42f60f3df4aac5547c65d41bc1a8f",
+        "spdx": "MIT"
+      },
+      {
+        "path": "cmake/dtv_userland_coreConfig.cmake.in",
+        "sha256": "d511c2e8c4f156dcf7156ceb671b6cbeeb520467e0591f1288ac2bbbf4c5498b",
+        "spdx": "MIT"
+      }
+    ],
+    "receiver_snapshot_observation": {
+      "scope": "Adds one leased boolean per engine slot to ReceiverEngineStatus, copied from leases_[slot].active under the existing registry mutex. It exports no lease ID, owner, or token; release cleanup remains represented by the existing operation state.",
+      "source_files": [
+        {
+          "path": "include/dtv/userland/detail/receiver_engine.h",
+          "sha256": "07e9de79d4640c89922365cf027ba73c9efec522185fe040501e55e509aa7884",
+          "spdx": "MIT"
+        },
+        {
+          "path": "src/receiver_engine.cpp",
+          "sha256": "dac6daad549a6fe63aa24ce0fa8ff8888bc5e1d2e37858c30fb3eca907d76f6c",
+          "spdx": "MIT"
+        }
+      ]
+    },
+    "contributors": "Existing pre-correction component work was authored by Opus. Incremental implementation work in the handoff execution was authored by GPT-6-Luna according to the parent subagent history/CLI invocation; the worker self-label is not used for attribution."
   },
   "json": {
     "method": "New independent portable serializer; it consumes the existing typed STATUS records and full canonical-context validator.",
