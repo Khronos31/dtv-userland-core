@@ -560,4 +560,188 @@ Result<std::size_t> encode_discovery_json(const DiscoveryResponse& value,
 }
 
 
+
+namespace {
+
+// This catalog intentionally carries only static build and profile facts.
+// One model is not a discovered USB enclosure; available_in_build is not a
+// claim that hardware has been tested or is currently connected.
+bool valid_models(const ModelsResponse& value) noexcept
+{
+    if (!valid_text(value.producer.product) || !valid_text(value.producer.version) ||
+        !valid_optional_text(value.producer.core_version) ||
+        value.models.count > kMaxCatalogModels ||
+        (value.models.count != 0U && value.models.items == nullptr)) return false;
+
+    for (std::size_t i = 0U; i < value.models.count; ++i) {
+        const auto& e = value.models.items[i];
+        if (!valid_text(e.model.id) || !valid_text(e.model.name) ||
+            e.usb_ids.count > kMaxCatalogUsbIds ||
+            (e.nominal_receiver_count.present && e.nominal_receiver_count.value == 0U) ||
+            (e.nominal_usb_function_count.present &&
+             e.nominal_usb_function_count.value == 0U) ||
+            e.receivers.value.count > kMaxPublicReceivers) return false;
+
+        const auto id = std::string_view(e.model.id.bytes.data(), e.model.id.length);
+        for (std::size_t j = 0U; j < i; ++j) {
+            const auto& preceding = value.models.items[j].model.id;
+            if (id == std::string_view(preceding.bytes.data(), preceding.length))
+                return false;
+        }
+        for (std::size_t j = 0U; j < e.usb_ids.count; ++j) {
+            const auto& u = e.usb_ids.items[j];
+            if (static_cast<std::uint8_t>(u.mode) > 2U) return false;
+            for (std::size_t k = 0U; k < j; ++k) {
+                const auto& prev = e.usb_ids.items[k];
+                if (u.vid == prev.vid && u.pid == prev.pid && u.mode == prev.mode)
+                    return false;
+            }
+        }
+
+        if (!e.available_in_build) {
+            if (!e.receivers.present || e.receivers.value.count != 0U ||
+                !e.max_concurrent_streams.present ||
+                e.max_concurrent_streams.value != 0U) return false;
+            continue;
+        }
+        if (!e.receivers.present) {
+            // Unknown public composition must never be silently written as [].
+            if (e.max_concurrent_streams.present) return false;
+            continue;
+        }
+        if (e.max_concurrent_streams.present &&
+            (e.max_concurrent_streams.value > e.receivers.value.count ||
+             (e.max_concurrent_streams.value == 0U &&
+              e.receivers.value.count != 0U))) return false;
+
+        for (std::size_t j = 0U; j < e.receivers.value.count; ++j) {
+            const auto& r = e.receivers.value.items[j];
+            if (r.systems.mask == 0U || (r.systems.mask & ~3U) != 0U)
+                return false;
+            for (std::size_t k = 0U; k < j; ++k)
+                if (e.receivers.value.items[k].id == r.id) return false;
+        }
+    }
+    return true;
+}
+
+bool hex_id(Writer& w, std::uint16_t v) noexcept
+{
+    static constexpr char hex[] = "0123456789abcdef";
+    return w.ch('"') && w.ch(hex[(v >> 12U) & 15U]) &&
+           w.ch(hex[(v >> 8U) & 15U]) &&
+           w.ch(hex[(v >> 4U) & 15U]) && w.ch(hex[v & 15U]) &&
+           w.ch('"');
+}
+
+bool optional_count(Writer& w, const Optional<std::uint16_t>& v) noexcept
+{
+    return v.present ? w.number(v.value) : w.text("null");
+}
+
+bool emit_model(Writer& w, const ModelCatalogEntry& m) noexcept
+{
+    if (!w.ch('{') || !key(w, "id") || !str(w, m.model.id) ||
+        !w.ch(',') || !key(w, "name") || !str(w, m.model.name) ||
+        !w.ch(',') || !key(w, "usb_ids") || !w.ch('[')) return false;
+    for (std::size_t i = 0U; i < m.usb_ids.count; ++i) {
+        const auto& u = m.usb_ids.items[i];
+        const char* phase = mode(u.mode);
+        if ((i != 0U && !w.ch(',')) || !w.ch('{') ||
+            !key(w, "vid") || !hex_id(w, u.vid) ||
+            !w.ch(',') || !key(w, "pid") || !hex_id(w, u.pid) ||
+            !w.ch(',') || !key(w, "mode") ||
+            !w.string(phase, length(phase)) || !w.ch('}')) return false;
+    }
+    if (!w.ch(']') || !w.ch(',') || !key(w, "nominal") ||
+        !w.ch('{') || !key(w, "receiver_count") ||
+        !optional_count(w, m.nominal_receiver_count) ||
+        !w.ch(',') || !key(w, "usb_function_count") ||
+        !optional_count(w, m.nominal_usb_function_count) ||
+        !w.ch('}') || !w.ch(',') || !key(w, "implementation") ||
+        !w.ch('{') || !key(w, "available_in_build") ||
+        !boolean(w, m.available_in_build) || !w.ch(',') ||
+        !key(w, "receivers")) return false;
+    if (!m.receivers.present) {
+        if (!w.text("null")) return false;
+    } else {
+        if (!w.ch('[')) return false;
+        for (std::size_t i = 0U; i < m.receivers.value.count; ++i) {
+            const auto& r = m.receivers.value.items[i];
+            if ((i != 0U && !w.ch(',')) ||
+                !w.ch('{') || !key(w, "id") || !w.quoted_number(r.id) ||
+                !w.ch(',') || !key(w, "systems") || !w.ch('[')) return false;
+            bool separator = false;
+            if ((r.systems.mask & 1U) != 0U) {
+                if (!w.text("\"isdb-t\"")) return false;
+                separator = true;
+            }
+            if ((r.systems.mask & 2U) != 0U) {
+                if ((separator && !w.ch(',')) ||
+                    !w.text("\"isdb-s\"")) return false;
+            }
+            if (!w.text("]}")) return false;
+        }
+        if (!w.ch(']')) return false;
+    }
+    return w.ch(',') && key(w, "max_concurrent_streams") &&
+           optional_count(w, m.max_concurrent_streams) && w.text("}}");
+}
+
+bool emit_models(const ModelsResponse& v, Writer& w) noexcept
+{
+    if (!w.text("{\"schema\":{\"name\":\"userland.models\",\"major\":1,\"minor\":0},") ||
+        !key(w, "producer") || !producer(w, v.producer) ||
+        !w.ch(',') || !key(w, "models") || !w.ch('[')) return false;
+
+    // Stable model ID order without allocating an auxiliary vector.
+    std::string_view previous;
+    for (std::size_t emitted = 0U; emitted < v.models.count; ++emitted) {
+        bool found = false;
+        std::size_t next = 0U;
+        for (std::size_t i = 0U; i < v.models.count; ++i) {
+            const auto& id = v.models.items[i].model.id;
+            const auto name = std::string_view(id.bytes.data(), id.length);
+            if ((!previous.empty() && name <= previous) ||
+                (found && name >= std::string_view(
+                    v.models.items[next].model.id.bytes.data(),
+                    v.models.items[next].model.id.length))) continue;
+            next = i;
+            found = true;
+        }
+        if (!found || (emitted != 0U && !w.ch(',')) ||
+            !emit_model(w, v.models.items[next])) return false;
+        const auto& id = v.models.items[next].model.id;
+        previous = std::string_view(id.bytes.data(), id.length);
+    }
+    return w.text("]}\n");
+}
+}  // namespace
+
+Result<std::size_t> models_json_size(const ModelsResponse& v) noexcept
+{
+    if (!valid_models(v))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr, 0U});
+    if (!emit_models(v, count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(count.size());
+}
+
+Result<std::size_t> encode_models_json(const ModelsResponse& v,
+                                       MutableByteView output) noexcept
+{
+    if (!valid_models(v) || (output.data == nullptr && output.size != 0U))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr, 0U});
+    if (!emit_models(v, count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    if (output.size < count.size())
+        return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
+    Writer actual(output);
+    if (!emit_models(v, actual) || actual.size() != count.size())
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(actual.size());
+}
+
 }  // namespace dtv::userland::wire

@@ -93,6 +93,43 @@ Result<std::size_t> discovery_json_size(const DiscoveryResponse& value) noexcept
 Result<std::size_t> encode_discovery_json(const DiscoveryResponse& value,
                                           MutableByteView output) noexcept;
 
+// Read-only static profile catalog shared by all four product CLIs.
+// No USB scan, daemon, physical receiver or runtime observation is performed.
+// Nominal hardware capacity and the build's publicly implemented receivers
+// are separate; unknown is null, not zero. Models are output in stable ID order.
+inline constexpr std::size_t kMaxCatalogModels = 64U;
+inline constexpr std::size_t kMaxCatalogUsbIds = 8U;
+struct ModelCatalogUsbId final {
+    std::uint16_t vid = 0U;
+    std::uint16_t pid = 0U;
+    Mode mode = Mode::unknown;
+};
+struct ModelCatalogReceiver final {
+    std::uint16_t id = 0U;
+    Systems systems;
+};
+struct ModelCatalogEntry final {
+    Model model;
+    BArray<ModelCatalogUsbId, kMaxCatalogUsbIds> usb_ids;
+    Optional<std::uint16_t> nominal_receiver_count;
+    Optional<std::uint16_t> nominal_usb_function_count;
+    bool available_in_build = false;
+    // Absent when static receiver composition cannot be determined. A known
+    // empty or unavailable backend is present=true with count=0.
+    Optional<BArray<ModelCatalogReceiver, kMaxPublicReceivers>> receivers;
+    Optional<std::uint16_t> max_concurrent_streams;
+};
+struct ModelsResponse final {
+    Producer producer;
+    DiscoveryView<ModelCatalogEntry> models;
+};
+
+// userland.models v1.0, one JSON object and a newline, without a terminating
+// NUL. No output is modified for invalid inputs or a short output buffer.
+Result<std::size_t> models_json_size(const ModelsResponse& value) noexcept;
+Result<std::size_t> encode_models_json(const ModelsResponse& value,
+                                        MutableByteView output) noexcept;
+
 }  // namespace dtv::userland::wire
 
 #endif  // DTV_USERLAND_JSON_H
