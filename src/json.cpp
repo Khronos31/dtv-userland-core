@@ -395,7 +395,7 @@ bool selector_candidates(Writer& w,const BArray<DiscoverySelectorCandidate,kMaxF
     for(std::size_t i=0U;i<v.count;++i){
         const auto& x=v.items[i];
         if(i>0U&&!w.ch(','))return false;
-        if(!w.ch('{')||!key(w,"value")||str(w,x.value)||!w.ch(',')||
+        if(!w.ch('{')||!key(w,"value")||!str(w,x.value)||!w.ch(',')||
            !key(w,"state"))return false;
         const char* state=states[static_cast<unsigned>(x.state)];
         if(!w.string(state,length(state))||!w.ch(',')||!key(w,"reason")||
