@@ -65,21 +65,30 @@ struct DiscoveryEnclosure final {
     Optional<BArray<ReceiverDescriptor, kMaxPublicReceivers>> receivers;
     Optional<BArray<ReaderDescriptor, kMaxReaders>> readers;
 };
+// A scan can contain many enclosures, whereas kMaxFunctions is the limit for
+// one enclosure only. Non-owning views avoid imposing that per-enclosure wire
+// limit on the whole USB inventory. The producer owns all records during
+// discovery_json_size / encode_discovery_json; null is valid only for count 0.
+template <typename T>
+struct DiscoveryView final {
+    const T* items = nullptr;
+    std::size_t count = 0U;
+};
 struct DiscoveryResponse final {
     Producer producer;
     Uuid scan_id{};
     bool complete = true;
-    BArray<DiscoveryScanIssue, kMaxFunctions> issues;
-    BArray<DiscoveryFunction, kMaxFunctions> usb_functions;
-    BArray<DiscoveryEnclosure, kMaxFunctions> enclosures;
+    DiscoveryView<DiscoveryScanIssue> issues;
+    DiscoveryView<DiscoveryFunction> usb_functions;
+    DiscoveryView<DiscoveryEnclosure> enclosures;
 };
 
 // A single userland.discovery v1.0 object plus newline. ID references,
 // observed/published membership, presence and selector grammar are validated
 // before size calculation or writing. Invalid and short-buffer calls leave
-// the supplied output completely unchanged. The function count bound is the
-// existing wire kMaxFunctions; producers exceeding it must report a failure,
-// never silently truncate or output a fabricated complete scan.
+// the supplied output completely unchanged. The per-enclosure
+// function count remains limited by wire kMaxFunctions; scans have no artificial
+// eight-function total limit and must never silently truncate observations.
 Result<std::size_t> discovery_json_size(const DiscoveryResponse& value) noexcept;
 Result<std::size_t> encode_discovery_json(const DiscoveryResponse& value,
                                           MutableByteView output) noexcept;
