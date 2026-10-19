@@ -39,7 +39,7 @@ std::string json(const w::DiscoveryResponse& document)
 {
     auto size=w::discovery_json_size(document);
     CHECK(size);
-    if(!size)return {};
+    if(!size) { std::fprintf(stderr,"discovery_json_size error=%u\n",static_cast<unsigned>(size.error())); return {}; }
     std::vector<std::uint8_t> output(size.value(),0xa5U);
     auto result=w::encode_discovery_json(document,{output.data(),output.size()});
     CHECK(result&&result.value()==size.value());
@@ -141,6 +141,16 @@ void test_empty()
 void test_cold_and_partial()
 {
     auto cold=cold_scan();
+    auto steps=empty_scan();
+    steps.usb_functions.count=1U;
+    CHECK(w::discovery_json_size(steps));
+    steps.usb_functions.items[0].observation=cold.usb_functions.items[0].observation;
+    CHECK(w::discovery_json_size(steps));
+    steps.usb_functions.items[0].grouping_reason=cold.usb_functions.items[0].grouping_reason;
+    CHECK(w::discovery_json_size(steps));
+    steps.usb_functions.items[0].selector_candidates=
+        cold.usb_functions.items[0].selector_candidates;
+    CHECK(w::discovery_json_size(steps));
     const std::string out=json(cold);
     CHECK(has(out,"\"mode\":\"cold\""));
     CHECK(has(out,"\"identification\":{\"model\":null,\"reason\":\"cold_model\"}"));
