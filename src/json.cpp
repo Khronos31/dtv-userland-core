@@ -433,10 +433,12 @@ bool discovery_systems(Writer& w, Systems systems) noexcept
     return w.ch(']');
 }
 
-bool discovery_receiver(Writer& w, const ReceiverDescriptor& receiver) noexcept
+bool discovery_receiver(Writer& w, const ReceiverDescriptor& receiver,
+                        std::size_t device_number) noexcept
 {
     if (!receiver.binding.present || !w.ch('{') || !key(w, "receiver") ||
-        !w.number(receiver.id) || !w.ch(',') || !key(w, "local") ||
+        !w.number(receiver.id) || !w.ch(',') || !key(w, "device") ||
+        !w.number(device_number) || !w.ch(',') || !key(w, "local") ||
         !w.number(receiver.binding.value.local_id) || !w.ch(',') ||
         !key(w, "systems") || !discovery_systems(w, receiver.systems))
         return false;
@@ -479,7 +481,7 @@ bool discovery_device(Writer& w, const DiscoveryResponse& scan,
             const auto& receiver = enclosure.receivers.value.items[i];
             if (!receiver.binding.present) return false;
             if (receiver.binding.value.function_id != function_id) continue;
-            if ((!first && !w.ch(',')) || !discovery_receiver(w, receiver))
+            if ((!first && !w.ch(',')) || !discovery_receiver(w, receiver, slot + 1U))
                 return false;
             first = false;
         }

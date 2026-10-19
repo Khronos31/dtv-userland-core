@@ -203,7 +203,7 @@ void test_bound()
     CHECK(has(out,"\"in_loader_mode\":false"));
     CHECK(has(out,"\"serial\":null,\"serial_unique\":null"));
     CHECK(has(out,"\"devices\":[{\"device\":1,\"usb\":\"06b8:102b\""));
-    CHECK(has(out,"\"receivers\":[{\"receiver\":0,\"local\":0,\"systems\":[\"ISDB-T\"]"));
+    CHECK(has(out,"\"receivers\":[{\"receiver\":0,\"device\":1,\"local\":0,\"systems\":[\"ISDB-T\"]"));
     CHECK(has(out,"\"lnb_15v_supported\":false"));
     CHECK(has(out,"\"readers\":[]"));
     CHECK(!has(out,"max_concurrent_streams"));
@@ -376,7 +376,7 @@ void test_two_usb_eight_receiver_enclosure()
     CHECK(has(out,"\"lnb_15v_supported\":true"));
     CHECK(has(out,"\"reader\":0,\"device\":1"));
     CHECK(has(out,"\"device\":2,\"usb\":\"0511:084a\""));
-    CHECK(has(out,"\"receiver\":7,\"local\":3,\"systems\":[\"ISDB-T\"]"));
+    CHECK(has(out,"\"receiver\":7,\"device\":2,\"local\":3,\"systems\":[\"ISDB-T\"]"));
     std::size_t count = 0;
     for (std::size_t i = 0; (i = out.find("\"receiver\":", i))
          != std::string::npos; i += 11) ++count;
