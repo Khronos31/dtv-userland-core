@@ -2,8 +2,10 @@
 #include <dtv/userland/json.h>
 
 #include <dtv/userland/error.h>
+#include <dtv/userland/identity.h>
 
 #include <limits>
+#include <string_view>
 
 namespace dtv::userland::wire {
 namespace {
@@ -123,14 +125,20 @@ bool error(Writer& w,const Optional<ErrorRecord>& v) noexcept
     if(!symbol && (!w.ch(',')||!key(w,"numeric_code")||!w.number(v.value.code)))return false;
     return w.ch(',')&&key(w,"operation")&&str(w,v.value.operation)&&w.ch(',')&&key(w,"detail")&&str(w,v.value.detail)&&w.ch('}');
 }
-bool function(Writer& w,const UsbFunction& v) noexcept
+// Shared observation fields used by STATUS and discovery. The caller closes
+// the outer object with its own snapshot-specific fields.
+bool function_observation(Writer& w,const UsbFunction& v) noexcept
 {
     const char* m=mode(v.mode); const char* ss=serial_state(v.serial_state); const char* ir=identification_reason(v.identification_reason);
-    if(!w.ch('{')||!key(w,"id")||!w.quoted_number(v.id)||!w.ch(',')||!key(w,"vid"))return false;
     static constexpr char h[]="0123456789abcdef";
+    if(!w.ch('{')||!key(w,"id")||!w.quoted_number(v.id)||!w.ch(',')||!key(w,"vid"))return false;
     if(!w.ch('"')||!w.ch(h[(v.vid>>12U)&15U])||!w.ch(h[(v.vid>>8U)&15U])||!w.ch(h[(v.vid>>4U)&15U])||!w.ch(h[v.vid&15U])||!w.ch('"')||!w.ch(',')||!key(w,"pid"))return false;
-    if(!w.ch('"')||!w.ch(h[(v.pid>>12U)&15U])||!w.ch(h[(v.pid>>8U)&15U])||!w.ch(h[(v.pid>>4U)&15U])||!w.ch(h[v.pid&15U])||!w.ch('"')||!w.ch(',')||!key(w,"mode")||!w.string(m,length(m))||!w.ch(',')||!key(w,"location")||!w.ch('{')||!key(w,"usb_path")||(v.location.usb_path.present?!str(w,v.location.usb_path.value):!w.text("null"))||!w.ch(',')||!key(w,"bus")||(v.location.bus.present?!w.number(v.location.bus.value):!w.text("null"))||!w.ch(',')||!key(w,"address")||(v.location.address.present?!w.number(v.location.address.value):!w.text("null"))||!w.ch('}')||!w.ch(',')||!key(w,"serial")||!w.ch('{')||!key(w,"state")||!w.string(ss,length(ss))||!w.ch(',')||!key(w,"value")||(v.serial.present?!str(w,v.serial.value):!w.text("null"))||!w.ch('}')||!w.ch(',')||!key(w,"identification")||!w.ch('{')||!key(w,"model")||!model(w,v.model)||!w.ch(',')||!key(w,"reason")||(v.identification_reason==IdentificationReason::none?!w.text("null"):!w.string(ir,length(ir)))||!w.ch('}')||!w.ch(',')||!key(w,"present")||!boolean(w,v.present)||!w.ch(',')||!key(w,"last_error")||!error(w,v.last_error)||!w.ch('}'))return false;
+    if(!w.ch('"')||!w.ch(h[(v.pid>>12U)&15U])||!w.ch(h[(v.pid>>8U)&15U])||!w.ch(h[(v.pid>>4U)&15U])||!w.ch(h[v.pid&15U])||!w.ch('"')||!w.ch(',')||!key(w,"mode")||!w.string(m,length(m))||!w.ch(',')||!key(w,"location")||!w.ch('{')||!key(w,"usb_path")||(v.location.usb_path.present?!str(w,v.location.usb_path.value):!w.text("null"))||!w.ch(',')||!key(w,"bus")||(v.location.bus.present?!w.number(v.location.bus.value):!w.text("null"))||!w.ch(',')||!key(w,"address")||(v.location.address.present?!w.number(v.location.address.value):!w.text("null"))||!w.ch('}')||!w.ch(',')||!key(w,"serial")||!w.ch('{')||!key(w,"state")||!w.string(ss,length(ss))||!w.ch(',')||!key(w,"value")||(v.serial.present?!str(w,v.serial.value):!w.text("null"))||!w.ch('}')||!w.ch(',')||!key(w,"identification")||!w.ch('{')||!key(w,"model")||!model(w,v.model)||!w.ch(',')||!key(w,"reason")||(v.identification_reason==IdentificationReason::none?!w.text("null"):!w.string(ir,length(ir)))||!w.ch('}'))return false;
     return true;
+}
+bool function(Writer& w,const UsbFunction& v) noexcept
+{
+    return function_observation(w,v)&&w.ch(',')&&key(w,"present")&&boolean(w,v.present)&&w.ch(',')&&key(w,"last_error")&&error(w,v.last_error)&&w.ch('}');
 }
 bool binding(Writer& w,const Optional<Binding>& v) noexcept
 {return !v.present?w.text("null"):(w.ch('{')&&key(w,"function_id")&&w.quoted_number(v.value.function_id)&&w.ch(',')&&key(w,"local_id")&&w.quoted_number(v.value.local_id)&&w.ch('}'));}
@@ -212,6 +220,282 @@ bool emit(const StatusResponse& v,Writer& w) noexcept
     return w.text("}\n");
 }
 
+
+template<std::size_t N>
+bool valid_text(const WString<N>& v,bool required=true) noexcept
+{
+    if(v.length>N||(required&&v.length==0U))return false;
+    for(std::size_t i=0U;i<v.length;++i)if(v.bytes[i]=='\0')return false;
+    return detail::strict_utf8(reinterpret_cast<const std::uint8_t*>(v.bytes.data()),v.length);
+}
+template<std::size_t N>
+bool valid_optional_text(const Optional<WString<N>>& v) noexcept
+{ return !v.present||valid_text(v.value); }
+
+bool valid_model(const Optional<Model>& v) noexcept
+{
+    return !v.present||(valid_text(v.value.id)&&valid_text(v.value.name));
+}
+
+bool valid_candidate(const DiscoverySelectorCandidate& v) noexcept
+{
+    if(!valid_text(v.value)||!valid_optional_text(v.reason))return false;
+    if(static_cast<std::uint8_t>(v.state)>3U)return false;
+    const auto parsed=dtv::userland::identity::parse_device_selector(
+        std::string_view(v.value.bytes.data(),v.value.length));
+    return static_cast<bool>(parsed);
+}
+template<std::size_t N>
+bool valid_candidates(const BArray<DiscoverySelectorCandidate,N>& values) noexcept
+{
+    if(values.count>N)return false;
+    for(std::size_t i=0U;i<values.count;++i)
+        if(!valid_candidate(values.items[i]))return false;
+    return true;
+}
+bool valid_function_observation(const UsbFunction& f) noexcept
+{
+    if(static_cast<std::uint8_t>(f.mode)>2U||
+       static_cast<std::uint8_t>(f.serial_state)>4U||
+       static_cast<std::uint8_t>(f.identification_reason)>3U||
+       !valid_model(f.model))return false;
+    if(f.location.usb_path.present){
+        const auto& t=f.location.usb_path.value;
+        if(!valid_text(t))return false;
+        // A location is a canonical portable USB selector path, not an OS
+        // device-instance string. Reuse the public selector's grammar.
+        std::array<char,detail::kMaxUsbPathBytes+4U> value{};
+        if(t.length+4U>value.size())return false;
+        value[0]='u';value[1]='s';value[2]='b';value[3]=':';
+        for(std::size_t i=0U;i<t.length;++i)value[i+4U]=t.bytes[i];
+        if(!dtv::userland::identity::parse_device_selector(
+            std::string_view(value.data(),t.length+4U)))return false;
+    }
+    if(f.serial_state==SerialState::present)
+        return f.serial.present&&valid_text(f.serial.value);
+    return !f.serial.present;
+}
+bool valid_identity(const Identity& value) noexcept
+{
+    if(static_cast<std::uint8_t>(value.serial_state)>2U||
+       static_cast<std::uint8_t>(value.uniqueness)>3U)return false;
+    if(value.serial_state==IdentitySerialState::present){
+        if(!value.serial.present||!valid_text(value.serial.value)||
+           value.uniqueness==Uniqueness::not_applicable)return false;
+    }else if(value.serial.present)return false;
+    if(value.serial_state==IdentitySerialState::absent&&
+       value.uniqueness!=Uniqueness::not_applicable)return false;
+    if(value.serial_state==IdentitySerialState::unknown&&
+       value.uniqueness==Uniqueness::unique_in_scan)return false;
+    return true;
+}
+bool valid_discovery(const DiscoveryResponse& v) noexcept
+{
+    if(!valid_text(v.producer.product)||!valid_text(v.producer.version)||
+       !valid_optional_text(v.producer.core_version)||
+       v.issues.count>v.issues.items.size()||
+       v.usb_functions.count>v.usb_functions.items.size()||
+       v.enclosures.count>v.enclosures.items.size()||
+       (v.complete&&v.issues.count!=0U)||
+       (!v.complete&&v.issues.count==0U))return false;
+    for(std::size_t i=0U;i<v.issues.count;++i)
+        if(v.issues.items[i].code==0U||
+           dtv::userland::error_symbol(v.issues.items[i].code)==nullptr||
+           !valid_text(v.issues.items[i].detail))return false;
+    for(std::size_t i=0U;i<v.usb_functions.count;++i){
+        const auto& f=v.usb_functions.items[i];
+        if(!valid_function_observation(f.observation)||
+           !valid_optional_text(f.grouping_reason)||
+           !valid_candidates(f.selector_candidates)||
+           static_cast<std::uint8_t>(f.grouping)>2U||
+           (f.grouping==DiscoveryGroupingState::bound)!=f.enclosure_id.present)return false;
+        for(std::size_t j=0U;j<i;++j)
+            if(f.observation.id==v.usb_functions.items[j].observation.id)return false;
+    }
+    for(std::size_t i=0U;i<v.enclosures.count;++i){
+        const auto& e=v.enclosures.items[i];
+        if(!valid_model(e.descriptor.model)||!valid_identity(e.descriptor.identity)||
+           validate_topology(e.topology)!=Error::OK||
+           !valid_candidates(e.selector_candidates)||
+           e.usb_function_ids.count>e.usb_function_ids.items.size()||
+           e.receivers.value.count>e.receivers.value.items.size()||
+           e.readers.value.count>e.readers.value.items.size())return false;
+        const bool known=e.descriptor.model.present&&
+                         e.topology.state!=TopologyState::unknown;
+        if(known!=e.receivers.present||known!=e.readers.present)return false;
+        if(e.topology.state==TopologyState::complete&&
+           (!e.topology.expected_function_count.present||
+            e.topology.expected_function_count.value!=e.usb_function_ids.count))return false;
+        if(e.topology.expected_function_count.present&&
+           e.topology.expected_function_count.value<e.usb_function_ids.count)return false;
+        if(e.receivers.present){
+            if(validate_limits(e.descriptor.limits,e.receivers.value.count)!=Error::OK)
+                return false;
+        }else if(e.descriptor.limits.max_concurrent_streams.present){
+            const auto max=e.descriptor.limits.max_concurrent_streams.value;
+            if(max==0U||max>kMaxPublicReceivers)return false;
+        }
+        for(std::size_t j=0U;j<i;++j)
+            if(e.descriptor.id==v.enclosures.items[j].descriptor.id)return false;
+        for(std::size_t j=0U;j<e.usb_function_ids.count;++j){
+            bool found=false;
+            const auto fid=e.usb_function_ids.items[j];
+            for(std::size_t k=0U;k<j;++k)
+                if(fid==e.usb_function_ids.items[k])return false;
+            for(std::size_t k=0U;k<v.usb_functions.count;++k){
+                const auto& f=v.usb_functions.items[k];
+                if(f.observation.id==fid&&
+                   f.grouping==DiscoveryGroupingState::bound&&
+                   f.enclosure_id.present&&f.enclosure_id.value==e.descriptor.id)
+                    found=true;
+            }
+            if(!found)return false;
+        }
+        if(e.receivers.present){
+            for(std::size_t j=0U;j<e.receivers.value.count;++j){
+                const auto& d=e.receivers.value.items[j];
+                if(validate_receiver_descriptor(d)!=Error::OK)return false;
+                if(d.binding.present&&validate_binding(d.binding.value,
+                    e.usb_function_ids.items.data(),e.usb_function_ids.count)!=Error::OK)
+                    return false;
+                for(std::size_t k=0U;k<j;++k)
+                    if(d.id==e.receivers.value.items[k].id)return false;
+            }
+        }
+        if(e.readers.present){
+            for(std::size_t j=0U;j<e.readers.value.count;++j){
+                const auto& d=e.readers.value.items[j];
+                if(validate_reader_descriptor(d)!=Error::OK)return false;
+                if(d.binding.present&&validate_binding(d.binding.value,
+                    e.usb_function_ids.items.data(),e.usb_function_ids.count)!=Error::OK)
+                    return false;
+                for(std::size_t k=0U;k<j;++k)
+                    if(d.id==e.readers.value.items[k].id)return false;
+            }
+        }
+    }
+    for(std::size_t i=0U;i<v.usb_functions.count;++i){
+        const auto& f=v.usb_functions.items[i];
+        if(f.grouping!=DiscoveryGroupingState::bound)continue;
+        std::size_t matches=0U;
+        for(std::size_t j=0U;j<v.enclosures.count;++j){
+            const auto& e=v.enclosures.items[j];
+            if(e.descriptor.id!=f.enclosure_id.value)continue;
+            for(std::size_t k=0U;k<e.usb_function_ids.count;++k)
+                if(e.usb_function_ids.items[k]==f.observation.id)++matches;
+        }
+        if(matches!=1U)return false;
+    }
+    return true;
+}
+bool selector_candidates(Writer& w,const BArray<DiscoverySelectorCandidate,kMaxFunctions>& v) noexcept
+{
+    static const char* states[]={"usable","requires_resolution","ambiguous","unavailable"};
+    if(!w.ch('['))return false;
+    for(std::size_t i=0U;i<v.count;++i){
+        const auto& x=v.items[i];
+        if(i>0U&&!w.ch(','))return false;
+        if(!w.ch('{')||!key(w,"value")||str(w,x.value)||!w.ch(',')||
+           !key(w,"state"))return false;
+        const char* state=states[static_cast<unsigned>(x.state)];
+        if(!w.string(state,length(state))||!w.ch(',')||!key(w,"reason")||
+           !(x.reason.present?str(w,x.reason.value):w.text("null"))||
+           !w.ch('}'))return false;
+    }
+    return w.ch(']');
+}
+bool discovery_function(Writer& w,const DiscoveryFunction& value) noexcept
+{
+    static const char* grouping[]={"bound","unresolved","ambiguous"};
+    if(!function_observation(w,value.observation)||!w.ch(',')||
+       !key(w,"grouping")||!w.ch('{')||!key(w,"state"))return false;
+    const char* s=grouping[static_cast<unsigned>(value.grouping)];
+    return w.string(s,length(s))&&w.ch(',')&&key(w,"enclosure_id")&&
+        (value.enclosure_id.present?w.quoted_number(value.enclosure_id.value):w.text("null"))&&
+        w.ch(',')&&key(w,"reason")&&
+        (value.grouping_reason.present?str(w,value.grouping_reason.value):w.text("null"))&&
+        w.ch('}')&&w.ch(',')&&key(w,"selector_candidates")&&
+        selector_candidates(w,value.selector_candidates)&&w.ch('}');
+}
+bool discovery_enclosure(Writer& w,const DiscoveryEnclosure& e) noexcept
+{
+    if(!w.ch('{')||!key(w,"id")||!w.quoted_number(e.descriptor.id)||!w.ch(',')||
+       !key(w,"model")||!model(w,e.descriptor.model)||!w.ch(',')||
+       !key(w,"identity")||!identity(w,e.descriptor.identity)||!w.ch(',')||
+       !key(w,"topology")||!topology(w,e.topology)||!w.ch(',')||
+       !key(w,"usb_function_ids")||!w.ch('['))return false;
+    for(std::size_t i=0U;i<e.usb_function_ids.count;++i){
+        if(i!=0U&&!w.ch(','))return false;
+        if(!w.quoted_number(e.usb_function_ids.items[i]))return false;
+    }
+    if(!w.ch(']')||!w.ch(',')||!key(w,"selector_candidates")||
+       !selector_candidates(w,e.selector_candidates))return false;
+    if(e.receivers.present){
+        if(!w.ch(',')||!key(w,"receivers")||!w.ch('['))return false;
+        for(std::size_t i=0U;i<e.receivers.value.count;++i){
+            if(i!=0U&&!w.ch(','))return false;
+            if(!receiver_descriptor(w,e.receivers.value.items[i]))return false;
+        }
+        if(!w.ch(']'))return false;
+    }
+    if(e.readers.present){
+        if(!w.ch(',')||!key(w,"readers")||!w.ch('['))return false;
+        for(std::size_t i=0U;i<e.readers.value.count;++i){
+            if(i!=0U&&!w.ch(','))return false;
+            if(!reader_descriptor(w,e.readers.value.items[i]))return false;
+        }
+        if(!w.ch(']'))return false;
+    }
+    return w.ch(',')&&key(w,"limits")&&limits(w,e.descriptor.limits)&&w.ch('}');
+}
+bool emit_discovery(const DiscoveryResponse& v,Writer& w) noexcept
+{
+    static constexpr char hex[]="0123456789abcdef";
+    if(!w.ch('{')||!key(w,"schema")||
+       !w.text("{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0}")||
+       !w.ch(',')||!key(w,"producer")||!producer(w,v.producer)||
+       !w.ch(',')||!key(w,"scan")||!w.ch('{')||!key(w,"id")||!w.ch('"'))return false;
+    for(auto b:v.scan_id)
+        if(!w.ch(hex[(b>>4U)&15U])||!w.ch(hex[b&15U]))return false;
+    if(!w.ch('"')||!w.ch(',')||!key(w,"complete")||!boolean(w,v.complete)||
+       !w.ch(',')||!key(w,"issues")||!w.ch('['))return false;
+    for(std::size_t i=0U;i<v.issues.count;++i){
+        const auto& issue=v.issues.items[i];
+        const char* symbol=dtv::userland::error_symbol(issue.code);
+        if(i!=0U&&!w.ch(','))return false;
+        if(!w.ch('{')||!key(w,"code")||!w.string(symbol,length(symbol))||
+           !w.ch(',')||!key(w,"detail")||!str(w,issue.detail)||
+           !w.ch('}'))return false;
+    }
+    if(!w.ch(']')||!w.ch('}')||!w.ch(',')||!key(w,"usb_functions")||!w.ch('['))
+        return false;
+    std::array<std::size_t,kMaxFunctions> order{};
+    for(std::size_t i=0U;i<v.usb_functions.count;++i)order[i]=i;
+    for(std::size_t i=0U;i<v.usb_functions.count;++i)
+        for(std::size_t j=i+1U;j<v.usb_functions.count;++j)
+            if(v.usb_functions.items[order[j]].observation.id<
+               v.usb_functions.items[order[i]].observation.id){
+                const auto tmp=order[i];order[i]=order[j];order[j]=tmp;
+            }
+    for(std::size_t i=0U;i<v.usb_functions.count;++i){
+        if(i!=0U&&!w.ch(','))return false;
+        if(!discovery_function(w,v.usb_functions.items[order[i]]))return false;
+    }
+    if(!w.ch(']')||!w.ch(',')||!key(w,"enclosures")||!w.ch('['))return false;
+    for(std::size_t i=0U;i<v.enclosures.count;++i)order[i]=i;
+    for(std::size_t i=0U;i<v.enclosures.count;++i)
+        for(std::size_t j=i+1U;j<v.enclosures.count;++j)
+            if(v.enclosures.items[order[j]].descriptor.id<
+               v.enclosures.items[order[i]].descriptor.id){
+                const auto tmp=order[i];order[i]=order[j];order[j]=tmp;
+            }
+    for(std::size_t i=0U;i<v.enclosures.count;++i){
+        if(i!=0U&&!w.ch(','))return false;
+        if(!discovery_enclosure(w,v.enclosures.items[order[i]]))return false;
+    }
+    return w.text("]}\n");
+}
+
 }  // namespace
 
 Result<std::size_t> status_json_size(const StatusResponse& value,const StatusContext& context) noexcept
@@ -230,5 +514,35 @@ Result<std::size_t> encode_status_json(const StatusResponse& value,const StatusC
     Writer write(output);if(!emit(value,write)||write.size()!=count.size())return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
     return Result<std::size_t>::success(write.size());
 }
+
+
+Result<std::size_t> discovery_json_size(const DiscoveryResponse& value) noexcept
+{
+    if(!valid_discovery(value))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr,0U});
+    if(!emit_discovery(value,count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(count.size());
+}
+
+Result<std::size_t> encode_discovery_json(const DiscoveryResponse& value,
+                                          MutableByteView output) noexcept
+{
+    if(!valid_discovery(value))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    if(output.data==nullptr&&output.size!=0U)
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr,0U});
+    if(!emit_discovery(value,count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    if(output.size<count.size())
+        return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
+    Writer writer(output);
+    if(!emit_discovery(value,writer)||writer.size()!=count.size())
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(writer.size());
+}
+
 
 }  // namespace dtv::userland::wire
