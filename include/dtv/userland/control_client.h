@@ -59,12 +59,19 @@ struct RecordingControlResult final {
     explicit operator bool() const noexcept { return error == Error::OK; }
 };
 
+using RecordingStatusValidator = Error (*)(const StatusSnapshot&, void*) noexcept;
+
 // HELLO, LIST, STATUS, ACQUIRE, TUNE and START on one control connection.  The
 // transport stays open on success; every failure closes it.  No request is
 // retried automatically.
 RecordingControlResult begin_recording(ClientTransport& transport,
                                        const RecordingOptions& options,
                                        Timeout timeout) noexcept;
+RecordingControlResult begin_recording(ClientTransport& transport,
+                                       const RecordingOptions& options,
+                                       Timeout timeout,
+                                       RecordingStatusValidator validator,
+                                       void* validator_context) noexcept;
 
 struct StopControlResult final {
     StopResponse response;

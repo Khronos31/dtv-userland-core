@@ -380,6 +380,15 @@ RecordingControlResult begin_recording(ClientTransport& transport,
                                        const RecordingOptions& options,
                                        Timeout timeout) noexcept
 {
+    return begin_recording(transport, options, timeout, nullptr, nullptr);
+}
+
+RecordingControlResult begin_recording(ClientTransport& transport,
+                                       const RecordingOptions& options,
+                                       Timeout timeout,
+                                       RecordingStatusValidator validator,
+                                       void* validator_context) noexcept
+{
     RecordingControlResult result{};
     if (timeout.milliseconds == 0U) {
         result.error = Error::INVALID_ARGUMENT;
@@ -398,6 +407,10 @@ RecordingControlResult begin_recording(ClientTransport& transport,
     if (!status) {
         result.remote_error_code = status.remote_error_code;
         return fail(status.error);
+    }
+    if (validator != nullptr) {
+        const Error validation = validator(status.snapshot, validator_context);
+        if (validation != Error::OK) return fail(validation);
     }
     RecordingSession& session = result.session;
     session.epoch = status.snapshot.status.context.epoch;
