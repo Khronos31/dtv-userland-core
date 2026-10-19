@@ -84,7 +84,7 @@ target_compile_features(dtv_userland_json PUBLIC cxx_std_17)
 target_include_directories(dtv_userland_json PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-target_link_libraries(dtv_userland_json PUBLIC dtv::wire)
+target_link_libraries(dtv_userland_json PUBLIC dtv::wire dtv::identity)
 
 # Portable UDTV control-connection serializer shared by the product daemons.
 add_library(dtv_userland_control STATIC src/control_connection.cpp src/control_client.cpp)
@@ -281,6 +281,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(control_client_tests tests/control_client_tests.cpp)
     target_link_libraries(control_client_tests PRIVATE dtv::control)
     add_test(NAME control_client_tests COMMAND control_client_tests)
+
+    add_executable(discovery_json_tests tests/discovery_json_tests.cpp)
+    target_link_libraries(discovery_json_tests PRIVATE dtv::json)
+    add_test(NAME discovery_json_tests COMMAND discovery_json_tests)
 
     add_executable(status_json_tests tests/status_json_tests.cpp)
     target_link_libraries(status_json_tests PRIVATE dtv::json)
