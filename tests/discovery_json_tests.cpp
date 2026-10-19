@@ -158,9 +158,9 @@ void test_empty()
 {
     const std::string out=json(empty_scan());
     CHECK(has(out,"\"name\":\"userland.discovery\",\"major\":1,\"minor\":0"));
-    CHECK(has(out,"\"id\":\"10000000000000000000000000000000\""));
+    CHECK(!has(out,"\"id\":\"10000000000000000000000000000000\""));
     CHECK(has(out,"\"complete\":true,\"issues\":[]"));
-    CHECK(has(out,"\"usb_functions\":[],\"enclosures\":[]"));
+    CHECK(has(out,"\"enclosures\":[],\"ungrouped_usb_devices\":[]"));
     CHECK(out.back()=='\n');
 }
 void test_cold_and_partial()
@@ -177,10 +177,11 @@ void test_cold_and_partial()
         cold.usb_functions.items[0].selector_candidates;
     CHECK(w::discovery_json_size(steps.view()));
     const std::string out=json(cold);
-    CHECK(has(out,"\"mode\":\"cold\""));
-    CHECK(has(out,"\"identification\":{\"model\":null,\"reason\":\"cold_model\"}"));
-    CHECK(has(out,"\"grouping\":{\"state\":\"unresolved\",\"enclosure_id\":null,\"reason\":\"cold_model\"}"));
-    CHECK(has(out,"\"state\":\"requires_resolution\",\"reason\":\"cold_model\""));
+    CHECK(has(out,"\"usb\":\"1738:5211\""));
+    CHECK(!has(out,"\"firmware_loaded\":true"));
+    CHECK(has(out,"\"port\":\"1-2\""));
+    CHECK(has(out,"\"ungrouped_usb_devices\":[{"));
+    CHECK(!has(out,"\"requires_resolution\""));
     CHECK(has(out,"\"enclosures\":[]"));
     CHECK(!has(out,"\"present\":"));
     CHECK(!has(out,"\"last_error\":"));
@@ -191,20 +192,21 @@ void test_cold_and_partial()
     cold.issues.items[0].detail=str<256>("synthetic enumeration failure");
     const std::string partial=json(cold);
     CHECK(has(partial,"\"complete\":false"));
-    CHECK(has(partial,"\"code\":\"USB_IO\",\"detail\":\"synthetic enumeration failure\""));
-    CHECK(has(partial,"\"usb_functions\":["));
+    CHECK(has(partial,"\"detail\":\"synthetic enumeration failure\""));
+    CHECK(has(partial,"\"ungrouped_usb_devices\":["));
 }
 void test_bound()
 {
     auto snapshot=bound_scan();
     const auto out=json(snapshot);
-    CHECK(has(out,"\"grouping\":{\"state\":\"bound\",\"enclosure_id\":\"0\",\"reason\":null}"));
-    CHECK(has(out,"\"identity\":{\"serial\":null,\"serial_state\":\"absent\",\"uniqueness\":\"not_applicable\"}"));
-    CHECK(has(out,"\"usb_function_ids\":[\"0\"]"));
-    CHECK(has(out,"\"receivers\":[{\"id\":\"0\",\"systems\":[\"isdb-t\"]"));
-    CHECK(has(out,"\"binding\":{\"function_id\":\"0\",\"local_id\":\"0\"}"));
+    CHECK(has(out,"\"model\":\"Synthetic receiver\""));
+    CHECK(has(out,"\"in_loader_mode\":false"));
+    CHECK(has(out,"\"serial\":null,\"serial_unique\":null"));
+    CHECK(has(out,"\"devices\":[{\"device\":1,\"usb\":\"06b8:102b\""));
+    CHECK(has(out,"\"receivers\":[{\"receiver\":0,\"local\":0,\"systems\":[\"ISDB-T\"]"));
+    CHECK(has(out,"\"lnb_15v_supported\":false"));
     CHECK(has(out,"\"readers\":[]"));
-    CHECK(has(out,"\"limits\":{\"max_concurrent_streams\":1}"));
+    CHECK(!has(out,"max_concurrent_streams"));
 }
 void test_model_absent_but_topology_known()
 {
@@ -214,9 +216,9 @@ void test_model_absent_but_topology_known()
     known.enclosures.items[0].descriptor.model.present=false;
     const auto output=json(known);
     CHECK(!output.empty());
-    CHECK(has(output,"\"model\":null,\"identity\""));
-    CHECK(has(output,"\"topology\":{\"state\":\"complete\""));
-    CHECK(has(output,"\"receivers\":[{\"id\":\"0\""));
+    CHECK(has(output,"\"model\":null,\"serial\":null"));
+    CHECK(!has(output,"\"topology\""));
+    CHECK(has(output,"\"receivers\":[{\"receiver\":0"));
     CHECK(has(output,"\"readers\":[]"));
 
     // Once topology is known, omission is not a substitute for known-empty.
@@ -266,19 +268,137 @@ void test_sorted_functions()
     d.usb_functions.items[0].observation.id=8U;
     d.usb_functions.items[1].observation.id=2U;
     const auto out=json(d);
-    CHECK(out.find("\"id\":\"2\",\"vid\"")<out.find("\"id\":\"8\",\"vid\""));
+    CHECK(has(out,"\"ungrouped_usb_devices\":[{"));
+    CHECK(!has(out,"\"usb_functions\""));
     d.usb_functions.items[0].observation.id=2U;
     expect_invalid(d); // duplicate IDs
 }
+void test_scan_serial_uniqueness()
+{
+    auto d = bound_scan();
+    auto& first = d.enclosures.items[0].descriptor.identity;
+    first.serial_state = w::IdentitySerialState::present;
+    first.serial.present = true;
+    first.serial.value = str<dtv::userland::detail::kMaxSerialBytes>("same-serial");
+    first.uniqueness = w::Uniqueness::unknown;
+    const auto solo = json(d);
+    CHECK(has(solo, "\"serial_unique\":true"));
+
+    // A second enclosure with a shared serial makes BOTH values false.
+    d.usb_functions.count = 2U;
+    d.usb_functions.items[1] = d.usb_functions.items[0];
+    d.usb_functions.items[1].observation.id = 1U;
+    d.usb_functions.items[1].enclosure_id.value = 1U;
+    d.usb_functions.items[1].observation.location.usb_path.value =
+        str<dtv::userland::detail::kMaxUsbPathBytes>("1-3");
+    d.usb_functions.items[1].selector_candidates.items[0].value =
+        str<w::kMaxDiscoverySelectorBytes>("usb:1-3");
+
+    d.enclosures.count = 2U;
+    d.enclosures.items[1] = d.enclosures.items[0];
+    d.enclosures.items[1].descriptor.id = 1U;
+    d.enclosures.items[1].usb_function_ids.items[0] = 1U;
+    d.enclosures.items[1].receivers.value.items[0].binding.value.function_id = 1U;
+    d.enclosures.items[1].selector_candidates.items[0].value =
+        str<w::kMaxDiscoverySelectorBytes>("usb:1-3");
+    const auto duplicated = json(d);
+    CHECK(!duplicated.empty());
+    std::size_t count = 0;
+    for (std::size_t i = 0; (i = duplicated.find("\"serial_unique\":false", i))
+         != std::string::npos; i += 17) ++count;
+    CHECK(count == 2U);
+
+    d.enclosures.items[1].descriptor.identity.serial.value =
+        str<dtv::userland::detail::kMaxSerialBytes>("other-serial");
+    const auto distinct = json(d);
+    CHECK(has(distinct,"\"serial_unique\":true"));
+    d.complete = false;
+    d.issues.count = 1U;
+    d.issues.items[0].code = static_cast<std::uint32_t>(Error::USB_IO);
+    d.issues.items[0].detail = str<256>("incomplete enumeration");
+    CHECK(has(json(d), "\"serial_unique\":null"));
+}
+
+void test_two_usb_eight_receiver_enclosure()
+{
+    auto d = bound_scan();
+    auto& e = d.enclosures.items[0];
+    e.descriptor.model.value.id = str<64>("PX-Q3U4");
+    e.descriptor.model.value.name = str<128>("PX-Q3U4");
+    e.descriptor.identity.serial_state = w::IdentitySerialState::present;
+    e.descriptor.identity.serial.present = true;
+    e.descriptor.identity.serial.value =
+        str<dtv::userland::detail::kMaxSerialBytes>("00001205000960");
+    e.descriptor.identity.uniqueness = w::Uniqueness::unknown;
+    d.usb_functions.items[0].observation.vid = 0x0511U;
+    d.usb_functions.items[0].observation.pid = 0x084aU;
+    d.usb_functions.items[0].observation.model.value.id = str<64>("PX-Q3U4");
+    d.usb_functions.items[0].observation.model.value.name = str<128>("PX-Q3U4");
+
+    d.usb_functions.count = 2U;
+    d.usb_functions.items[1] = d.usb_functions.items[0];
+    d.usb_functions.items[1].observation.id = 1U;
+    d.usb_functions.items[1].observation.location.usb_path.value =
+        str<dtv::userland::detail::kMaxUsbPathBytes>("1-2.2.2");
+    d.usb_functions.items[1].selector_candidates.items[0].value =
+        str<w::kMaxDiscoverySelectorBytes>("usb:1-2.2.2");
+
+    e.usb_function_ids.count = 2U;
+    e.usb_function_ids.items[1] = 1U;
+    e.topology.expected_function_count.value = 2U;
+    e.receivers.value.count = 8U;
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        auto& receiver = e.receivers.value.items[i];
+        receiver.id = static_cast<std::uint16_t>(i);
+        receiver.binding.present = true;
+        receiver.binding.value.function_id = i < 4U ? 0U : 1U;
+        receiver.binding.value.local_id = static_cast<std::uint16_t>(i % 4U);
+        receiver.systems.mask = i % 4U < 2U ? 2U : 1U;
+        if (i % 4U == 0U) {
+            receiver.capabilities.controls = w::kControlBitLnb;
+            receiver.capabilities.lnb.values.count = 2U;
+            receiver.capabilities.lnb.values.items[0] = 0U;
+            receiver.capabilities.lnb.values.items[1] = 15U;
+        }
+    }
+    d.usb_functions.items[1].observation.id = 1U;
+    e.readers.value.count = 1U;
+    e.readers.value.items[0].id = 0U;
+    e.readers.value.items[0].binding.present = true;
+    e.readers.value.items[0].binding.value.function_id = 0U;
+    e.readers.value.items[0].binding.value.local_id = 0U;
+    d.usb_functions.items[0].observation.location.usb_path.value =
+        str<dtv::userland::detail::kMaxUsbPathBytes>("1-2.2.1");
+    d.usb_functions.items[0].selector_candidates.items[0].value =
+        str<w::kMaxDiscoverySelectorBytes>("usb:1-2.2.1");
+    const auto out = json(d);
+    CHECK(has(out,"\"serial_unique\":true"));
+    CHECK(has(out,"\"lnb_15v_supported\":true"));
+    CHECK(has(out,"\"reader\":0,\"device\":1"));
+    CHECK(has(out,"\"device\":2,\"usb\":\"0511:084a\""));
+    CHECK(has(out,"\"receiver\":7,\"local\":3,\"systems\":[\"ISDB-T\"]"));
+    std::size_t count = 0;
+    for (std::size_t i = 0; (i = out.find("\"receiver\":", i))
+         != std::string::npos; i += 11) ++count;
+    CHECK(count == 8U);
+}
+
 } // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 2 && std::strcmp(argv[1], "--emit") == 0) {
+        const auto output = json(bound_scan());
+        std::fwrite(output.data(), 1U, output.size(), stdout);
+        return output.empty() ? 1 : 0;
+    }
     test_empty();
     test_cold_and_partial();
     test_bound();
     test_model_absent_but_topology_known();
     test_atomicity_and_refs();
     test_sorted_functions();
+    test_scan_serial_uniqueness();
+    test_two_usb_eight_receiver_enclosure();
     return failures==0?0:1;
 }

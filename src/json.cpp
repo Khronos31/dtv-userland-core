@@ -390,123 +390,271 @@ bool valid_discovery(const DiscoveryResponse& v) noexcept
     }
     return true;
 }
-bool selector_candidates(Writer& w,const BArray<DiscoverySelectorCandidate,kMaxFunctions>& v) noexcept
+// The public discovery JSON follows physical ownership.  Wire/internal
+// records remain normalized, but consumers should never need to join IDs.
+bool discovery_usb_id(Writer& w, std::uint16_t vid, std::uint16_t pid) noexcept
 {
-    static const char* states[]={"usable","requires_resolution","ambiguous","unavailable"};
-    if(!w.ch('['))return false;
-    for(std::size_t i=0U;i<v.count;++i){
-        const auto& x=v.items[i];
-        if(i>0U&&!w.ch(','))return false;
-        if(!w.ch('{')||!key(w,"value")||!str(w,x.value)||!w.ch(',')||
-           !key(w,"state"))return false;
-        const char* state=states[static_cast<unsigned>(x.state)];
-        if(!w.string(state,length(state))||!w.ch(',')||!key(w,"reason")||
-           !(x.reason.present?str(w,x.reason.value):w.text("null"))||
-           !w.ch('}'))return false;
+    static constexpr char hex[] = "0123456789abcdef";
+    return w.ch('"') &&
+           w.ch(hex[(vid >> 12U) & 15U]) && w.ch(hex[(vid >> 8U) & 15U]) &&
+           w.ch(hex[(vid >> 4U) & 15U]) && w.ch(hex[vid & 15U]) &&
+           w.ch(':') &&
+           w.ch(hex[(pid >> 12U) & 15U]) && w.ch(hex[(pid >> 8U) & 15U]) &&
+           w.ch(hex[(pid >> 4U) & 15U]) && w.ch(hex[pid & 15U]) &&
+           w.ch('"');
+}
+
+const DiscoveryFunction* find_discovery_function(const DiscoveryResponse& scan,
+                                                 std::uint16_t id) noexcept
+{
+    for (std::size_t i = 0U; i < scan.usb_functions.count; ++i)
+        if (scan.usb_functions.items[i].observation.id == id)
+            return &scan.usb_functions.items[i];
+    return nullptr;
+}
+
+bool discovery_systems(Writer& w, Systems systems) noexcept
+{
+    if (!w.ch('[')) return false;
+    bool comma = false;
+    if ((systems.mask & 1U) != 0U) {
+        if (!w.text("\"ISDB-T\"")) return false;
+        comma = true;
+    }
+    if ((systems.mask & 2U) != 0U) {
+        if ((comma && !w.ch(',')) || !w.text("\"ISDB-S\"")) return false;
+        comma = true;
+    }
+    // ISDB-C is a standard name, not a proprietary enum string.  The
+    // current wire mask only validates T/S; extending it is a separate task.
+    if ((systems.mask & 4U) != 0U) {
+        if ((comma && !w.ch(',')) || !w.text("\"ISDB-C\"")) return false;
     }
     return w.ch(']');
 }
-bool discovery_function(Writer& w,const DiscoveryFunction& value) noexcept
+
+bool discovery_receiver(Writer& w, const ReceiverDescriptor& receiver) noexcept
 {
-    static const char* grouping[]={"bound","unresolved","ambiguous"};
-    if(!function_observation(w,value.observation)||!w.ch(',')||
-       !key(w,"grouping")||!w.ch('{')||!key(w,"state"))return false;
-    const char* s=grouping[static_cast<unsigned>(value.grouping)];
-    return w.string(s,length(s))&&w.ch(',')&&key(w,"enclosure_id")&&
-        (value.enclosure_id.present?w.quoted_number(value.enclosure_id.value):w.text("null"))&&
-        w.ch(',')&&key(w,"reason")&&
-        (value.grouping_reason.present?str(w,value.grouping_reason.value):w.text("null"))&&
-        w.ch('}')&&w.ch(',')&&key(w,"selector_candidates")&&
-        selector_candidates(w,value.selector_candidates)&&w.ch('}');
-}
-bool discovery_enclosure(Writer& w,const DiscoveryEnclosure& e) noexcept
-{
-    if(!w.ch('{')||!key(w,"id")||!w.quoted_number(e.descriptor.id)||!w.ch(',')||
-       !key(w,"model")||!model(w,e.descriptor.model)||!w.ch(',')||
-       !key(w,"identity")||!identity(w,e.descriptor.identity)||!w.ch(',')||
-       !key(w,"topology")||!topology(w,e.topology)||!w.ch(',')||
-       !key(w,"usb_function_ids")||!w.ch('['))return false;
-    for(std::size_t i=0U;i<e.usb_function_ids.count;++i){
-        if(i!=0U&&!w.ch(','))return false;
-        if(!w.quoted_number(e.usb_function_ids.items[i]))return false;
-    }
-    if(!w.ch(']')||!w.ch(',')||!key(w,"selector_candidates")||
-       !selector_candidates(w,e.selector_candidates))return false;
-    if(e.receivers.present){
-        if(!w.ch(',')||!key(w,"receivers")||!w.ch('['))return false;
-        for(std::size_t i=0U;i<e.receivers.value.count;++i){
-            if(i!=0U&&!w.ch(','))return false;
-            if(!receiver_descriptor(w,e.receivers.value.items[i]))return false;
-        }
-        if(!w.ch(']'))return false;
-    }
-    if(e.readers.present){
-        if(!w.ch(',')||!key(w,"readers")||!w.ch('['))return false;
-        for(std::size_t i=0U;i<e.readers.value.count;++i){
-            if(i!=0U&&!w.ch(','))return false;
-            if(!reader_descriptor(w,e.readers.value.items[i]))return false;
-        }
-        if(!w.ch(']'))return false;
-    }
-    return w.ch(',')&&key(w,"limits")&&limits(w,e.descriptor.limits)&&w.ch('}');
-}
-bool emit_discovery(const DiscoveryResponse& v,Writer& w) noexcept
-{
-    static constexpr char hex[]="0123456789abcdef";
-    if(!w.ch('{')||!key(w,"schema")||
-       !w.text("{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0}")||
-       !w.ch(',')||!key(w,"producer")||!producer(w,v.producer)||
-       !w.ch(',')||!key(w,"scan")||!w.ch('{')||!key(w,"id")||!w.ch('"'))return false;
-    for(auto b:v.scan_id)
-        if(!w.ch(hex[(b>>4U)&15U])||!w.ch(hex[b&15U]))return false;
-    if(!w.ch('"')||!w.ch(',')||!key(w,"complete")||!boolean(w,v.complete)||
-       !w.ch(',')||!key(w,"issues")||!w.ch('['))return false;
-    for(std::size_t i=0U;i<v.issues.count;++i){
-        const auto& issue=v.issues.items[i];
-        const char* symbol=dtv::userland::error_symbol(issue.code);
-        if(i!=0U&&!w.ch(','))return false;
-        if(!w.ch('{')||!key(w,"code")||!w.string(symbol,length(symbol))||
-           !w.ch(',')||!key(w,"detail")||!str(w,issue.detail)||
-           !w.ch('}'))return false;
-    }
-    if(!w.ch(']')||!w.ch('}')||!w.ch(',')||!key(w,"usb_functions")||!w.ch('['))
+    if (!receiver.binding.present || !w.ch('{') || !key(w, "receiver") ||
+        !w.number(receiver.id) || !w.ch(',') || !key(w, "local") ||
+        !w.number(receiver.binding.value.local_id) || !w.ch(',') ||
+        !key(w, "systems") || !discovery_systems(w, receiver.systems))
         return false;
-    // IDs, not scan order, determine the stable output order. Find the next
-    // larger ID without allocating a temporary array for the entire scan.
-    bool have_previous=false;
-    std::uint16_t previous=0U;
-    for(std::size_t emitted=0U;emitted<v.usb_functions.count;++emitted){
-        bool found=false;
-        std::size_t next=0U;
-        for(std::size_t i=0U;i<v.usb_functions.count;++i){
-            const auto id=v.usb_functions.items[i].observation.id;
-            if((!have_previous||id>previous)&&
-               (!found||id<v.usb_functions.items[next].observation.id)){
-                found=true;next=i;
-            }
+    if ((receiver.capabilities.controls & kControlBitLna) != 0U) {
+        if (!w.ch(',') || !key(w, "lna_defaults") || !w.ch('{')) return false;
+        for (std::size_t i = 0U; i < receiver.capabilities.lna.entries.count; ++i) {
+            const auto& d = receiver.capabilities.lna.entries.items[i];
+            if ((i != 0U && !w.ch(',')) ||
+                !key(w, d.system == System::isdb_s ? "ISDB-S" : "ISDB-T") ||
+                !(d.default_value.present ? boolean(w, d.default_value.value)
+                                           : w.text("null"))) return false;
         }
-        if(!found||(emitted!=0U&&!w.ch(','))||
-           !discovery_function(w,v.usb_functions.items[next]))return false;
-        previous=v.usb_functions.items[next].observation.id;
-        have_previous=true;
+        if (!w.ch('}')) return false;
     }
-    if(!w.ch(']')||!w.ch(',')||!key(w,"enclosures")||!w.ch('['))return false;
-    previous=0U;
-    have_previous=false;
-    for(std::size_t emitted=0U;emitted<v.enclosures.count;++emitted){
-        bool found=false;
-        std::size_t next=0U;
-        for(std::size_t i=0U;i<v.enclosures.count;++i){
-            const auto id=v.enclosures.items[i].descriptor.id;
-            if((!have_previous||id>previous)&&
-               (!found||id<v.enclosures.items[next].descriptor.id)){
-                found=true;next=i;
+    return w.ch('}');
+}
+
+bool discovery_device(Writer& w, const DiscoveryResponse& scan,
+                      const DiscoveryEnclosure& enclosure,
+                      std::uint16_t function_id, std::size_t slot) noexcept
+{
+    const auto* observed = find_discovery_function(scan, function_id);
+    if (observed == nullptr) return false;
+    const auto& usb = observed->observation;
+    if (!w.ch('{') || !key(w, "device") || !w.number(slot + 1U) ||
+        !w.ch(',') || !key(w, "usb") || !discovery_usb_id(w, usb.vid, usb.pid) ||
+        !w.ch(',') || !key(w, "serial") ||
+        !(usb.serial.present ? str(w, usb.serial.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "bus") ||
+        !(usb.location.bus.present ? w.number(usb.location.bus.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "address") ||
+        !(usb.location.address.present ? w.number(usb.location.address.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "port") ||
+        !(usb.location.usb_path.present ? str(w, usb.location.usb_path.value)
+                                        : w.text("null"))) return false;
+    if (enclosure.receivers.present) {
+        if (!w.ch(',') || !key(w, "receivers") || !w.ch('[')) return false;
+        bool first = true;
+        for (std::size_t i = 0U; i < enclosure.receivers.value.count; ++i) {
+            const auto& receiver = enclosure.receivers.value.items[i];
+            if (!receiver.binding.present) return false;
+            if (receiver.binding.value.function_id != function_id) continue;
+            if ((!first && !w.ch(',')) || !discovery_receiver(w, receiver))
+                return false;
+            first = false;
+        }
+        if (!w.ch(']')) return false;
+    }
+    return w.ch('}');
+}
+
+bool discovery_unique(Writer& w, const DiscoveryResponse& scan,
+                      const DiscoveryEnclosure& e) noexcept
+{
+    const auto& serial = e.descriptor.identity.serial;
+    if (!serial.present) return w.text("null");
+    bool duplicate = false;
+    for (std::size_t i = 0U; i < scan.enclosures.count; ++i) {
+        const auto& other = scan.enclosures.items[i];
+        if (other.descriptor.id == e.descriptor.id ||
+            !other.descriptor.identity.serial.present) continue;
+        const auto& candidate = other.descriptor.identity.serial.value;
+        if (candidate.length == serial.value.length &&
+            std::string_view(candidate.bytes.data(), candidate.length) ==
+                std::string_view(serial.value.bytes.data(), serial.value.length)) {
+            duplicate = true;
+            break;
+        }
+    }
+    // Observed duplicates are unambiguously non-unique even on a partial
+    // scan. A non-duplicate becomes "true" only after a complete scan.
+    return duplicate ? boolean(w, false) :
+           scan.complete ? boolean(w, true) : w.text("null");
+}
+
+bool discovery_enclosure(Writer& w, const DiscoveryResponse& scan,
+                         const DiscoveryEnclosure& e) noexcept
+{
+    const auto& identity = e.descriptor.identity;
+    if (!w.ch('{') || !key(w, "model") ||
+        !(e.descriptor.model.present ? str(w, e.descriptor.model.value.name)
+                                     : w.text("null")) ||
+        !w.ch(',') || !key(w, "serial") ||
+        !(identity.serial.present ? str(w, identity.serial.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "serial_unique") || !discovery_unique(w, scan, e))
+        return false;
+
+    // A dual-USB enclosure generally has the same VID:PID on both functions.
+    // A mixed cold/runtime enclosure has no single VID:PID; each device still
+    // carries its observed USB ID.
+    const UsbFunction* first_usb = nullptr;
+    bool same_usb_id = e.usb_function_ids.count != 0U;
+    bool all_runtime = same_usb_id;
+    bool any_cold = false;
+    for (std::size_t i = 0U; i < e.usb_function_ids.count; ++i) {
+        const auto* f = find_discovery_function(scan, e.usb_function_ids.items[i]);
+        if (!f) return false;
+        const auto& usb = f->observation;
+        if (first_usb && (first_usb->vid != usb.vid || first_usb->pid != usb.pid))
+            same_usb_id = false;
+        if (!first_usb) first_usb = &usb;
+        if (usb.mode == Mode::cold) any_cold = true;
+        if (usb.mode != Mode::runtime) all_runtime = false;
+    }
+    if (!w.ch(',') || !key(w, "usb") ||
+        !(same_usb_id ? discovery_usb_id(w, first_usb->vid, first_usb->pid)
+                       : w.text("null")) ||
+        !w.ch(',') || !key(w, "in_loader_mode") ||
+        !(any_cold ? boolean(w, true)
+                    : all_runtime ? boolean(w, false) : w.text("null")) ||
+        !w.ch(',') || !key(w, "devices") || !w.ch('[')) return false;
+    for (std::size_t i = 0U; i < e.usb_function_ids.count; ++i) {
+        if ((i && !w.ch(',')) ||
+            !discovery_device(w, scan, e, e.usb_function_ids.items[i], i))
+            return false;
+    }
+    if (!w.ch(']')) return false;
+    if (e.receivers.present) {
+        bool lnb_supported = false;
+        for (std::size_t i = 0U; i < e.receivers.value.count; ++i) {
+            const auto& c = e.receivers.value.items[i].capabilities;
+            if ((c.controls & kControlBitLnb) == 0U) continue;
+            for (std::size_t j = 0U; j < c.lnb.values.count; ++j)
+                if (c.lnb.values.items[j] == 15U) lnb_supported = true;
+        }
+        if (!w.ch(',') || !key(w, "lnb_15v_supported") ||
+            !boolean(w, lnb_supported)) return false;
+    }
+    if (e.readers.present) {
+        if (!w.ch(',') || !key(w, "readers") || !w.ch('[')) return false;
+        for (std::size_t i = 0U; i < e.readers.value.count; ++i) {
+            const auto& reader = e.readers.value.items[i];
+            if (!reader.binding.present) return false;
+            bool found = false;
+            std::size_t slot = 0U;
+            for (; slot < e.usb_function_ids.count; ++slot)
+                if (e.usb_function_ids.items[slot] == reader.binding.value.function_id) {
+                    found = true;
+                    break;
+                }
+            if (!found || (i && !w.ch(',')) || !w.ch('{') ||
+                !key(w, "reader") || !w.number(reader.id) || !w.ch(',') ||
+                !key(w, "device") || !w.number(slot + 1U) || !w.ch('}'))
+                return false;
+        }
+        if (!w.ch(']')) return false;
+    }
+    return w.ch('}');
+}
+
+bool discovery_ungrouped(Writer& w, const DiscoveryFunction& f) noexcept
+{
+    const auto& usb = f.observation;
+    if (!w.ch('{') || !key(w, "usb") || !discovery_usb_id(w, usb.vid, usb.pid) ||
+        !w.ch(',') || !key(w, "serial") ||
+        !(usb.serial.present ? str(w, usb.serial.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "port") ||
+        !(usb.location.usb_path.present ? str(w, usb.location.usb_path.value)
+                                        : w.text("null")) ||
+        !w.ch(',') || !key(w, "bus") ||
+        !(usb.location.bus.present ? w.number(usb.location.bus.value) : w.text("null")) ||
+        !w.ch(',') || !key(w, "address") ||
+        !(usb.location.address.present ? w.number(usb.location.address.value)
+                                       : w.text("null"))) return false;
+    return w.ch('}');
+}
+
+bool emit_discovery(const DiscoveryResponse& scan, Writer& w) noexcept
+{
+    if (!w.ch('{') || !key(w, "schema") ||
+        !w.text("{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0}") ||
+        !w.ch(',') || !key(w, "producer") || !w.ch('{') ||
+        !key(w, "product") || !str(w, scan.producer.product) ||
+        !w.ch(',') || !key(w, "version") || !str(w, scan.producer.version))
+        return false;
+    if (scan.producer.core_version.present) {
+        if (!w.ch(',') || !key(w, "core_version") ||
+            !str(w, scan.producer.core_version.value)) return false;
+    }
+    if (!w.ch('}') || !w.ch(',') || !key(w, "scan") || !w.ch('{') ||
+        !key(w, "complete") || !boolean(w, scan.complete) ||
+        !w.ch(',') || !key(w, "issues") || !w.ch('[')) return false;
+    for (std::size_t i = 0U; i < scan.issues.count; ++i) {
+        const auto& issue = scan.issues.items[i];
+        if ((i && !w.ch(',')) || !w.ch('{') || !key(w, "code") ||
+            !w.number(issue.code) || !w.ch(',') || !key(w, "detail") ||
+            !str(w, issue.detail) || !w.ch('}')) return false;
+    }
+    if (!w.ch(']') || !w.ch('}') || !w.ch(',') ||
+        !key(w, "enclosures") || !w.ch('[')) return false;
+    bool have_previous = false;
+    std::uint16_t previous = 0U;
+    for (std::size_t done = 0; done < scan.enclosures.count; ++done) {
+        bool found = false;
+        std::size_t next = 0U;
+        for (std::size_t i = 0U; i < scan.enclosures.count; ++i) {
+            const auto id = scan.enclosures.items[i].descriptor.id;
+            if ((!have_previous || id > previous) &&
+                (!found || id < scan.enclosures.items[next].descriptor.id)) {
+                next = i;
+                found = true;
             }
         }
-        if(!found||(emitted!=0U&&!w.ch(','))||
-           !discovery_enclosure(w,v.enclosures.items[next]))return false;
-        previous=v.enclosures.items[next].descriptor.id;
-        have_previous=true;
+        if (!found || (done && !w.ch(',')) ||
+            !discovery_enclosure(w, scan, scan.enclosures.items[next])) return false;
+        previous = scan.enclosures.items[next].descriptor.id;
+        have_previous = true;
+    }
+    if (!w.ch(']') || !w.ch(',') ||
+        !key(w, "ungrouped_usb_devices") || !w.ch('[')) return false;
+    bool first = true;
+    for (std::size_t i = 0U; i < scan.usb_functions.count; ++i) {
+        if (scan.usb_functions.items[i].grouping == DiscoveryGroupingState::bound)
+            continue;
+        if ((!first && !w.ch(',')) ||
+            !discovery_ungrouped(w, scan.usb_functions.items[i]))
+            return false;
+        first = false;
     }
     return w.text("]}\n");
 }

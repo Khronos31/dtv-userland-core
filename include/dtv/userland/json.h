@@ -83,7 +83,9 @@ struct DiscoveryResponse final {
     DiscoveryView<DiscoveryEnclosure> enclosures;
 };
 
-// A single userland.discovery v1.0 object plus newline. ID references,
+// A single userland.discovery v1.0 object plus newline. Public rendering
+// follows enclosures[].devices[].receivers[] with familiar JSON primitives;
+// the typed internal records retain their normal function/receiver bindings.
 // observed/published membership, presence and selector grammar are validated
 // before size calculation or writing. Invalid and short-buffer calls leave
 // the supplied output completely unchanged. The per-enclosure
