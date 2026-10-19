@@ -293,9 +293,9 @@ bool valid_discovery(const DiscoveryResponse& v) noexcept
 {
     if(!valid_text(v.producer.product)||!valid_text(v.producer.version)||
        !valid_optional_text(v.producer.core_version)||
-       v.issues.count>v.issues.items.size()||
-       v.usb_functions.count>v.usb_functions.items.size()||
-       v.enclosures.count>v.enclosures.items.size()||
+       (v.issues.count!=0U&&v.issues.items==nullptr)||
+       (v.usb_functions.count!=0U&&v.usb_functions.items==nullptr)||
+       (v.enclosures.count!=0U&&v.enclosures.items==nullptr)||
        (v.complete&&v.issues.count!=0U)||
        (!v.complete&&v.issues.count==0U))return false;
     for(std::size_t i=0U;i<v.issues.count;++i)
@@ -469,29 +469,42 @@ bool emit_discovery(const DiscoveryResponse& v,Writer& w) noexcept
     }
     if(!w.ch(']')||!w.ch('}')||!w.ch(',')||!key(w,"usb_functions")||!w.ch('['))
         return false;
-    std::array<std::size_t,kMaxFunctions> order{};
-    for(std::size_t i=0U;i<v.usb_functions.count;++i)order[i]=i;
-    for(std::size_t i=0U;i<v.usb_functions.count;++i)
-        for(std::size_t j=i+1U;j<v.usb_functions.count;++j)
-            if(v.usb_functions.items[order[j]].observation.id<
-               v.usb_functions.items[order[i]].observation.id){
-                const auto tmp=order[i];order[i]=order[j];order[j]=tmp;
+    // IDs, not scan order, determine the stable output order. Find the next
+    // larger ID without allocating a temporary array for the entire scan.
+    bool have_previous=false;
+    std::uint16_t previous=0U;
+    for(std::size_t emitted=0U;emitted<v.usb_functions.count;++emitted){
+        bool found=false;
+        std::size_t next=0U;
+        for(std::size_t i=0U;i<v.usb_functions.count;++i){
+            const auto id=v.usb_functions.items[i].observation.id;
+            if((!have_previous||id>previous)&&
+               (!found||id<v.usb_functions.items[next].observation.id)){
+                found=true;next=i;
             }
-    for(std::size_t i=0U;i<v.usb_functions.count;++i){
-        if(i!=0U&&!w.ch(','))return false;
-        if(!discovery_function(w,v.usb_functions.items[order[i]]))return false;
+        }
+        if(!found||(emitted!=0U&&!w.ch(','))||
+           !discovery_function(w,v.usb_functions.items[next]))return false;
+        previous=v.usb_functions.items[next].observation.id;
+        have_previous=true;
     }
     if(!w.ch(']')||!w.ch(',')||!key(w,"enclosures")||!w.ch('['))return false;
-    for(std::size_t i=0U;i<v.enclosures.count;++i)order[i]=i;
-    for(std::size_t i=0U;i<v.enclosures.count;++i)
-        for(std::size_t j=i+1U;j<v.enclosures.count;++j)
-            if(v.enclosures.items[order[j]].descriptor.id<
-               v.enclosures.items[order[i]].descriptor.id){
-                const auto tmp=order[i];order[i]=order[j];order[j]=tmp;
+    previous=0U;
+    have_previous=false;
+    for(std::size_t emitted=0U;emitted<v.enclosures.count;++emitted){
+        bool found=false;
+        std::size_t next=0U;
+        for(std::size_t i=0U;i<v.enclosures.count;++i){
+            const auto id=v.enclosures.items[i].descriptor.id;
+            if((!have_previous||id>previous)&&
+               (!found||id<v.enclosures.items[next].descriptor.id)){
+                found=true;next=i;
             }
-    for(std::size_t i=0U;i<v.enclosures.count;++i){
-        if(i!=0U&&!w.ch(','))return false;
-        if(!discovery_enclosure(w,v.enclosures.items[order[i]]))return false;
+        }
+        if(!found||(emitted!=0U&&!w.ch(','))||
+           !discovery_enclosure(w,v.enclosures.items[next]))return false;
+        previous=v.enclosures.items[next].descriptor.id;
+        have_previous=true;
     }
     return w.text("]}\n");
 }
