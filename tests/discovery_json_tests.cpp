@@ -27,16 +27,40 @@ w::WString<N> str(const char* value)
     return result;
 }
 
-w::DiscoveryResponse empty_scan()
+// Small owned test fixture. Production serialization takes non-owning views
+// so a scan can contain multiple eight-function enclosures without copying.
+struct FixtureDocument final {
+    w::Producer producer;
+    w::Uuid scan_id{};
+    bool complete = true;
+    w::BArray<w::DiscoveryScanIssue,w::kMaxFunctions> issues;
+    w::BArray<w::DiscoveryFunction,w::kMaxFunctions> usb_functions;
+    w::BArray<w::DiscoveryEnclosure,w::kMaxFunctions> enclosures;
+
+    w::DiscoveryResponse view() const noexcept
+    {
+        w::DiscoveryResponse result{};
+        result.producer=producer;
+        result.scan_id=scan_id;
+        result.complete=complete;
+        result.issues={issues.items.data(),issues.count};
+        result.usb_functions={usb_functions.items.data(),usb_functions.count};
+        result.enclosures={enclosures.items.data(),enclosures.count};
+        return result;
+    }
+};
+
+FixtureDocument empty_scan()
 {
-    w::DiscoveryResponse result{};
+    FixtureDocument result{};
     result.producer.product=str<32>("example-userland");
     result.producer.version=str<64>("0.0.0-test");
     result.scan_id[0]=0x10U;
     return result;
 }
-std::string json(const w::DiscoveryResponse& document)
+std::string json(const FixtureDocument& fixture)
 {
+    const auto document=fixture.view();
     auto size=w::discovery_json_size(document);
     CHECK(size);
     if(!size) { std::fprintf(stderr,"discovery_json_size error=%u\n",static_cast<unsigned>(size.error())); return {}; }
@@ -50,7 +74,7 @@ std::string json(const w::DiscoveryResponse& document)
 bool has(const std::string& text,const char* part)
 { return text.find(part)!=std::string::npos; }
 
-w::DiscoveryResponse cold_scan()
+FixtureDocument cold_scan()
 {
     auto scan=empty_scan();
     scan.usb_functions.count=1U;
@@ -76,7 +100,7 @@ w::DiscoveryResponse cold_scan()
     candidate.reason.value=str<64>("cold_model");
     return scan;
 }
-w::DiscoveryResponse bound_scan()
+FixtureDocument bound_scan()
 {
     auto scan=cold_scan();
     auto& function=scan.usb_functions.items[0];
@@ -119,12 +143,13 @@ w::DiscoveryResponse bound_scan()
     e.readers.value.count=0U;
     return scan;
 }
-void expect_invalid(const w::DiscoveryResponse& value)
+void expect_invalid(const FixtureDocument& value)
 {
-    auto size=w::discovery_json_size(value);
+    const auto document=value.view();
+    auto size=w::discovery_json_size(document);
     CHECK(!size&&size.error()==Error::INVALID_ARGUMENT);
     std::vector<std::uint8_t> output(4096U,0xa5U);
-    auto result=w::encode_discovery_json(value,{output.data(),output.size()});
+    auto result=w::encode_discovery_json(document,{output.data(),output.size()});
     CHECK(!result&&result.error()==Error::INVALID_ARGUMENT);
     for(const auto c:output)CHECK(c==0xa5U);
 }
@@ -143,14 +168,14 @@ void test_cold_and_partial()
     auto cold=cold_scan();
     auto steps=empty_scan();
     steps.usb_functions.count=1U;
-    CHECK(w::discovery_json_size(steps));
+    CHECK(w::discovery_json_size(steps.view()));
     steps.usb_functions.items[0].observation=cold.usb_functions.items[0].observation;
-    CHECK(w::discovery_json_size(steps));
+    CHECK(w::discovery_json_size(steps.view()));
     steps.usb_functions.items[0].grouping_reason=cold.usb_functions.items[0].grouping_reason;
-    CHECK(w::discovery_json_size(steps));
+    CHECK(w::discovery_json_size(steps.view()));
     steps.usb_functions.items[0].selector_candidates=
         cold.usb_functions.items[0].selector_candidates;
-    CHECK(w::discovery_json_size(steps));
+    CHECK(w::discovery_json_size(steps.view()));
     const std::string out=json(cold);
     CHECK(has(out,"\"mode\":\"cold\""));
     CHECK(has(out,"\"identification\":{\"model\":null,\"reason\":\"cold_model\"}"));
@@ -184,11 +209,11 @@ void test_bound()
 void test_atomicity_and_refs()
 {
     const auto good=bound_scan();
-    const auto size=w::discovery_json_size(good);
+    const auto size=w::discovery_json_size(good.view());
     CHECK(size);
     if(size&&size.value()>1U){
         std::vector<std::uint8_t> short_output(size.value()-1U,0xa5U);
-        auto result=w::encode_discovery_json(good,
+        auto result=w::encode_discovery_json(good.view(),
                                            {short_output.data(),short_output.size()});
         CHECK(!result&&result.error()==Error::BUFFER_TOO_SMALL);
         for(const auto c:short_output)CHECK(c==0xa5U);
