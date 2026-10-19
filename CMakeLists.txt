@@ -282,6 +282,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     target_link_libraries(control_client_tests PRIVATE dtv::control)
     add_test(NAME control_client_tests COMMAND control_client_tests)
 
+    add_executable(card_client_tests tests/card_client_tests.cpp)
+    target_link_libraries(card_client_tests PRIVATE dtv::control)
+    add_test(NAME card_client_tests COMMAND card_client_tests)
+
     add_executable(discovery_json_tests tests/discovery_json_tests.cpp)
     target_link_libraries(discovery_json_tests PRIVATE dtv::json)
     add_test(NAME discovery_json_tests COMMAND discovery_json_tests)
