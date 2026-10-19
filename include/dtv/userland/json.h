@@ -93,7 +93,8 @@ Result<std::size_t> discovery_json_size(const DiscoveryResponse& value) noexcept
 Result<std::size_t> encode_discovery_json(const DiscoveryResponse& value,
                                           MutableByteView output) noexcept;
 
-// Read-only static profile catalog shared by all four product CLIs.
+// Legacy internal structured model catalog, retained for existing consumers
+// and tests. The public --models CLI uses SupportedModels text below instead.
 // No USB scan, daemon, physical receiver or runtime observation is performed.
 // Nominal hardware capacity and the build's publicly implemented receivers
 // are separate; unknown is null, not zero. Models are output in stable ID order.
@@ -123,6 +124,28 @@ struct ModelsResponse final {
     Producer producer;
     DiscoveryView<ModelCatalogEntry> models;
 };
+
+// Public --models is deliberately a static, human-readable supported-model
+// list, not a USB discovery result and not a JSON hardware-capability catalog.
+// Every entry contains only the canonical short model name and associated
+// USB VID:PID values. Shared loader VID:PIDs may occur for multiple models.
+struct SupportedUsbId final {
+    std::uint16_t vid = 0U;
+    std::uint16_t pid = 0U;
+};
+struct SupportedModel final {
+    WString<128> name;
+    BArray<SupportedUsbId, kMaxCatalogUsbIds> usb_ids;
+};
+struct SupportedModels final {
+    DiscoveryView<SupportedModel> models;
+};
+// Writes one model per line: MODEL VID:PID [VID:PID ...]\n.
+// The array may be unsorted; output order is lexical by model name.
+// Failed validation or insufficient buffer leaves output untouched.
+Result<std::size_t> models_text_size(const SupportedModels& value) noexcept;
+Result<std::size_t> encode_models_text(const SupportedModels& value,
+                                      MutableByteView output) noexcept;
 
 // userland.models v1.0, one JSON object and a newline, without a terminating
 // NUL. No output is modified for invalid inputs or a short output buffer.

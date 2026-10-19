@@ -744,4 +744,107 @@ Result<std::size_t> encode_models_json(const ModelsResponse& v,
     return Result<std::size_t>::success(actual.size());
 }
 
+
+// The CLI surface is intentionally much smaller than the private
+// ModelCatalogEntry / old userland.models JSON proposal. No model capabilities,
+// receiver counts, status or runtime observations leak into --models.
+namespace {
+bool valid_supported_models(const SupportedModels& list) noexcept
+{
+    if (list.models.count > kMaxCatalogModels ||
+        (list.models.count && list.models.items == nullptr)) return false;
+    for (std::size_t i = 0; i < list.models.count; ++i) {
+        const auto& item = list.models.items[i];
+        if (item.name.length == 0U || item.name.length > item.name.bytes.size() ||
+            item.usb_ids.count == 0U || item.usb_ids.count > kMaxCatalogUsbIds)
+            return false;
+        for (std::size_t j = 0; j < item.name.length; ++j) {
+            const auto c = static_cast<unsigned char>(item.name.bytes[j]);
+            // Source-backed model names can include spaces (PX-W3U3 V2).
+            // Reject controls/newlines and non-ASCII bytes; never treat USB
+            // descriptor strings as safe static model names.
+            if (c < 0x20U || c >= 0x7fU) return false;
+        }
+        const std::string_view name(item.name.bytes.data(), item.name.length);
+        for (std::size_t j = 0; j < i; ++j) {
+            const auto& old = list.models.items[j].name;
+            if (name == std::string_view(old.bytes.data(), old.length)) return false;
+        }
+        for (std::size_t j = 0; j < item.usb_ids.count; ++j) {
+            const auto usb = item.usb_ids.items[j];
+            for (std::size_t k = 0; k < j; ++k) {
+                const auto other = item.usb_ids.items[k];
+                if (usb.vid == other.vid && usb.pid == other.pid) return false;
+            }
+        }
+    }
+    return true;
+}
+bool hex_raw(Writer& writer, std::uint16_t number) noexcept
+{
+    static constexpr char digits[] = "0123456789abcdef";
+    return writer.ch(digits[(number >> 12U) & 0xfU]) &&
+           writer.ch(digits[(number >> 8U) & 0xfU]) &&
+           writer.ch(digits[(number >> 4U) & 0xfU]) &&
+           writer.ch(digits[number & 0xfU]);
+}
+bool emit_supported_models(const SupportedModels& models, Writer& out) noexcept
+{
+    std::string_view previous;
+    for (std::size_t done = 0; done < models.models.count; ++done) {
+        std::size_t chosen = 0;
+        bool found = false;
+        for (std::size_t i = 0; i < models.models.count; ++i) {
+            const auto& n = models.models.items[i].name;
+            const std::string_view current(n.bytes.data(), n.length);
+            if ((!previous.empty() && current <= previous) ||
+                (found && current >= std::string_view(
+                    models.models.items[chosen].name.bytes.data(),
+                    models.models.items[chosen].name.length))) continue;
+            chosen = i;
+            found = true;
+        }
+        if (!found) return false;
+        const auto& item = models.models.items[chosen];
+        for (std::size_t k = 0; k < item.name.length; ++k) {
+            if (!out.ch(item.name.bytes[k])) return false;
+        }
+        for (std::size_t i = 0; i < item.usb_ids.count; ++i) {
+            const auto& usb = item.usb_ids.items[i];
+            if (!out.ch(' ') || !hex_raw(out, usb.vid) ||
+                !out.ch(':') || !hex_raw(out, usb.pid)) return false;
+        }
+        if (!out.ch('\n')) return false;
+        previous = std::string_view(item.name.bytes.data(), item.name.length);
+    }
+    return true;
+}
+}  // namespace
+
+Result<std::size_t> models_text_size(const SupportedModels& models) noexcept
+{
+    if (!valid_supported_models(models))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr, 0U});
+    if (!emit_supported_models(models, count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(count.size());
+}
+
+Result<std::size_t> encode_models_text(const SupportedModels& models,
+                                       MutableByteView output) noexcept
+{
+    if (!valid_supported_models(models) || (output.data == nullptr && output.size))
+        return Result<std::size_t>::failure(Error::INVALID_ARGUMENT);
+    Writer count({nullptr, 0U});
+    if (!emit_supported_models(models, count))
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    if (output.size < count.size())
+        return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
+    Writer writer(output);
+    if (!emit_supported_models(models, writer) || writer.size() != count.size())
+        return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
+    return Result<std::size_t>::success(writer.size());
+}
+
 }  // namespace dtv::userland::wire
