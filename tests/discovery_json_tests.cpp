@@ -60,7 +60,7 @@ w::DiscoveryResponse cold_scan()
     f.vid=0x1738U;f.pid=0x5211U;
     f.mode=w::Mode::cold;
     f.location.usb_path.present=true;
-    f.location.usb_path.value=str<w::detail::kMaxUsbPathBytes>("1-2");
+    f.location.usb_path.value=str<dtv::userland::detail::kMaxUsbPathBytes>("1-2");
     f.location.bus.present=true;f.location.bus.value=1U;
     f.location.address.present=true;f.location.address.value=4U;
     f.serial_state=w::SerialState::not_queried;
@@ -196,7 +196,7 @@ void test_atomicity_and_refs()
     bad=good;bad.usb_functions.items[0].observation.serial_state=w::SerialState::absent;
     bad.usb_functions.items[0].observation.serial.present=true;
     bad.usb_functions.items[0].observation.serial.value=
-        str<w::detail::kMaxSerialBytes>("invented");expect_invalid(bad);
+        str<dtv::userland::detail::kMaxSerialBytes>("invented");expect_invalid(bad);
     bad=good;bad.complete=false;expect_invalid(bad);
     bad=good;bad.issues.count=1U;
     bad.issues.items[0].code=7U;
