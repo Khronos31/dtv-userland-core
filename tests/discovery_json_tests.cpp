@@ -206,6 +206,24 @@ void test_bound()
     CHECK(has(out,"\"readers\":[]"));
     CHECK(has(out,"\"limits\":{\"max_concurrent_streams\":1}"));
 }
+void test_model_absent_but_topology_known()
+{
+    // Model metadata may be unavailable even when the actual topology and
+    // public receiver/reader collections have been established.
+    auto known=bound_scan();
+    known.enclosures.items[0].descriptor.model.present=false;
+    const auto output=json(known);
+    CHECK(!output.empty());
+    CHECK(has(output,"\"model\":null,\"identity\""));
+    CHECK(has(output,"\"topology\":{\"state\":\"complete\""));
+    CHECK(has(output,"\"receivers\":[{\"id\":\"0\""));
+    CHECK(has(output,"\"readers\":[]"));
+
+    // Once topology is known, omission is not a substitute for known-empty.
+    known.enclosures.items[0].readers.present=false;
+    expect_invalid(known);
+}
+
 void test_atomicity_and_refs()
 {
     const auto good=bound_scan();
@@ -259,6 +277,7 @@ int main()
     test_empty();
     test_cold_and_partial();
     test_bound();
+    test_model_absent_but_topology_known();
     test_atomicity_and_refs();
     test_sorted_functions();
     return failures==0?0:1;
