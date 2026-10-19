@@ -320,8 +320,10 @@ bool valid_discovery(const DiscoveryResponse& v) noexcept
            e.usb_function_ids.count>e.usb_function_ids.items.size()||
            e.receivers.value.count>e.receivers.value.items.size()||
            e.readers.value.count>e.readers.value.items.size())return false;
-        const bool known=e.descriptor.model.present&&
-                         e.topology.state!=TopologyState::unknown;
+        // Topology, not the optional descriptive model name, determines
+        // whether published receiver/reader collections are known.
+        // Model=null may coexist with a fully observed, known topology.
+        const bool known=e.topology.state!=TopologyState::unknown;
         if(known!=e.receivers.present||known!=e.readers.present)return false;
         if(e.topology.state==TopologyState::complete&&
            (!e.topology.expected_function_count.present||
