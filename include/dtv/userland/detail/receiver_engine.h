@@ -89,6 +89,7 @@ struct HzTuneRequest final {
     std::uint16_t stream_id = 0xffffU;
     std::uint16_t slot = 0xffffU;
     std::uint8_t lnb_voltage = 0U;
+    bool lnb_voltage_present = true;
     std::uint32_t timeout_ms = 0U;
     Error validation = Error::OK;
 };
@@ -105,6 +106,7 @@ struct AdmittedRequest final {
     std::uint16_t stream_id = 0xffffU;
     std::uint16_t slot = 0xffffU;
     std::uint8_t lnb_voltage = 0U;
+    bool lnb_voltage_present = true;
     std::uint32_t timeout_ms = 0U;
     Error validation = Error::OK;
 };

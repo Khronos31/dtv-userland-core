@@ -48,6 +48,7 @@ enum class ControlRequestKind : std::uint8_t {
     begin_transaction,
     end_transaction,
     card_handle_status,
+    lnb_power,
 };
 
 // Owned decoded request; only the member selected by kind is meaningful.  It
@@ -73,6 +74,7 @@ struct ControlRequest final {
     BeginTransactionRequest begin_transaction{};
     EndTransactionRequest end_transaction{};
     CardHandleStatusRequest card_handle_status{};
+    LnbPowerRequest lnb_power{};
 };
 
 enum class InboundAction : std::uint8_t {

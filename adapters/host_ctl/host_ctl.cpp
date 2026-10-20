@@ -33,6 +33,8 @@ enum class Command : std::uint8_t {
     card_atr,
     card_reset,
     card_apdu,
+    lnb_on,
+    lnb_off,
 };
 
 struct Arguments final {
@@ -89,6 +91,8 @@ Command parse_command(std::string_view value) noexcept
     if (value == "card-atr") return Command::card_atr;
     if (value == "card-reset") return Command::card_reset;
     if (value == "card-apdu") return Command::card_apdu;
+    if (value == "lnb-on") return Command::lnb_on;
+    if (value == "lnb-off") return Command::lnb_off;
     return Command::none;
 }
 
@@ -213,6 +217,8 @@ void usage(FILE* output, const Profile& profile) noexcept
         std::fputs(", card-status (unsupported), card-atr (unsupported), "
                    "card-reset (unsupported), card-apdu HEX (unsupported)", output);
     }
+    std::fputs(profile.lnb_power_supported ? ", lnb-on, lnb-off"
+                                           : ", lnb-on (unsupported), lnb-off (unsupported)", output);
     std::fputc('\n', output);
 }
 
@@ -487,6 +493,12 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
                      profile.tool_name);
         return exit_status(CommonError::UNSUPPORTED, true);
     }
+    const bool lnb_command = arguments.command == Command::lnb_on ||
+                             arguments.command == Command::lnb_off;
+    if (lnb_command && !profile.lnb_power_supported) {
+        std::fprintf(stderr, "%s: independent LNB power is unsupported\n", profile.tool_name);
+        return 3;
+    }
 #if defined(_WIN32)
     if (arguments.group) {
         std::fprintf(stderr, "%s: --group is unsupported on Windows\n", profile.tool_name);
@@ -618,6 +630,22 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         found = true;
     }
     if (!found) return 3;
+    if (arguments.command == Command::lnb_on || arguments.command == Command::lnb_off) {
+        const EndpointConfig endpoint{
+            selected_candidate.runtime_directory.empty() ? nullptr :
+                selected_candidate.runtime_directory.c_str(),
+            selected_candidate.instance.c_str(), kControlEndpointName,
+            arguments.group ? EndpointAccess::shared_group : EndpointAccess::private_user};
+        selected_transport->close();
+        auto stream = SocketStream::connect(endpoint, px4::userland::Timeout{2000U});
+        if (!stream) return report_error(profile, "connect failed", stream.error());
+        SocketTransport lnb_transport(std::move(stream.value()));
+        const bool enabled = arguments.command == Command::lnb_on;
+        const auto changed = wire::set_lnb_power(lnb_transport, enabled, Timeout{5000U});
+        if (!changed) return report_error(profile, "LNB power request failed", changed.error);
+        std::printf("lnb_15v_enabled=%s\n", enabled ? "true" : "false");
+        return std::fflush(stdout) == 0 ? 0 : 70;
+    }
     if (arguments.command == Command::list) {
         if (!print_list(snapshot.snapshot.list, snapshot.snapshot.status)) {
             std::fprintf(stderr, "%s: list output failed\n", profile.tool_name);
