@@ -2,7 +2,6 @@
 #include <dtv/host_ts/px4_ts_core.h>
 
 #include "px4/control_client.h"
-#include "px4/identity.h"
 
 #include "dtv/userland/control_client.h"
 #include "dtv/userland/control_connection.h"
@@ -572,8 +571,12 @@ static Px4TsArguments parse_product_arguments(int argc,
     result.receiver_explicit = have_receiver;
     if (have_channel == have_frequency)
         return invalid("exactly one of --channel or --freq is required");
-    if (have_frequency && !have_system)
+    if (have_frequency && !have_system &&
+        (profile == nullptr || !profile->frequency_system_optional))
         return invalid("--freq requires --system");
+    if (have_frequency && !have_system && profile != nullptr &&
+        profile->frequency_system_optional)
+        system = WireSystem::isdb_t;
     if (result.output.empty()) result.output = "-";
     if (result.duration_set && result.duration_seconds == 0U)
         return invalid("time must be greater than zero");
