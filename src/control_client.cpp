@@ -356,6 +356,30 @@ StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout,
     return result;
 }
 
+bool status_identity_matches(const StatusSnapshot& snapshot,
+                             ByteView expected_product,
+                             ByteView expected_instance) noexcept
+{
+    if (expected_product.size != 0U) {
+        if (expected_product.data == nullptr) return false;
+        const auto& actual = snapshot.list.producer.product;
+        if (expected_product.size != actual.length ||
+            std::memcmp(expected_product.data, actual.bytes.data(),
+                        expected_product.size) != 0)
+            return false;
+    }
+    if (expected_instance.size != 0U) {
+        if (expected_instance.data == nullptr) return false;
+        if (!snapshot.status.context.instance.present) return false;
+        const auto& actual = snapshot.status.context.instance.value;
+        if (expected_instance.size != actual.length ||
+            std::memcmp(expected_instance.data, actual.bytes.data(),
+                        expected_instance.size) != 0)
+            return false;
+    }
+    return true;
+}
+
 LnbPowerResult set_lnb_power(ClientTransport& transport, bool enabled,
                              Timeout timeout) noexcept
 {
@@ -686,6 +710,9 @@ CardOpenResult begin_card(ClientTransport& transport, const CardClientOptions& o
         result.remote_error_code = status.remote_error_code;
         return fail(status.error);
     }
+    if (!status_identity_matches(status.snapshot, options.expected_product,
+                                 options.expected_instance))
+        return fail(Error::NOT_FOUND);
     if (!lists_reader(status.snapshot.list, options.reader_id))
         return fail(Error::NOT_FOUND);
     CardClientSession& session = result.session;

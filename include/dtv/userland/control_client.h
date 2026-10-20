@@ -38,6 +38,15 @@ StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout) noex
 StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout,
                                std::uint64_t required_features) noexcept;
 
+// True when the canonical LIST producer.product and STATUS context.instance
+// match the supplied expectations. A zero-size view imposes no constraint; a
+// positive size with a null data pointer never matches. The product is
+// compared as its canonical slug and the instance is a case-preserving ASCII
+// byte sequence; neither is rewritten here.
+bool status_identity_matches(const StatusSnapshot& snapshot,
+                             ByteView expected_product,
+                             ByteView expected_instance) noexcept;
+
 struct LnbPowerResult final {
     LnbPowerResponse response;
     Error error = Error::OK;
@@ -124,6 +133,11 @@ struct CardClientOptions final {
     Share share = Share::shared;
     // Preferred protocol mask; UDTV 1.0 accepts only bit0 (T=1).
     std::uint8_t preferred_protocols = 1U;
+    // Optional canonical identity constraint, checked against the LIST/STATUS
+    // already fetched before CARD_STATUS/CARD_CONNECT. A zero-size view keeps
+    // the original behavior. Positive-size views must stay valid for the call.
+    ByteView expected_product{};
+    ByteView expected_instance{};
 };
 
 // One open card session on a control connection that negotiated CARD_SERVICE.
