@@ -1121,6 +1121,12 @@ struct PosixControlServer::Impl final {
                                task.lease_id);
         const ControlWorkerLane lane = lane_for(task);
         const auto submitted = workers->submit(lane, task);
+#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
+        if (submitted && test_hooks != nullptr && test_hooks->worker_task_submitted != nullptr)
+            test_hooks->worker_task_submitted(test_hooks->context,
+                static_cast<std::uint8_t>(lane), static_cast<std::uint8_t>(task.operation),
+                task.client_id, task.request_id, task.receiver);
+#endif
         if (submitted) return Result<void>::success();
         client.clear_outstanding();
         if (is_card_operation(task.operation)) {
@@ -2402,6 +2408,13 @@ struct PosixControlServer::Impl final {
 
     void handle_completion(const ControlWorkerCompletion& completion) noexcept
     {
+#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
+        if (test_hooks != nullptr && test_hooks->worker_task_completed != nullptr)
+            test_hooks->worker_task_completed(test_hooks->context,
+                static_cast<std::uint8_t>(completion.operation), completion.client_id,
+                completion.request_id, completion.receiver,
+                static_cast<std::uint32_t>(completion.error));
+#endif
         if (completion.kind == ControlWorkerTaskKind::background &&
             completion.operation == ControlWorkerOperation::card_presence) {
             presence_poll_pending = false;
@@ -2700,6 +2713,10 @@ struct PosixControlServer::Impl final {
 #endif
         }
         const auto joined = workers->stop_and_join();
+#if defined(PX4_CONTROL_SERVER_TEST_ACCESS)
+        if (test_hooks != nullptr && test_hooks->workers_joined != nullptr)
+            test_hooks->workers_joined(test_hooks->context, workers->live_thread_count());
+#endif
         if (!joined && cleanup_error == Error::OK) cleanup_error = joined.error();
         reap_retired();
         shutdown_complete = true;

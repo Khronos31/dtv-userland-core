@@ -19,6 +19,13 @@ struct ControlServerTestHooks final {
     // reports each flush that leaves bytes pending.
     std::size_t control_write_limit = 0U;
     void (*control_write_partial)(void*, std::uint64_t) noexcept = nullptr;
+    void (*worker_task_submitted)(void*, std::uint8_t, std::uint8_t,
+                                  std::uint64_t, std::uint32_t,
+                                  std::uint8_t) noexcept = nullptr;
+    void (*worker_task_completed)(void*, std::uint8_t, std::uint64_t,
+                                  std::uint32_t, std::uint8_t,
+                                  std::uint32_t) noexcept = nullptr;
+    void (*workers_joined)(void*, std::size_t) noexcept = nullptr;
     void* context = nullptr;
 };
 
