@@ -38,7 +38,34 @@ const char* operation_name(std::uint16_t opcode) noexcept
     case kOpcodeTune: return "tune";
     case kOpcodeStartStream: return "start_stream";
     case kOpcodeStopStream: return "stop_stream";
+    case kOpcodeCardStatus: return "card_status";
+    case kOpcodeCardConnect: return "card_connect";
+    case kOpcodeCardReconnect: return "card_reconnect";
+    case kOpcodeCardDisconnect: return "card_disconnect";
+    case kOpcodeCardReset: return "card_reset";
+    case kOpcodeCardTransmit: return "card_transmit";
+    case kOpcodeBeginTransaction: return "begin_transaction";
+    case kOpcodeEndTransaction: return "end_transaction";
+    case kOpcodeCardHandleStatus: return "card_handle_status";
     default: return "request";
+    }
+}
+
+bool is_card_opcode(std::uint16_t opcode) noexcept
+{
+    switch (opcode) {
+    case kOpcodeCardStatus:
+    case kOpcodeCardConnect:
+    case kOpcodeCardReconnect:
+    case kOpcodeCardDisconnect:
+    case kOpcodeCardReset:
+    case kOpcodeCardTransmit:
+    case kOpcodeBeginTransaction:
+    case kOpcodeEndTransaction:
+    case kOpcodeCardHandleStatus:
+        return true;
+    default:
+        return false;
     }
 }
 
@@ -175,6 +202,14 @@ Inbound ControlConnection::accept(const Frame& frame, ControlRequest& request,
         return refuse(Error::PROTOCOL_ERROR);
     }
 
+    // CARD operations are served only when the CARD_SERVICE feature was
+    // negotiated.  Without it the honest answer is UNSUPPORTED, not a decoded
+    // request the daemon cannot serve.
+    if (is_card_opcode(opcode) && (features_ & kFeatureCardService) == 0U) {
+        return reply_error(opcode, request_id, static_cast<std::uint32_t>(Error::UNSUPPORTED),
+                           operation_name(opcode), false, output);
+    }
+
     request.opcode = opcode;
     request.request_id = request_id;
     Error decoded = Error::OK;
@@ -247,6 +282,96 @@ Inbound ControlConnection::accept(const Frame& frame, ControlRequest& request,
             request.kind = ControlRequestKind::stop_stream;
             request.stop_stream = value.value();
             epoch = &request.stop_stream.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardStatus: {
+        const auto value = decode_card_status_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_status;
+            request.card_status = value.value();
+            epoch = &request.card_status.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardConnect: {
+        const auto value = decode_card_connect_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_connect;
+            request.card_connect = value.value();
+            epoch = &request.card_connect.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardReconnect: {
+        const auto value = decode_card_reconnect_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_reconnect;
+            request.card_reconnect = value.value();
+            epoch = &request.card_reconnect.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardDisconnect: {
+        const auto value = decode_card_disconnect_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_disconnect;
+            request.card_disconnect = value.value();
+            epoch = &request.card_disconnect.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardReset: {
+        const auto value = decode_card_reset_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_reset;
+            request.card_reset = value.value();
+            epoch = &request.card_reset.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardTransmit: {
+        const auto value = decode_card_transmit_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_transmit;
+            request.card_transmit = value.value();
+            epoch = &request.card_transmit.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeBeginTransaction: {
+        const auto value = decode_begin_transaction_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::begin_transaction;
+            request.begin_transaction = value.value();
+            epoch = &request.begin_transaction.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeEndTransaction: {
+        const auto value = decode_end_transaction_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::end_transaction;
+            request.end_transaction = value.value();
+            epoch = &request.end_transaction.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeCardHandleStatus: {
+        const auto value = decode_card_handle_status_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::card_handle_status;
+            request.card_handle_status = value.value();
+            epoch = &request.card_handle_status.key.epoch;
         }
         break;
     }

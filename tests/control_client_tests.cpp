@@ -48,6 +48,7 @@ enum class Mode {
     list_function_identity_mismatch,
     function_order_delta,
     coalesced_hello_partial,
+    successful_recording,
 };
 
 void set_text(w::Producer& producer) noexcept
@@ -162,6 +163,8 @@ public:
         const auto frame = w::decode_frame(bytes);
         if (!frame) return dtv::userland::Result<void>::failure(frame.error());
         ++request_count_;
+        if (request_count_ <= request_ids_.size())
+            request_ids_[request_count_ - 1U] = frame.value().header.request_id;
         if (request_count_ == 1U && frame.value().header.opcode == w::kOpcodeHello)
             queue_hello(frame.value().header.request_id);
         else if (request_count_ == 2U && frame.value().header.opcode == w::kOpcodeList &&
@@ -196,6 +199,43 @@ public:
             queue_frame(w::kOpcodeStatus, frame.value().header.request_id,
                         ByteView{payload.data(), size.value()});
         }
+        else if (mode_ == Mode::successful_recording && request_count_ == 4U &&
+                 frame.value().header.opcode == w::kOpcodeAcquire) {
+            w::AcquireResponse response{};
+            response.epoch[0] = 0x5aU;
+            response.lease_id = 7U;
+            std::array<std::uint8_t, 64U> payload{};
+            const auto size = w::encode_acquire_response(
+                response, MutableByteView{payload.data(), payload.size()});
+            if (!size) return dtv::userland::Result<void>::failure(size.error());
+            queue_frame(w::kOpcodeAcquire, frame.value().header.request_id,
+                        ByteView{payload.data(), size.value()});
+        } else if (mode_ == Mode::successful_recording && request_count_ == 5U &&
+                   frame.value().header.opcode == w::kOpcodeTune) {
+            w::TuneResult response{};
+            response.epoch[0] = 0x5aU;
+            response.tune_revision = 1U;
+            response.requested_hz = 473142857U;
+            std::array<std::uint8_t, 128U> payload{};
+            const auto size = w::encode_tune_result(
+                response, MutableByteView{payload.data(), payload.size()});
+            if (!size) return dtv::userland::Result<void>::failure(size.error());
+            queue_frame(w::kOpcodeTune, frame.value().header.request_id,
+                        ByteView{payload.data(), size.value()});
+        } else if (mode_ == Mode::successful_recording && request_count_ == 6U &&
+                   frame.value().header.opcode == w::kOpcodeStartStream) {
+            w::StartResponse response{};
+            response.epoch[0] = 0x5aU;
+            response.stream_id = 9U;
+            response.attach_token[0] = 0x33U;
+            response.expires_after_ms = 1000U;
+            std::array<std::uint8_t, 128U> payload{};
+            const auto size = w::encode_start_response(
+                response, MutableByteView{payload.data(), payload.size()});
+            if (!size) return dtv::userland::Result<void>::failure(size.error());
+            queue_frame(w::kOpcodeStartStream, frame.value().header.request_id,
+                        ByteView{payload.data(), size.value()});
+        }
         else if (mode_ != Mode::timeout_after_hello)
             return dtv::userland::Result<void>::failure(Error::PROTOCOL_ERROR);
         return dtv::userland::Result<void>::success();
@@ -226,6 +266,7 @@ public:
     void close() noexcept override { ++close_count_; }
     std::size_t request_count() const noexcept { return request_count_; }
     std::size_t close_count() const noexcept { return close_count_; }
+    const std::array<std::uint32_t, 6U>& request_ids() const noexcept { return request_ids_; }
 
 private:
     void queue_frame(std::uint16_t opcode, std::uint32_t request_id,
@@ -317,6 +358,7 @@ private:
     std::size_t queued_offset_ = 0U;
     std::size_t request_count_ = 0U;
     std::size_t close_count_ = 0U;
+    std::array<std::uint32_t, 6U> request_ids_{};
     std::uint64_t now_ = 0U;
     bool eof_ = false;
 };
@@ -419,6 +461,49 @@ bool test_coalesced_reply_and_partial_next_frame_close_without_retry()
     return true;
 }
 
+Error reject_recording(const w::StatusSnapshot&, void*) noexcept
+{
+    return Error::NOT_FOUND;
+}
+
+Error accept_recording(const w::StatusSnapshot& snapshot, void* context) noexcept
+{
+    const auto* expected_epoch = static_cast<const w::Uuid*>(context);
+    return expected_epoch != nullptr && snapshot.status.context.epoch == *expected_epoch
+               ? Error::OK : Error::NOT_FOUND;
+}
+
+bool test_recording_validator_rejects_before_acquire()
+{
+    FakeTransport transport(Mode::dynamic_status_delta);
+    w::RecordingOptions options{};
+    const auto result = w::begin_recording(transport, options, Timeout{100U},
+                                           reject_recording, nullptr);
+    CHECK(!result && result.error == Error::NOT_FOUND);
+    CHECK(transport.request_count() == 3U && transport.close_count() == 1U);
+    return true;
+}
+
+bool test_recording_validator_success_keeps_same_connection_sequence()
+{
+    FakeTransport transport(Mode::successful_recording);
+    w::RecordingOptions options{};
+    options.tune.frequency_hz = 473142857U;
+    options.tune.timeout_ms = 1000U;
+    w::Uuid expected_epoch{};
+    expected_epoch[0] = 0x5aU;
+    const auto result = w::begin_recording(transport, options, Timeout{100U},
+                                           accept_recording, &expected_epoch);
+    if (!result) std::fprintf(stderr, "recording validator success failed error=%u requests=%zu\n",
+                              static_cast<unsigned int>(result.error),
+                              transport.request_count());
+    CHECK(result && result.session.epoch == expected_epoch);
+    CHECK(transport.request_count() == 6U && transport.close_count() == 0U);
+    const std::array<std::uint32_t, 6U> expected_ids{1U, 2U, 3U, 4U, 5U, 6U};
+    CHECK(transport.request_ids() == expected_ids);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -427,7 +512,9 @@ int main()
                    test_status_is_bound_to_request_and_list_identity() &&
                    test_timeout_closes_without_retry() &&
                    test_partial_eof_closes_without_retry() &&
-                   test_coalesced_reply_and_partial_next_frame_close_without_retry()
+                   test_coalesced_reply_and_partial_next_frame_close_without_retry() &&
+                   test_recording_validator_rejects_before_acquire() &&
+                   test_recording_validator_success_keeps_same_connection_sequence()
                ? 0
                : 1;
 }

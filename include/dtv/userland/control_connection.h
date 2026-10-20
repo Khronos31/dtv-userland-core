@@ -39,6 +39,15 @@ enum class ControlRequestKind : std::uint8_t {
     tune,
     start_stream,
     stop_stream,
+    card_status,
+    card_connect,
+    card_reconnect,
+    card_disconnect,
+    card_reset,
+    card_transmit,
+    begin_transaction,
+    end_transaction,
+    card_handle_status,
 };
 
 // Owned decoded request; only the member selected by kind is meaningful.  It
@@ -55,6 +64,15 @@ struct ControlRequest final {
     TuneRequest tune{};
     StartRequest start_stream{};
     StopRequest stop_stream{};
+    CardStatusRequest card_status{};
+    CardConnectRequest card_connect{};
+    CardReconnectRequest card_reconnect{};
+    CardDisconnectRequest card_disconnect{};
+    CardResetRequest card_reset{};
+    CardTransmitRequest card_transmit{};
+    BeginTransactionRequest begin_transaction{};
+    EndTransactionRequest end_transaction{};
+    CardHandleStatusRequest card_handle_status{};
 };
 
 enum class InboundAction : std::uint8_t {

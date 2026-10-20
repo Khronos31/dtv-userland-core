@@ -31,6 +31,13 @@ struct StatusFetchResult final {
 // STATUS. Every failure closes the connection; requests are never retried.
 StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout) noexcept;
 
+// Same HELLO/LIST/STATUS sequence, but HELLO declares required_features and the
+// result is UNSUPPORTED, with the connection closed, when the negotiated
+// features do not contain every required bit. The zero-feature overload above
+// keeps its original behavior.
+StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout,
+                               std::uint64_t required_features) noexcept;
+
 // Inputs for one normal recording lease.  epoch/lease_id in tune are assigned
 // from the ACQUIRE response, so the caller sets only the tune body.
 struct RecordingOptions final {
@@ -59,12 +66,19 @@ struct RecordingControlResult final {
     explicit operator bool() const noexcept { return error == Error::OK; }
 };
 
+using RecordingStatusValidator = Error (*)(const StatusSnapshot&, void*) noexcept;
+
 // HELLO, LIST, STATUS, ACQUIRE, TUNE and START on one control connection.  The
 // transport stays open on success; every failure closes it.  No request is
 // retried automatically.
 RecordingControlResult begin_recording(ClientTransport& transport,
                                        const RecordingOptions& options,
                                        Timeout timeout) noexcept;
+RecordingControlResult begin_recording(ClientTransport& transport,
+                                       const RecordingOptions& options,
+                                       Timeout timeout,
+                                       RecordingStatusValidator validator,
+                                       void* validator_context) noexcept;
 
 struct StopControlResult final {
     StopResponse response;
@@ -90,6 +104,95 @@ struct ReleaseControlResult final {
 ReleaseControlResult release_recording(ClientTransport& transport,
                                        RecordingSession& session,
                                        Timeout timeout) noexcept;
+
+// Inputs for one card reader session.  The epoch, owner handle and bound
+// generation are assigned from the CARD_STATUS/CONNECT responses, so the
+// caller sets only the reader and the connect preferences.
+struct CardClientOptions final {
+    std::uint16_t reader_id = 0U;
+    Share share = Share::shared;
+    // Preferred protocol mask; UDTV 1.0 accepts only bit0 (T=1).
+    std::uint8_t preferred_protocols = 1U;
+};
+
+// One open card session on a control connection that negotiated CARD_SERVICE.
+// The epoch is the daemon epoch bound at HELLO; card_handle and
+// bound_generation are the owner handle issued by CARD_CONNECT and the
+// generation it was bound to.  A successful CARD_DISCONNECT consumes the
+// handle and zeroes both fields; nothing is reconnected automatically.
+struct CardClientSession final {
+    Uuid epoch{};
+    std::uint16_t reader_id = 0U;
+    std::uint64_t card_handle = 0U;
+    std::uint64_t bound_generation = 0U;
+    // Next strictly increasing control request ID on this connection.
+    std::uint32_t next_request_id = 6U;
+};
+
+struct CardOpenResult final {
+    CardClientSession session;
+    CardStatusResponse reader_status;
+    CardSessionResult connection;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// HELLO that requires CARD_SERVICE, LIST and STATUS on the same connection,
+// validation of the requested reader against the canonical snapshot, then
+// CARD_STATUS and CARD_CONNECT.  The transport stays open on success; every
+// failure closes it and no request is retried.  A server that does not offer
+// CARD_SERVICE is refused honestly with UNSUPPORTED.
+CardOpenResult begin_card(ClientTransport& transport, const CardClientOptions& options,
+                          Timeout timeout) noexcept;
+
+struct CardStatusResult final {
+    CardStatusResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// One typed CARD_STATUS for the session's reader.  It performs no retry.
+CardStatusResult card_status(ClientTransport& transport, CardClientSession& session,
+                             Timeout timeout) noexcept;
+
+struct CardTransmitResult final {
+    CardTransmitResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// One typed CARD_TRANSMIT for the session's exact handle.  A removal, stale
+// generation or foreign handle is returned as-is; the APDU is never retried
+// and the connection is never re-established.
+CardTransmitResult card_transmit(ClientTransport& transport, CardClientSession& session,
+                                 CardProtocol protocol, ByteView command,
+                                 Timeout timeout) noexcept;
+
+struct CardResetResult final {
+    CardSessionResult response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// One typed CARD_RESET for the session's handle.  The returned owner handle and
+// generation become the session's binding; the APDU is never retried.
+CardResetResult card_reset(ClientTransport& transport, CardClientSession& session,
+                           Timeout timeout) noexcept;
+
+struct CardDisconnectResult final {
+    CardDisconnectResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// One typed CARD_DISCONNECT.  It performs no retry.
+CardDisconnectResult card_disconnect(ClientTransport& transport, CardClientSession& session,
+                                     Disposition disposition, Timeout timeout) noexcept;
 
 }  // namespace dtv::userland::wire
 

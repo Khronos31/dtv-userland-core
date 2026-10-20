@@ -589,6 +589,118 @@ void test_status_shell()
     CHECK(!w::encode_status_frame(12U, *status, *list, out));
 }
 
+void test_card_dispatch()
+{
+    // A CARD opcode without the CARD_SERVICE feature is answered honestly with
+    // UNSUPPORTED and is never decoded or dispatched.
+    {
+        Harness h;
+        CHECK(h.hello(1U));
+        w::CardStatusRequest status;
+        status.key.epoch = h.server.epoch;
+        status.key.reader_id = 3U;
+        CHECK(make_request(*h.frame, w::kOpcodeCardStatus, 2U, status,
+                           &w::encode_card_status_request));
+        const w::Inbound inbound = h.accept();
+        CHECK(h.error_reply(inbound, static_cast<std::uint32_t>(Error::UNSUPPORTED),
+                            w::kOpcodeCardStatus, 2U));
+        CHECK(!inbound.close_after_reply);
+        h.connection->complete();
+    }
+
+    Harness h;
+    h.server.features |= w::kFeatureCardService;
+    CHECK(h.hello(1U, w::kFeatureCardService));
+    CHECK(h.connection->features() == w::kFeatureCardService);
+
+    // CARD STATUS dispatches with its reader key.
+    w::CardStatusRequest status;
+    status.key.epoch = h.server.epoch;
+    status.key.reader_id = 3U;
+    CHECK(make_request(*h.frame, w::kOpcodeCardStatus, 2U, status,
+                       &w::encode_card_status_request));
+    w::Inbound inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch);
+    CHECK(h.request->kind == w::ControlRequestKind::card_status &&
+          h.request->opcode == w::kOpcodeCardStatus && h.request->request_id == 2U &&
+          h.request->card_status.key.reader_id == 3U);
+    h.connection->complete();
+
+    // CARD CONNECT dispatches with its share and protocol preferences.
+    w::CardConnectRequest connect;
+    connect.key.epoch = h.server.epoch;
+    connect.key.reader_id = 3U;
+    connect.share = w::Share::exclusive;
+    connect.preferred_protocols = 0x01U;
+    CHECK(make_request(*h.frame, w::kOpcodeCardConnect, 3U, connect,
+                       &w::encode_card_connect_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch);
+    CHECK(h.request->kind == w::ControlRequestKind::card_connect &&
+          h.request->card_connect.share == w::Share::exclusive &&
+          h.request->card_connect.key.reader_id == 3U);
+    h.connection->complete();
+
+    // CARD TRANSMIT dispatches with its handle key and APDU command.
+    w::CardTransmitRequest transmit;
+    transmit.key.epoch = h.server.epoch;
+    transmit.key.reader_id = 3U;
+    transmit.key.bound_generation = 5U;
+    transmit.key.card_handle = 9U;
+    transmit.protocol = w::CardProtocol::t1;
+    transmit.command.length = 5U;
+    transmit.command.bytes[0] = 0x00U;
+    transmit.command.bytes[1] = 0xA4U;
+    transmit.command.bytes[2] = 0x04U;
+    transmit.command.bytes[3] = 0x00U;
+    transmit.command.bytes[4] = 0x00U;
+    CHECK(make_request(*h.frame, w::kOpcodeCardTransmit, 4U, transmit,
+                       &w::encode_card_transmit_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch);
+    CHECK(h.request->kind == w::ControlRequestKind::card_transmit &&
+          h.request->card_transmit.key.card_handle == 9U &&
+          h.request->card_transmit.command.length == 5U &&
+          h.request->card_transmit.command.bytes[1] == 0xA4U);
+    h.connection->complete();
+
+    // CARD DISCONNECT dispatches with its disposition.
+    w::CardDisconnectRequest disconnect;
+    disconnect.key.epoch = h.server.epoch;
+    disconnect.key.reader_id = 3U;
+    disconnect.key.bound_generation = 5U;
+    disconnect.key.card_handle = 9U;
+    disconnect.disposition = w::Disposition::reset;
+    CHECK(make_request(*h.frame, w::kOpcodeCardDisconnect, 5U, disconnect,
+                       &w::encode_card_disconnect_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch);
+    CHECK(h.request->kind == w::ControlRequestKind::card_disconnect &&
+          h.request->card_disconnect.disposition == w::Disposition::reset &&
+          h.request->card_disconnect.key.card_handle == 9U);
+    h.connection->complete();
+
+    // A CARD request bound to a stale epoch is STALE_HANDLE, not a dispatch.
+    w::CardStatusRequest stale;
+    stale.key.epoch = h.server.epoch;
+    stale.key.epoch[0] ^= 0x01U;
+    stale.key.reader_id = 3U;
+    CHECK(make_request(*h.frame, w::kOpcodeCardStatus, 6U, stale,
+                       &w::encode_card_status_request));
+    inbound = h.accept();
+    CHECK(h.error_reply(inbound, w::kWireErrorStaleHandle, w::kOpcodeCardStatus, 6U));
+    h.connection->complete();
+
+    // The legacy non-CARD paths keep dispatching on the same connection.
+    w::ListRequest list;
+    list.epoch = h.server.epoch;
+    CHECK(make_request(*h.frame, w::kOpcodeList, 7U, list, &w::encode_list_request));
+    inbound = h.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch &&
+          h.request->kind == w::ControlRequestKind::list);
+    h.connection->complete();
+}
+
 }  // namespace
 
 int main()
@@ -599,6 +711,7 @@ int main()
     test_epoch_binding_and_dispatch();
     test_pid_filter_requires_negotiation();
     test_status_shell();
+    test_card_dispatch();
     std::printf("control_connection_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
