@@ -277,9 +277,11 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
             if (v1lease.stream_state == StreamState::armed ||
                 v1lease.stream_state == StreamState::attaching ||
                 v1lease.stream_state == StreamState::active ||
-                v1lease.stream_state == StreamState::revoked ||
-                v1lease.stream_state == StreamState::closing ||
+                ((v1lease.stream_state == StreamState::revoked ||
+                  v1lease.stream_state == StreamState::closing) &&
+                 !(v1lease.stream_cleanup_completed && v1lease.stream_quiesced)) ||
                 v1lease.stream_cleanup_pending ||
+                v1lease.stream_prepared || v1lease.stream_prepare_inflight ||
                 v1lease.capture_maybe_active || v1lease.stream_maybe_attached)
                 return Result<void>::failure(Error::NOT_READY);
         }
@@ -869,19 +871,27 @@ void ReceiverEngine::record_stream_cleanup_locked(std::size_t slot, Error result
     // Physical quiescence is an independent observation: a late successful
     // cleanup may update it even when a primary error is retained.
     if (quiesced) lease.stream_quiesced = true;
-    // A stream becomes reusable only for a fully clean, quiesced outcome.
-    if (result == Error::OK && quiesced && lease.stream_cleanup_error == Error::OK) {
+    // Exact-ticket physical completion settles ownership independently of its
+    // retained primary error. An errored stream stays closing/excluded until
+    // explicit RELEASE; it must not retain nonexistent physical work forever.
+    if (lease.stream_quiesced) {
         lease.stream_cleanup_pending = false;
         lease.stream_prepared = false;
         lease.stream_prepare_inflight = false;
         lease.stream_maybe_attached = false;
         lease.capture_maybe_active = false;
         lease.attachment_id = 0U;
+    } else {
+        lease.stream_cleanup_pending = true;
+    }
+    // Only a clean completion makes the same lease reusable immediately.
+    if (result == Error::OK && lease.stream_quiesced &&
+        lease.stream_cleanup_error == Error::OK) {
         lease.stream_state = StreamState::none;
         set_state_locked(slot, ReceiverState::tuned);
     } else {
-        // Retain the cleanup responsibility, ownership and exclusion.
-        lease.stream_cleanup_pending = true;
+        // Preserve failed terminal history and exclusion, even after the
+        // independent physical responsibility has settled.
         lease.stream_state = StreamState::closing;
         set_state_locked(slot, ReceiverState::error);
     }
