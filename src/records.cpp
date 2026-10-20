@@ -974,8 +974,21 @@ bool codec(Ar& ar, StatusResponse& value) noexcept
 {
     return codec(ar, value.producer) && codec(ar, value.context) && codec(ar, value.snapshot) &&
            codec(ar, value.scope) && optional_field(ar, value.enclosure) &&
+           optional_field(ar, value.lnb_15v_enabled) &&
            codec(ar, value.topology) && optional_field(ar, value.functions) &&
            optional_field(ar, value.receivers) && optional_field(ar, value.readers);
+}
+
+template <typename Ar>
+bool codec(Ar& ar, LnbPowerRequest& value) noexcept
+{
+    return uuid_field(ar, value.epoch) && codec(ar, value.enabled);
+}
+
+template <typename Ar>
+bool codec(Ar& ar, LnbPowerResponse& value) noexcept
+{
+    return uuid_field(ar, value.epoch) && codec(ar, value.enabled);
 }
 
 template <typename Ar>
@@ -1387,6 +1400,8 @@ DTV_USERLAND_DEFINE_RECORD(ListRequest, list_request)
 DTV_USERLAND_DEFINE_RECORD(ListResponse, list_response)
 DTV_USERLAND_DEFINE_RECORD(StatusRequest, status_request)
 DTV_USERLAND_DEFINE_RECORD(StatusResponse, status_response)
+DTV_USERLAND_DEFINE_RECORD(LnbPowerRequest, lnb_power_request)
+DTV_USERLAND_DEFINE_RECORD(LnbPowerResponse, lnb_power_response)
 DTV_USERLAND_DEFINE_RECORD(TuneRequest, tune_request)
 DTV_USERLAND_DEFINE_RECORD(TuneResult, tune_result)
 DTV_USERLAND_DEFINE_RECORD(StartRequest, start_request)

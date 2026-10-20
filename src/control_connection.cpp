@@ -47,6 +47,7 @@ const char* operation_name(std::uint16_t opcode) noexcept
     case kOpcodeBeginTransaction: return "begin_transaction";
     case kOpcodeEndTransaction: return "end_transaction";
     case kOpcodeCardHandleStatus: return "card_handle_status";
+    case kOpcodeLnbPower: return "lnb_power";
     default: return "request";
     }
 }
@@ -372,6 +373,16 @@ Inbound ControlConnection::accept(const Frame& frame, ControlRequest& request,
             request.kind = ControlRequestKind::card_handle_status;
             request.card_handle_status = value.value();
             epoch = &request.card_handle_status.key.epoch;
+        }
+        break;
+    }
+    case kOpcodeLnbPower: {
+        const auto value = decode_lnb_power_request(frame.payload);
+        decoded = value.error();
+        if (value) {
+            request.kind = ControlRequestKind::lnb_power;
+            request.lnb_power = value.value();
+            epoch = &request.lnb_power.epoch;
         }
         break;
     }

@@ -38,6 +38,17 @@ StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout) noex
 StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout,
                                std::uint64_t required_features) noexcept;
 
+struct LnbPowerResult final {
+    LnbPowerResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// One independent enclosure LNB power request after HELLO/LIST/STATUS.
+LnbPowerResult set_lnb_power(ClientTransport& transport, bool enabled,
+                             Timeout timeout) noexcept;
+
 // Inputs for one normal recording lease.  epoch/lease_id in tune are assigned
 // from the ACQUIRE response, so the caller sets only the tune body.
 struct RecordingOptions final {

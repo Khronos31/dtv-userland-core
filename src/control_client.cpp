@@ -356,6 +356,54 @@ StatusFetchResult fetch_status(ClientTransport& transport, Timeout timeout,
     return result;
 }
 
+LnbPowerResult set_lnb_power(ClientTransport& transport, bool enabled,
+                             Timeout timeout) noexcept
+{
+    LnbPowerResult result{};
+    const std::uint64_t started = transport.monotonic_ms();
+    const StatusFetchResult status = fetch_status(transport, timeout);
+    if (!status) {
+        result.error = status.error;
+        result.remote_error_code = status.remote_error_code;
+        transport.close();
+        return result;
+    }
+    LnbPowerRequest request{};
+    request.epoch = status.snapshot.status.context.epoch;
+    request.enabled = enabled;
+    std::array<std::uint8_t, kMaxControlPayload> bytes{};
+    const auto size = encode_lnb_power_request(request,
+        MutableByteView{bytes.data(), bytes.size()});
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    std::uint32_t remote_code = 0U;
+    const std::uint64_t deadline = started >
+            std::numeric_limits<std::uint64_t>::max() - timeout.milliseconds
+        ? std::numeric_limits<std::uint64_t>::max() : started + timeout.milliseconds;
+    const auto reply = roundtrip(transport, kOpcodeLnbPower, 4U,
+        ByteView{bytes.data(), size.value()}, deadline,
+        remote_code, &request.epoch);
+    if (!reply) {
+        result.error = reply.error();
+        result.remote_error_code = remote_code;
+        transport.close();
+        return result;
+    }
+    const auto decoded = decode_lnb_power_response(
+        ByteView{reply.value().payload.data(), reply.value().length});
+    if (!decoded || decoded.value().epoch != request.epoch ||
+        decoded.value().enabled != enabled) {
+        result.error = decoded ? Error::PROTOCOL_ERROR : decoded.error();
+        transport.close();
+        return result;
+    }
+    result.response = decoded.value();
+    return result;
+}
+
 namespace {
 
 bool nonzero_uuid(const Uuid& value) noexcept

@@ -48,6 +48,7 @@ inline constexpr std::uint16_t kOpcodeCardTransmit = 0x0035U;
 inline constexpr std::uint16_t kOpcodeBeginTransaction = 0x0036U;
 inline constexpr std::uint16_t kOpcodeEndTransaction = 0x0037U;
 inline constexpr std::uint16_t kOpcodeCardHandleStatus = 0x0038U;
+inline constexpr std::uint16_t kOpcodeLnbPower = 0x0039U;
 inline constexpr std::uint16_t kOpcodeAttachStream = 0x0040U;
 inline constexpr std::uint16_t kOpcodeTsDataEvent = 0x8040U;
 inline constexpr std::uint16_t kOpcodeStateEvent = 0x80f0U;
@@ -473,10 +474,21 @@ struct StatusResponse final {
     Snapshot snapshot;
     Scope scope;
     Optional<Enclosure> enclosure;
+    Optional<bool> lnb_15v_enabled;
     Topology topology;
     Optional<BArray<UsbFunction, kMaxFunctions>> functions;
     Optional<BArray<ReceiverStatus, kMaxPublicReceivers>> receivers;
     Optional<BArray<ReaderStatus, kMaxReaders>> readers;
+};
+
+struct LnbPowerRequest final {
+    Uuid epoch{};
+    bool enabled = false;
+};
+
+struct LnbPowerResponse final {
+    Uuid epoch{};
+    bool enabled = false;
 };
 
 struct TuneRequest final {
@@ -684,6 +696,8 @@ DTV_USERLAND_RECORD_API(ListRequest, list_request)
 DTV_USERLAND_RECORD_API(ListResponse, list_response)
 DTV_USERLAND_RECORD_API(StatusRequest, status_request)
 DTV_USERLAND_RECORD_API(StatusResponse, status_response)
+DTV_USERLAND_RECORD_API(LnbPowerRequest, lnb_power_request)
+DTV_USERLAND_RECORD_API(LnbPowerResponse, lnb_power_response)
 DTV_USERLAND_RECORD_API(TuneRequest, tune_request)
 DTV_USERLAND_RECORD_API(TuneResult, tune_result)
 DTV_USERLAND_RECORD_API(StartRequest, start_request)

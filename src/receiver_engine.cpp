@@ -629,6 +629,7 @@ Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
     admitted.stream_id = request.stream_id;
     admitted.slot = request.slot;
     admitted.lnb_voltage = request.lnb_voltage;
+    admitted.lnb_voltage_present = request.lnb_voltage_present;
     admitted.timeout_ms = request.timeout_ms;
     admitted.validation = request.validation;
     return admit(client_id, request.lease_id, admitted, accepted_at_ms);
@@ -1532,8 +1533,9 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const AdmittedRequest& r
         }
         set_state_locked(slot, ReceiverState::leased);
     }
-    const auto power_prepared = backend_.begin_tune_power(
-        receiver, request.system, request.lnb_voltage);
+    const auto power_prepared = request.lnb_voltage_present
+        ? backend_.begin_tune_power(receiver, request.system, request.lnb_voltage)
+        : Result<void>::success();
     if (!power_prepared) {
         observe_disconnect(slot, power_prepared.error());
         return Result<void>::failure(power_prepared.error());
@@ -1542,7 +1544,8 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const AdmittedRequest& r
         // A transport-loss result is terminal before rollback: rollback may
         // update logical references but must not write GPIO on that bridge.
         observe_disconnect(slot, primary);
-        const auto rollback = backend_.rollback_tune_power(receiver);
+        const auto rollback = request.lnb_voltage_present
+            ? backend_.rollback_tune_power(receiver) : Result<void>::success();
         observe_disconnect(slot, rollback.error());
         if (!rollback) {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -1736,7 +1739,8 @@ Result<void> ReceiverEngine::run_tune(std::size_t slot, const AdmittedRequest& r
         if (gate != Error::OK) return fail_after_power(gate);
     }
 
-    const auto committed = backend_.commit_tune_power(receiver);
+    const auto committed = request.lnb_voltage_present
+        ? backend_.commit_tune_power(receiver) : Result<void>::success();
     if (!committed) return fail_after_power(committed.error());
 
     if (admitted) {
