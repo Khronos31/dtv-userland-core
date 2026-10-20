@@ -22,6 +22,9 @@ option(DTV_USERLAND_BUILD_HOST_CTL "Build the optional GPL host control frontend
 set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS "" CACHE STRING
     "Private host facade include directories required by the GPL host control frontend")
 option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build the optional GPL host runtime adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_TS "Build the optional GPL host TS consumer" OFF)
+set(DTV_USERLAND_HOST_TS_FACADE_INCLUDE_DIRS "" CACHE STRING
+    "Private host facade include directories required by the GPL host TS consumer")
 set(DTV_USERLAND_HOST_RUNTIME_PRODUCT "" CACHE STRING
     "Product runtime namespace component required by the GPL host runtime adapter")
 set(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY "" CACHE STRING
@@ -193,6 +196,46 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
     target_link_libraries(dtv_userland_host_runtime PUBLIC dtv::identity)
     if(WIN32)
         target_link_libraries(dtv_userland_host_runtime PUBLIC advapi32 bcrypt ws2_32)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_TS)
+    if(NOT TARGET dtv::host_runtime)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_TS requires DTV_USERLAND_BUILD_HOST_RUNTIME")
+    endif()
+    if(NOT DTV_USERLAND_HOST_TS_FACADE_INCLUDE_DIRS)
+        message(FATAL_ERROR
+            "DTV_USERLAND_HOST_TS_FACADE_INCLUDE_DIRS must name the product host facade headers")
+    endif()
+    set(_host_ts_sources
+        adapters/host_ts/control_client.cpp
+        adapters/host_ts/px4_ts_core.cpp)
+    if(WIN32)
+        list(APPEND _host_ts_sources adapters/host_ts/windows/px4_ts_windows_output.cpp)
+    elseif(UNIX)
+        list(APPEND _host_ts_sources adapters/host_ts/posix/px4_ts_posix.cpp)
+    else()
+        message(FATAL_ERROR "DTV_USERLAND_BUILD_HOST_TS requires a POSIX or Windows target")
+    endif()
+    add_library(dtv_userland_host_ts STATIC ${_host_ts_sources})
+    add_library(dtv::host_ts ALIAS dtv_userland_host_ts)
+    set_target_properties(dtv_userland_host_ts PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_ts PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_ts
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ts/include>
+        PRIVATE ${DTV_USERLAND_HOST_TS_FACADE_INCLUDE_DIRS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include)
+    target_link_libraries(dtv_userland_host_ts PUBLIC
+        dtv::control dtv::identity dtv::tuning dtv::host_runtime)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_ts PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_ts PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
 
