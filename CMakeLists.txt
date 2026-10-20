@@ -21,6 +21,27 @@ option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OF
 option(DTV_USERLAND_BUILD_HOST_CTL "Build the optional GPL host control frontend" OFF)
 set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS "" CACHE STRING
     "Private host facade include directories required by the GPL host control frontend")
+option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build the optional GPL host runtime adapter" OFF)
+set(DTV_USERLAND_HOST_RUNTIME_PRODUCT "" CACHE STRING
+    "Product runtime namespace component required by the GPL host runtime adapter")
+set(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY "" CACHE STRING
+    "Instance-name policy for the GPL host runtime adapter: lowercase or preserve-case")
+set(DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS "" CACHE STRING
+    "Private product facade include directories required by the GPL host runtime adapter")
+option(DTV_USERLAND_BUILD_WINDOWS_WINSCARD
+    "Build the optional GPL-2.0-only Windows WinSCard adapter" OFF)
+set(DTV_WINDOWS_WINSCARD_NAMESPACE_COMPONENT "" CACHE STRING
+    "Product runtime namespace component required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_VERSION_COMPONENT "" CACHE STRING
+    "Product runtime version component required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_PRODUCT_SLUG "" CACHE STRING
+    "Expected UDTV LIST producer.product required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_READER_PREFIX "" CACHE STRING
+    "Reader display prefix shared by the WinSCard client and proxy")
+set(DTV_WINDOWS_WINSCARD_RUNTIME_ENV "" CACHE STRING
+    "Runtime-root override environment variable for the WinSCard proxy")
+set(DTV_WINDOWS_WINSCARD_HOST_INCLUDE_DIRS "" CACHE STRING
+    "Private product host facade include directories required by the WinSCard adapter")
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -117,9 +138,66 @@ if(DTV_USERLAND_BUILD_HOST_CTL)
     target_compile_features(dtv_userland_host_ctl PUBLIC cxx_std_17)
     target_include_directories(dtv_userland_host_ctl
         PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ctl>
-        PRIVATE ${DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS})
+        PRIVATE ${DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS}
+                ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include)
     target_link_libraries(dtv_userland_host_ctl PUBLIC
         dtv::control dtv::identity dtv::json)
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_RUNTIME)
+    if(NOT UNIX AND NOT WIN32)
+        message(FATAL_ERROR "DTV_USERLAND_BUILD_HOST_RUNTIME requires a POSIX or Windows target")
+    endif()
+    if(NOT DTV_USERLAND_HOST_RUNTIME_PRODUCT MATCHES "^[a-z0-9]+(-[a-z0-9]+)*-userland$")
+        message(FATAL_ERROR
+            "DTV_USERLAND_HOST_RUNTIME_PRODUCT must be an explicit product-userland namespace")
+    endif()
+    if(NOT DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY STREQUAL "lowercase" AND
+       NOT DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY STREQUAL "preserve-case")
+        message(FATAL_ERROR
+            "DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY must be lowercase or preserve-case")
+    endif()
+    if(NOT DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS)
+        message(FATAL_ERROR
+            "DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS must name the product facade headers")
+    endif()
+
+    if(WIN32)
+        set(_host_runtime_sources
+            adapters/host_runtime/windows/windows_ipc.cpp
+            adapters/host_runtime/windows/windows_tuner_nonce.cpp)
+    else()
+        set(_host_runtime_sources
+            adapters/host_runtime/posix_ipc.cpp
+            adapters/host_runtime/posix_tuner_nonce.cpp)
+    endif()
+    add_library(dtv_userland_host_runtime STATIC ${_host_runtime_sources})
+    add_library(dtv::host_runtime ALIAS dtv_userland_host_runtime)
+    set_target_properties(dtv_userland_host_runtime PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_runtime PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_runtime
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include>
+        PRIVATE ${DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS})
+    target_compile_definitions(dtv_userland_host_runtime PRIVATE
+        PX4_USERLAND_RUNTIME_PRODUCT="${DTV_USERLAND_HOST_RUNTIME_PRODUCT}")
+    if(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY STREQUAL "preserve-case")
+        target_compile_definitions(dtv_userland_host_runtime PRIVATE
+            PX4_USERLAND_RUNTIME_INSTANCE_PRESERVE_CASE=1)
+    else()
+        target_compile_definitions(dtv_userland_host_runtime PRIVATE
+            PX4_USERLAND_RUNTIME_INSTANCE_LOWERCASE=1)
+    endif()
+    target_link_libraries(dtv_userland_host_runtime PUBLIC dtv::identity)
+    if(WIN32)
+        target_link_libraries(dtv_userland_host_runtime PUBLIC advapi32 bcrypt ws2_32)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
+    include(adapters/windows_winscard/CMakeLists.txt)
 endif()
 
 if(MSVC)
@@ -132,6 +210,9 @@ if(MSVC)
     if(DTV_USERLAND_BUILD_HOST_CTL)
         target_compile_options(dtv_userland_host_ctl PRIVATE /EHs-c- /GR- /W4)
     endif()
+    if(DTV_USERLAND_BUILD_HOST_RUNTIME)
+        target_compile_options(dtv_userland_host_runtime PRIVATE /EHs-c- /GR- /W4)
+    endif()
 else()
     target_compile_options(dtv_userland_core PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_wire PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
@@ -141,6 +222,10 @@ else()
     target_compile_options(dtv_userland_control PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     if(DTV_USERLAND_BUILD_HOST_CTL)
         target_compile_options(dtv_userland_host_ctl PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_RUNTIME)
+        target_compile_options(dtv_userland_host_runtime PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
@@ -314,6 +399,10 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(card_client_tests tests/card_client_tests.cpp)
     target_link_libraries(card_client_tests PRIVATE dtv::control)
     add_test(NAME card_client_tests COMMAND card_client_tests)
+
+    add_executable(winscard_identity_proof_tests tests/winscard_identity_proof_tests.cpp)
+    target_link_libraries(winscard_identity_proof_tests PRIVATE dtv::control)
+    add_test(NAME winscard_identity_proof_tests COMMAND winscard_identity_proof_tests)
 
     add_executable(models_text_tests tests/models_text_tests.cpp)
     target_link_libraries(models_text_tests PRIVATE dtv::json)

@@ -24,6 +24,7 @@ struct Profile final {
     InstanceNormalizer normalize_instance = nullptr;
     SerialMatcher matches_serial = nullptr;
     bool lnb_power_supported = false;
+    bool internal_card_status_supported = false;
 };
 
 int run_control_cli(int argc, const char* const* argv,

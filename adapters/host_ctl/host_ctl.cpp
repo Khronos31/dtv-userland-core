@@ -211,12 +211,12 @@ void usage(FILE* output, const Profile& profile) noexcept
                  "[--instance TOKEN] [--runtime-dir PATH] [--group] COMMAND\n"
                  "       %s --help | --version\ncommands: list, status",
                  profile.tool_name, profile.tool_name);
-    if (profile.card_supported) {
-        std::fputs(", card-status, card-atr, card-reset, card-apdu HEX", output);
-    } else {
-        std::fputs(", card-status (unsupported), card-atr (unsupported), "
-                   "card-reset (unsupported), card-apdu HEX (unsupported)", output);
-    }
+    std::fputs(profile.card_supported || profile.internal_card_status_supported
+                   ? ", card-status"
+                   : ", card-status (unsupported)", output);
+    std::fputs(profile.card_supported ? ", card-atr, card-reset, card-apdu HEX"
+                                      : ", card-atr (unsupported), card-reset (unsupported), "
+                                        "card-apdu HEX (unsupported)", output);
     std::fputs(profile.lnb_power_supported ? ", lnb-on, lnb-off"
                                            : ", lnb-on (unsupported), lnb-off (unsupported)", output);
     std::fputc('\n', output);
@@ -488,7 +488,10 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         usage(stdout, profile);
         return 0;
     }
-    if (is_card_command(arguments.command) && !profile.card_supported) {
+    if ((arguments.command == Command::card_status && !profile.card_supported &&
+         !profile.internal_card_status_supported) ||
+        (arguments.command != Command::card_status && is_card_command(arguments.command) &&
+         !profile.card_supported)) {
         std::fprintf(stderr, "%s: CARD commands are unsupported by this product\n",
                      profile.tool_name);
         return exit_status(CommonError::UNSUPPORTED, true);
@@ -587,7 +590,8 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         }
         auto transport = std::make_unique<SocketTransport>(std::move(stream.value()));
         const std::uint64_t required_features =
-            arguments.command == Command::card_status ? wire::kFeatureCardService : 0U;
+            arguments.command == Command::card_status && profile.card_supported
+                ? wire::kFeatureCardService : 0U;
         auto current = wire::fetch_status(*transport, Timeout{5000U}, required_features);
         if (!current) {
             std::fprintf(stderr, "%s: status failed (%u, remote=%u)\n",
@@ -654,6 +658,12 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         return 0;
     }
     if (arguments.command == Command::card_status) {
+        if (profile.internal_card_status_supported && !profile.card_supported) {
+            const wire::Optional<bool>& inserted = snapshot.snapshot.status.card_inserted;
+            std::printf("present=%s\n", !inserted.present ? "unknown"
+                                         : inserted.value ? "yes" : "no");
+            return std::fflush(stdout) == 0 ? 0 : 70;
+        }
         if (!snapshot.snapshot.list.readers.present ||
             snapshot.snapshot.list.readers.value.count == 0U) {
             std::fprintf(stderr, "%s: no card reader is available\n", profile.tool_name);
