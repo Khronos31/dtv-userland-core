@@ -81,21 +81,18 @@ bool parse_hex(std::string_view value, Arguments& result) noexcept
     return result.apdu_length != 0U;
 }
 
-Command parse_command(std::string_view value, bool card_supported) noexcept
+Command parse_command(std::string_view value) noexcept
 {
     if (value == "list") return Command::list;
     if (value == "status") return Command::status;
-    if (card_supported) {
-        if (value == "card-status") return Command::card_status;
-        if (value == "card-atr") return Command::card_atr;
-        if (value == "card-reset") return Command::card_reset;
-        if (value == "card-apdu") return Command::card_apdu;
-    }
+    if (value == "card-status") return Command::card_status;
+    if (value == "card-atr") return Command::card_atr;
+    if (value == "card-reset") return Command::card_reset;
+    if (value == "card-apdu") return Command::card_apdu;
     return Command::none;
 }
 
-Arguments parse_arguments(int argc, const char* const* argv,
-                          bool card_supported) noexcept
+Arguments parse_arguments(int argc, const char* const* argv) noexcept
 {
     Arguments result;
     bool have_device = false;
@@ -137,7 +134,7 @@ Arguments parse_arguments(int argc, const char* const* argv,
             continue;
         }
         if (result.command == Command::none) {
-            result.command = parse_command(option, card_supported);
+            result.command = parse_command(option);
             if (result.command == Command::none) return invalid("unknown command");
             if (result.command == Command::card_apdu) {
                 if (index + 1 >= argc || argv[index + 1] == nullptr ||
@@ -210,8 +207,12 @@ void usage(FILE* output, const Profile& profile) noexcept
                  "[--instance TOKEN] [--runtime-dir PATH] [--group] COMMAND\n"
                  "       %s --help | --version\ncommands: list, status",
                  profile.tool_name, profile.tool_name);
-    if (profile.card_supported)
+    if (profile.card_supported) {
         std::fputs(", card-status, card-atr, card-reset, card-apdu HEX", output);
+    } else {
+        std::fputs(", card-status (unsupported), card-atr (unsupported), "
+                   "card-reset (unsupported), card-apdu HEX (unsupported)", output);
+    }
     std::fputc('\n', output);
 }
 
@@ -470,7 +471,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         std::printf("%s %s\n", profile.product_slug, profile.product_version);
         return 0;
     }
-    const Arguments arguments = parse_arguments(argc, argv, profile.card_supported);
+    const Arguments arguments = parse_arguments(argc, argv);
     if (!arguments.valid) {
         std::fprintf(stderr, "%s: %.*s\n", profile.tool_name,
                      static_cast<int>(arguments.error.size()), arguments.error.data());
@@ -480,6 +481,11 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
     if (arguments.help) {
         usage(stdout, profile);
         return 0;
+    }
+    if (is_card_command(arguments.command) && !profile.card_supported) {
+        std::fprintf(stderr, "%s: CARD commands are unsupported by this product\n",
+                     profile.tool_name);
+        return exit_status(CommonError::UNSUPPORTED, true);
     }
 #if defined(_WIN32)
     if (arguments.group) {
