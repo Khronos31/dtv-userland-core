@@ -18,6 +18,9 @@ option(DTV_USERLAND_BUILD_CARD "Build the internal card ownership engine" OFF)
 # is one of the only targets that requires Threads.  It does not depend on the
 # receiver engine, so a capture-only install never needs the receiver library.
 option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OFF)
+option(DTV_USERLAND_BUILD_HOST_CTL "Build the optional GPL host control frontend" OFF)
+set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS "" CACHE STRING
+    "Private host facade include directories required by the GPL host control frontend")
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -100,6 +103,25 @@ target_include_directories(dtv_userland_control PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dtv_userland_control PUBLIC dtv::wire)
 
+if(DTV_USERLAND_BUILD_HOST_CTL)
+    if(NOT DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS)
+        message(FATAL_ERROR
+            "DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS must name the product host facade headers")
+    endif()
+    add_library(dtv_userland_host_ctl STATIC adapters/host_ctl/host_ctl.cpp)
+    add_library(dtv::host_ctl ALIAS dtv_userland_host_ctl)
+    set_target_properties(dtv_userland_host_ctl PROPERTIES
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_ctl PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_ctl
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ctl>
+        PRIVATE ${DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS})
+    target_link_libraries(dtv_userland_host_ctl PUBLIC
+        dtv::control dtv::identity dtv::json)
+endif()
+
 if(MSVC)
     target_compile_options(dtv_userland_core PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_wire PRIVATE /EHs-c- /GR- /W4)
@@ -107,6 +129,9 @@ if(MSVC)
     target_compile_options(dtv_userland_tuning PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_json PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_control PRIVATE /EHs-c- /GR- /W4)
+    if(DTV_USERLAND_BUILD_HOST_CTL)
+        target_compile_options(dtv_userland_host_ctl PRIVATE /EHs-c- /GR- /W4)
+    endif()
 else()
     target_compile_options(dtv_userland_core PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_wire PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
@@ -114,6 +139,10 @@ else()
     target_compile_options(dtv_userland_tuning PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_json PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_control PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    if(DTV_USERLAND_BUILD_HOST_CTL)
+        target_compile_options(dtv_userland_host_ctl PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(DTV_USERLAND_BUILD_RECEIVER)
