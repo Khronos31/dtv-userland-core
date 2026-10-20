@@ -1192,7 +1192,20 @@ struct PosixControlServer::Impl final {
     void serve_status(Client& client, const wire::ControlRequest& request) noexcept
     {
         const wire::Scope scope = request.status.scope;
-        const Error membership = wire::check_status_scope(context->list, scope);
+        wire::Scope shell_scope = scope;
+        if (scope.kind == wire::ScopeKind::stream && context->list.receivers.present) {
+            // Resolve only this context's issued current/retained stream ID.
+            // The engine snapshot below still proves that its lease is live.
+            for (std::size_t i = 0; i < context->list.receivers.value.count; ++i) {
+                const auto& observed = stream_observations[context->receiver_index[i]];
+                if ((observed.current.present && observed.current.value.id == scope.id) ||
+                    (observed.last.present && observed.last.value.id == scope.id)) {
+                    shell_scope = receiver_scope(context->list.receivers.value.items[i].id);
+                    break;
+                }
+            }
+        }
+        const Error membership = wire::check_status_scope(context->list, shell_scope);
         if (membership != Error::OK) {
             reply_error(client, request.opcode, request.request_id, wire_code(membership),
                         "status",
@@ -1212,7 +1225,7 @@ struct PosixControlServer::Impl final {
         const wire::Snapshot snapshot = next_snapshot();
         wire::StatusResponse& response = *status_scratch;
         const Error shell = wire::build_status_shell(context->list, status_context, snapshot,
-                                                     scope, response);
+                                                     shell_scope, response);
         if (shell != Error::OK) {
             reply_error(client, request.opcode, request.request_id, wire_code(shell), "status",
                         scope);
@@ -1223,6 +1236,17 @@ struct PosixControlServer::Impl final {
                 project_receiver(engine.value(), snapshot,
                                  response.receivers.value.items[index]);
             }
+        }
+        if (scope.kind == wire::ScopeKind::stream) {
+            const auto& receiver = response.receivers.value.items[0];
+            if (!receiver.leased ||
+                !((receiver.stream.present && receiver.stream.value.id == scope.id) ||
+                  (receiver.last_stream.present && receiver.last_stream.value.id == scope.id))) {
+                reply_error(client, request.opcode, request.request_id,
+                            wire_code(Error::NOT_FOUND), "status", scope);
+                return;
+            }
+            response.scope = scope;
         }
         if (scope.kind == wire::ScopeKind::enclosure && response.enclosure.present) {
             response.lnb_15v_enabled = tuner_service.independent_lnb_power_state();
@@ -1293,13 +1317,26 @@ struct PosixControlServer::Impl final {
         if (metadata.last_successful_valid)
             status.last_successful_tune.value =
                 wire_tune(metadata.last_successful_revision, metadata.last_successful);
-        // No stream is issued through this endpoint yet, and no measurement or
-        // counter producer is declared in the descriptors.
-        status.stream.present = false;
-        status.last_stream.present = false;
+        // The poll-owned observation carries identities/statistics published
+        // by the real typed lifecycle. STATUS itself performs no stream/backend
+        // callback; the same engine snapshot decides whether the stream lives.
+        const auto& observed = stream_observations[receiver];
+        const auto phase = static_cast<dtv::userland::detail::StreamPhase>(
+            engine.stream_phases[slot]);
+        status.stream.present = observed.current.present &&
+            phase != dtv::userland::detail::StreamPhase::none &&
+            phase != dtv::userland::detail::StreamPhase::ended;
+        if (status.stream.present) {
+            status.stream.value = observed.current.value;
+            status.stream.value.phase = static_cast<wire::StreamPhase>(phase);
+        }
+        status.last_stream = observed.last;
+        status.last_stream.present = status.leased && observed.last.present;
         status.measurements.entries.count = 0U;
         status.receiver_statistics.entries.count = 0U;
-        status.stream_statistics.present = false;
+        status.stream_statistics.present = status.stream.present && observed.statistics.present;
+        if (status.stream_statistics.present)
+            status.stream_statistics.value = observed.statistics.value;
         status.last_error.present = false;
         (void)snapshot;
     }
@@ -1839,6 +1876,16 @@ struct PosixControlServer::Impl final {
         RetiredClient* retired = find_retired(completion.client_id);
         if (retired == nullptr) return;
         if (completion.operation == ControlWorkerOperation::tuner_release) {
+            if (completion.error == Error::NOT_READY) {
+                // The v1 engine still owns physical stream cleanup. Keep the
+                // retired lease and let the existing retry path release it
+                // after its exact-ticket cleanup; do not lose its last owner.
+                for (RetiredLease& lease : retired->leases) {
+                    if (lease.active && lease.lease_id == completion.lease_id)
+                        lease.queued = false;
+                }
+                return;
+            }
             notify_stream_detached_by_identity(completion.client_id,
                                                completion.lease_id);
             for (RetiredLease& lease : retired->leases) {
@@ -1937,6 +1984,7 @@ struct PosixControlServer::Impl final {
                 return;
             }
             wire::AcquireResponse response;
+            stream_observations[completion.receiver] = StreamObservation{};
             response.epoch = hello.epoch;
             response.lease_id = completion.tuner_acquire.lease_id;
             reply_record(client, outstanding.opcode, completion.request_id, response,
@@ -1944,10 +1992,11 @@ struct PosixControlServer::Impl final {
             return;
         }
         case ControlWorkerOperation::tuner_release: {
-            // TunerService removes a found lease logically before its hardware
-            // cleanup, even when that cleanup fails, so the poll-thread
-            // registry follows it on every outcome.
-            client.remove_lease(outstanding.lease_id);
+            // NOT_READY is a precondition refusal while a v1 physical owner
+            // remains in the engine. Other outcomes follow release_lease's
+            // logical removal before its backend cleanup.
+            if (completion.error != Error::NOT_READY)
+                client.remove_lease(outstanding.lease_id);
             if (completion.error == Error::NOT_FOUND) {
                 reply_error(client, outstanding.opcode, completion.request_id,
                             wire_code(completion.error), "release", target);
@@ -2016,6 +2065,18 @@ struct PosixControlServer::Impl final {
             response.stream_id = completion.v1_start.stream_id;
             response.attach_token = completion.v1_start.token;
             response.expires_after_ms = completion.v1_expires_after_ms;
+            auto& observed = stream_observations[outstanding.receiver];
+            const auto metadata = tuner_service.tune_metadata(outstanding.receiver);
+            if (!metadata || !metadata.value().current_valid) {
+                reply_error(client, outstanding.opcode, completion.request_id,
+                            wire_code(Error::INTERNAL), "start_stream", target);
+                return;
+            }
+            observed.current.present = true;
+            observed.current.value = wire::Stream{response.stream_id,
+                metadata.value().current_revision,
+                wire::StreamPhase::armed};
+            observed.statistics.present = false;
             reply_record(client, outstanding.opcode, completion.request_id, response,
                          &wire::encode_start_response, "start_stream", target);
             return;
@@ -2066,6 +2127,9 @@ struct PosixControlServer::Impl final {
             }
             response.final.statistics =
                 wire_stream_counters(stop_counters, context_now_ns());
+            auto& observed = stream_observations[outstanding.receiver];
+            observed.last.present = true;
+            observed.last.value = response.final;
             reply_record(client, outstanding.opcode, completion.request_id, response,
                          &wire::encode_stop_response, "stop_stream", target);
             if (completion.operation ==
@@ -2387,7 +2451,8 @@ struct PosixControlServer::Impl final {
             if (client->id() != completion.client_id) continue;
             if (!client->matches(completion)) return;
             send_completion(*client, completion);
-            if (completion.operation == ControlWorkerOperation::tuner_release) {
+            if (completion.operation == ControlWorkerOperation::tuner_release &&
+                completion.error != Error::NOT_READY) {
                 notify_stream_detached_by_identity(completion.client_id,
                                                    completion.lease_id);
             }
@@ -2662,6 +2727,12 @@ struct PosixControlServer::Impl final {
     std::unique_ptr<wire::StatusResponse> status_scratch;
     std::uint64_t context_start_ms = 0U;
     std::uint64_t snapshot_sequence = 0U;
+    struct StreamObservation final {
+        wire::Optional<wire::Stream> current;
+        wire::Optional<wire::StreamCounters> statistics;
+        wire::Optional<wire::StreamFinal> last;
+    };
+    std::array<StreamObservation, kReceiverCount> stream_observations{};
     wire::Optional<bool> internal_card_inserted{};
     std::vector<std::unique_ptr<Client>> clients;
     std::atomic<std::size_t> client_count{0U};
@@ -2883,6 +2954,24 @@ void PosixControlServer::Impl::begin_stream_end(
     if (client.end_queued || client.remove_requested()) return;
     client.final_snapshot = snapshot;
     client.final_snapshot_valid = true;
+    auto& observed = stream_observations[client.receiver];
+    // A delayed old connection cannot overwrite the current stream's cache.
+    if (observed.current.present && observed.current.value.id == client.stream_id) {
+        observed.last.present = true;
+        auto& final = observed.last.value;
+        final = wire::StreamFinal{};
+        final.id = client.stream_id;
+        final.tune_revision = client.ticket.revision;
+        const auto terminal = static_cast<TunerStreamTerminal>(snapshot.terminal);
+        final.reason = wire_end_reason(terminal);
+        if (final.reason != wire::StreamEndReason::stopped &&
+            final.reason != wire::StreamEndReason::shutdown) {
+            final.error.present = true;
+            final.error.value = wire::make_error_record(
+                static_cast<std::uint32_t>(stream_end_error(terminal)), "stream");
+        }
+        final.statistics = wire_stream_counters(snapshot.counters, context_now_ns());
+    }
     client.data_eof = false;
     client.set_phase(StreamClient::Phase::ending);
 }
@@ -2897,6 +2986,15 @@ void PosixControlServer::Impl::on_attach_ack_sent(StreamClient& client) noexcept
     if (committed) {
         client.committed = true;
         client.set_phase(StreamClient::Phase::active);
+        if (stream_control != nullptr) {
+            const auto stats = stream_control->stats(client.attachment);
+            auto& observed = stream_observations[client.receiver];
+            if (stats && observed.current.present &&
+                observed.current.value.id == client.stream_id) {
+                observed.statistics.present = true;
+                observed.statistics.value = wire_stream_counters(stats.value(), context_now_ns());
+            }
+        }
         return;
     }
     // STOP/owner teardown linearized before the publication point: never
@@ -3291,7 +3389,16 @@ void PosixControlServer::Impl::process_stream_clients(
                     if (read) {
                         if (read.value().bytes != 0U) {
                             const auto stats = stream_control->stats(client.attachment);
-                            if (stats) client.last_queue_drops = stats.value().queue_drops;
+                            if (stats) {
+                                client.last_queue_drops = stats.value().queue_drops;
+                                auto& observed = stream_observations[client.receiver];
+                                if (observed.current.present &&
+                                    observed.current.value.id == client.stream_id) {
+                                    observed.statistics.present = true;
+                                    observed.statistics.value = wire_stream_counters(
+                                        stats.value(), context_now_ns());
+                                }
+                            }
                             const auto queued = client.queue_data(
                                 client.sequence, client.last_queue_drops,
                                 ByteView{client.read_buffer().data,

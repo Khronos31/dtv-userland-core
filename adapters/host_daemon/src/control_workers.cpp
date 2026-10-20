@@ -630,7 +630,8 @@ struct ControlWorkerLanes::Impl final {
                 if (!pop_task(task)) break;
                 ControlWorkerCompletion completion = owner.execute(task);
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-                if (task.operation == ControlWorkerOperation::tuner_attach_stream &&
+                if ((task.operation == ControlWorkerOperation::tuner_attach_stream ||
+                     task.operation == ControlWorkerOperation::tuner_prepare_attach_v1) &&
                     owner.before_tuner_attach_completion != nullptr) {
                     owner.before_tuner_attach_completion(
                         owner.before_tuner_attach_completion_context);
@@ -695,7 +696,8 @@ struct ControlWorkerLanes::Impl final {
         {
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
             if (owner.fail_tuner_attach_submit &&
-                task.operation == ControlWorkerOperation::tuner_attach_stream) {
+                (task.operation == ControlWorkerOperation::tuner_attach_stream ||
+                 task.operation == ControlWorkerOperation::tuner_prepare_attach_v1)) {
                 return Result<void>::failure(Error::BUSY);
             }
 #endif
