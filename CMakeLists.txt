@@ -21,13 +21,13 @@ option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OF
 option(DTV_USERLAND_BUILD_HOST_CTL "Build the optional GPL host control frontend" OFF)
 set(DTV_USERLAND_HOST_CTL_FACADE_INCLUDE_DIRS "" CACHE STRING
     "Private host facade include directories required by the GPL host control frontend")
-option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build the optional GPL POSIX host runtime adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build the optional GPL host runtime adapter" OFF)
 set(DTV_USERLAND_HOST_RUNTIME_PRODUCT "" CACHE STRING
-    "Product runtime namespace component required by the GPL POSIX host runtime adapter")
+    "Product runtime namespace component required by the GPL host runtime adapter")
 set(DTV_USERLAND_HOST_RUNTIME_INSTANCE_POLICY "" CACHE STRING
-    "Instance-name policy for the GPL POSIX host runtime adapter: lowercase or preserve-case")
+    "Instance-name policy for the GPL host runtime adapter: lowercase or preserve-case")
 set(DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS "" CACHE STRING
-    "Private product facade include directories required by the GPL POSIX host runtime adapter")
+    "Private product facade include directories required by the GPL host runtime adapter")
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -131,8 +131,8 @@ if(DTV_USERLAND_BUILD_HOST_CTL)
 endif()
 
 if(DTV_USERLAND_BUILD_HOST_RUNTIME)
-    if(NOT UNIX)
-        message(FATAL_ERROR "DTV_USERLAND_BUILD_HOST_RUNTIME requires a POSIX target")
+    if(NOT UNIX AND NOT WIN32)
+        message(FATAL_ERROR "DTV_USERLAND_BUILD_HOST_RUNTIME requires a POSIX or Windows target")
     endif()
     if(NOT DTV_USERLAND_HOST_RUNTIME_PRODUCT MATCHES "^[a-z0-9]+(-[a-z0-9]+)*-userland$")
         message(FATAL_ERROR
@@ -148,9 +148,16 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
             "DTV_USERLAND_HOST_RUNTIME_FACADE_INCLUDE_DIRS must name the product facade headers")
     endif()
 
-    add_library(dtv_userland_host_runtime STATIC
-        adapters/host_runtime/posix_ipc.cpp
-        adapters/host_runtime/posix_tuner_nonce.cpp)
+    if(WIN32)
+        set(_host_runtime_sources
+            adapters/host_runtime/windows/windows_ipc.cpp
+            adapters/host_runtime/windows/windows_tuner_nonce.cpp)
+    else()
+        set(_host_runtime_sources
+            adapters/host_runtime/posix_ipc.cpp
+            adapters/host_runtime/posix_tuner_nonce.cpp)
+    endif()
+    add_library(dtv_userland_host_runtime STATIC ${_host_runtime_sources})
     add_library(dtv::host_runtime ALIAS dtv_userland_host_runtime)
     set_target_properties(dtv_userland_host_runtime PROPERTIES
         CXX_STANDARD 17
@@ -170,6 +177,9 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
             PX4_USERLAND_RUNTIME_INSTANCE_LOWERCASE=1)
     endif()
     target_link_libraries(dtv_userland_host_runtime PUBLIC dtv::identity)
+    if(WIN32)
+        target_link_libraries(dtv_userland_host_runtime PUBLIC advapi32 bcrypt ws2_32)
+    endif()
 endif()
 
 if(MSVC)
