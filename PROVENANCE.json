@@ -1,0 +1,93 @@
+{
+  "source": {
+    "repository": "Khronos31/px4-userland",
+    "revision": "90f08a594487e2603bd5c09f778a0b3b64ac9a4d",
+    "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
+  },
+  "license_scope": {
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations listed below, the independently implemented wire subset, and this candidate's new build, packaging, test, and documentation files.",
+    "does_not_apply_to": [
+      "The full Khronos31/px4-userland product or unlisted source files",
+      "Any future GPL adapter or other separately licensed component",
+      "Third-party components or material retaining another license"
+    ],
+    "authority": [
+      "agent-workspace branch design/independent-code-policy.md",
+      "User continuation policy, 2026-10-18 02:44 JST",
+      "First-increment implementation start, 2026-10-18 03:06 JST"
+    ],
+    "ownership_statement": "This records the approved license scope; it does not assert or infer copyright ownership or authorship. No source hash or rights holder beyond the values explicitly recorded here is implied."
+  },
+  "foundation": {
+    "method": "Adapted from the pinned PX4 implementation under the recorded independent-code policy. The original source files carry GPL-2.0-only identifiers; destination files in this candidate carry MIT identifiers within the approved scope below.",
+    "source_files": [
+      {
+        "path": "userland/include/px4/error.h",
+        "sha256": "aba979d8421e9dab4513715bb4aa89e3c30ecfaee477054b99b974ad95ec0013",
+        "destination_path": "include/dtv/userland/error.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Error values and Result<T>/Result<void> declarations and behavior.",
+        "excluded_scope": "No error/result API behavior was excluded. Include path, namespace, header guard, and SPDX line were adapted."
+      },
+      {
+        "path": "userland/include/px4/logging.h",
+        "sha256": "e80b422205205976044328560c7d188dd7c64107fee0bfcde5c3aacf751979d9",
+        "destination_path": "include/dtv/userland/logging.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "LogLevel, LogRecord, LogSink, and Logger declarations.",
+        "excluded_scope": "No logging API behavior was excluded. Include path, namespace, header guard, and SPDX line were adapted; no product-specific logger backend was added."
+      },
+      {
+        "path": "userland/include/px4/transport.h",
+        "sha256": "0a594c7cb64057c66f614e9320df3383c02ad83e1acd69bbe143d01140b5426f",
+        "destination_path": "include/dtv/userland/transport.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The neutral ByteView, MutableByteView, Timeout, StreamConfig, StreamEventKind, StreamEvent, BulkReadObservation, and Transport declarations from original lines 19-77.",
+        "excluded_scope": "The six device constants at original lines 12-17 (transfer limits and command/TS endpoint values) were excluded."
+      },
+      {
+        "path": "userland/include/px4/mock_transport.h",
+        "sha256": "59adf3ffe5a0dd16df2b6fd3d36c48c92db4c9aee6d45881f21814701985df2a",
+        "destination_path": "include/dtv/userland/mock_transport.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Mock operation/outcome types, expectation API, and transport override declarations.",
+        "excluded_scope": "The default constructor and implicit product limits/endpoint selection were replaced by explicit MockTransportPolicy input. No real device transport or product-specific endpoint constants were included."
+      },
+      {
+        "path": "userland/src/error.cpp",
+        "sha256": "0eecdb29a8f8cd7c023f7529638791354f69a732b56418e0ec6b7a02090604dc",
+        "destination_path": "src/error.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The error_string mapping for the Error values.",
+        "excluded_scope": "No error mapping behavior was excluded. Include path and namespace were adapted; unrelated product code was not included."
+      },
+      {
+        "path": "userland/src/logging.cpp",
+        "sha256": "8c1ee995fac110304bf2290a91e6c4f405bf17b970ec31dcd4cfc2a800767265",
+        "destination_path": "src/logging.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Logger threshold and sink behavior, plus log-level string mapping.",
+        "excluded_scope": "No logging behavior was excluded. Include path and namespace were adapted; no product-specific logger backend was included."
+      },
+      {
+        "path": "userland/src/mock_transport.cpp",
+        "sha256": "9abadf6337034bc4143f952a8ae583075e9434e01dc0978eb559df78b8e97906",
+        "destination_path": "src/mock_transport.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Mock expectation FIFO, validation, result, partial-transfer, stream, and observation behavior.",
+        "excluded_scope": "Product transfer limits and TS endpoint selection were replaced by the explicit MockTransportPolicy fields. No real USB/device behavior or product-specific transport code was included."
+      }
+    ]
+  },
+  "wire": {
+    "method": "New independent implementation of the documented first wire subset; no PX4 wire source was copied or modified.",
+    "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request and ACQUIRE request/response. No typed HELLO response, later control opcodes, or full wire protocol."
+  }
+}
