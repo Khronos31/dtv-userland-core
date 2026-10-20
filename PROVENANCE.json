@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, and tuning subsets, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the receiver-Hz additions listed below, the card ownership destinations, and one mechanically transferred SHA-256 class listed below, the independently implemented wire, identity, STATUS JSON, tuning, control-connection, and control-client subsets, the leased receiver snapshot observation listed below, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -114,6 +114,42 @@
       }
     ]
   },
+  "receiver_hz": {
+    "method": "Independent neutral implementation of the adopted exact-Hz request, immutable profile-preparation, existing strict-lane execution, and final publication contract. No product frontend, tuner, or PLL arithmetic was copied into the common engine; source-derived arithmetic and references remain in the separately licensed GPL product drivers.",
+    "authority": [
+      "agent-workspace branch design/independent-code-policy.md and user's 2026-10-18 continuation policy",
+      "shared/implementation/receiver-hz-code-task.md, requirements 1-7",
+      "shared/implementation/receiver-hz-profile-table.md and profile review/clarifications",
+      "shared/implementation/receiver-hz-execution-seams.md and review",
+      "implementation/reports/receiver-hz-code.md, accepted incoming Opus inventory and continuation record"
+    ],
+    "source_baseline": "core-hz revision 4af047b1665190b6560652415bd435ccba545258; the R3 source additions were authored in the recorded accepted continuation and this revision does not claim it contains R3.",
+    "implementation_authors": [
+      {
+        "author": "Claude Opus 5.5",
+        "scope": "The common R3 engine/header/CMake and new receiver-Hz test additions recorded in the accepted incoming-opus inventory and the receiver-hz-code report."
+      }
+    ],
+    "files": [
+      {
+        "path": "CMakeLists.txt",
+        "scope": "Adds the receiver-Hz test target when the existing receiver component and test options are enabled."
+      },
+      {
+        "path": "include/dtv/userland/detail/receiver_engine.h",
+        "scope": "Adds exact-u64-Hz strict requests and results, immutable prepared-profile state, bounded programming output, and the strict-Hz backend seam while retaining the existing kHz API."
+      },
+      {
+        "path": "src/receiver_engine.cpp",
+        "scope": "Consumes the immutable profile outcome prepared by the product facade at the existing admission validation position, carries the exact request through the existing admission/tune flow, derives only the compatibility kHz projection, and publishes the result through the existing final ticket/owner/revision check."
+      },
+      {
+        "path": "tests/receiver_hz_tests.cpp",
+        "scope": "New focused tests for exact-Hz admission, profile preparation, request/result propagation, validation precedence, and guarded publication."
+      }
+    ],
+    "license_scope": "These listed neutral engine, build-target, and new test additions are independently implemented under the adopted policy and carry MIT in this candidate. The GPL product PLL arithmetic, frontend transforms, and source-derived references are excluded."
+  },
   "identity": {
     "method": "The selector, instance, USB descriptor and auto-identity codecs are a new independent implementation of the adopted byte representation. The only mechanical transfer is the neutral SHA-256 class, extracted under the standing independent-code policy; no selector/discovery/hardware source was copied.",
     "authority": [
@@ -140,6 +176,91 @@
     "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
     "error_values_added": "RESOURCE_LIMIT = 17 was added additively for the control-payload cap. All pre-existing Error values and the one-byte size are unchanged.",
     "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. No product payload, card/hardware sequence or vendor asset was copied."
+  },
+  "control_connection": {
+    "method": "Independent portable connection state and dispatch-input implementation over the accepted typed wire/record codecs. No PX4 control-server, socket, worker, device, or GPL product implementation was copied.",
+    "authority": [
+      "implementation/reports/runtime-server-next-code-task.md",
+      "shared/design/common-wire-draft.md",
+      "shared/design/wire-record-layout.md",
+      "shared/design/common-api-contract.md",
+      "shared/design/adoption-status.md",
+      "shared/design/independent-code-policy.md"
+    ],
+    "scope": "The dtv::control target provides one-connection HELLO/version/feature negotiation, request-ID and single-outstanding-request state, epoch checks, typed request decoding, typed unsupported/error replies, PID_FILTER selection enforcement before service dispatch, and bounded STATUS snapshot helpers. The product event loop, socket writes, scheduling, ownership, target receiver capability checks, timers, JSON/CLI translation and device work remain outside this common component.",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_connection.h",
+        "sha256": "d7fe525cda58cf9aad4f36cc2065a3514d0cca7f058449b6a683c226cc82fde3",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/control_connection.cpp",
+        "sha256": "87905897b61c2be256d09f2af6ddf4a20536b7d6d1f35a1bf636e908f1889c0c",
+        "spdx": "MIT"
+      },
+      {
+        "path": "tests/control_connection_tests.cpp",
+        "sha256": "48e6e22b6bebb8548e50802a3881e1ef20c222582412defead443f0dd7cc3089",
+        "spdx": "MIT"
+      },
+      {
+        "path": "cmake/dtv_userland_coreConfig.cmake.in",
+        "sha256": "d511c2e8c4f156dcf7156ceb671b6cbeeb520467e0591f1288ac2bbbf4c5498b",
+        "spdx": "MIT"
+      }
+    ],
+    "receiver_snapshot_observation": {
+      "scope": "Adds one leased boolean per engine slot to ReceiverEngineStatus, copied from leases_[slot].active under the existing registry mutex. It exports no lease ID, owner, or token; release cleanup remains represented by the existing operation state.",
+      "source_files": [
+        {
+          "path": "include/dtv/userland/detail/receiver_engine.h",
+          "sha256": "0ec1e23bb37f268c4069e49f8329cd8d2ab76f245938dc165f02b29a7d6bc0df",
+          "spdx": "MIT"
+        },
+        {
+          "path": "src/receiver_engine.cpp",
+          "sha256": "b26df34fcf1dcaa95de932c15a71b215baa627f5a8b4acc3c99d56bcad737b70",
+          "spdx": "MIT"
+        }
+      ]
+    },
+    "contributors": "Existing pre-correction component work was authored by Opus. Incremental implementation work in the handoff execution was authored by GPT-6-Luna according to the parent subagent history/CLI invocation; the worker self-label is not used for attribution. The later typed START/STOP dispatch and its served-request and full-epoch tests were authored by DeepSeek V4.1 Flash.",
+    "stream_control_increment": {
+      "authority": [
+        "reports/px4-stream-wire-v1-stage1-task.md",
+        "reports/px4-stream-wire-v1-stage1-correction-task.md",
+        "reports/px4-stream-wire-v1-stage1-correction-acceptance-review.md"
+      ],
+      "scope": "Owned typed START_STREAM and STOP_STREAM dispatch through the existing negotiation, request-order and full 16-byte epoch checks; a token-free successful tune revision in StreamStopResult; and the corresponding control tests.",
+      "excluded_scope": "Product data ATTACH, ACK/commit ordering, writer and TS client, armed deadline driving, control-disconnect cleanup, and stream/last_stream STATUS publication remain product integration work. This common increment does not certify a complete recording path or a release candidate."
+    }
+  },
+  "control_client": {
+    "method": "Independent portable UDTV client orchestration over the accepted wire codec, typed records, and JSON exporter. Product transport remains behind the ClientTransport byte interface.",
+    "authority": [
+      "implementation/reports/next-client-migration-facts.md",
+      "implementation/reports/client-runtime-publisher-gap-facts.md",
+      "shared/design/common-wire-draft.md",
+      "shared/design/wire-record-layout.md",
+      "shared/design/common-api-contract.md",
+      "shared/design/adoption-status.md",
+      "shared/design/independent-code-policy.md"
+    ],
+    "scope": "One bounded HELLO, LIST, and STATUS sequence on one byte transport, with response ID/opcode checks, epoch binding, typed error mapping, one outstanding request, timeout and failure close, and immutable list/status snapshot output. No socket, product endpoint, CLI, or device implementation is in this MIT component.",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_client.h",
+        "sha256": "0ea100fa83b1f08e831932d6f5a428d18f68e2b00a2422c0cd6713ff9fe3d809",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/control_client.cpp",
+        "sha256": "774eedeb896e5e7ecc922974058b89d686e95898aa8c3911b9a0e0c7e2423242",
+        "spdx": "MIT"
+      }
+    ],
+    "contributors": "GPT-6-Luna, identified from the parent subagent history/CLI invocation."
   },
   "json": {
     "method": "New independent portable serializer; it consumes the existing typed STATUS records and full canonical-context validator.",
@@ -184,5 +305,111 @@
     ],
     "scope": "Pure C++17 channel/typed-Hz/system/selection resolution using the existing wire System and Selection enums. No CLI option parser, repeated-option policy, wire request construction, backend capability checks, hardware quantization, product endpoint, or C ABI.",
     "new_files": "include/dtv/userland/tuning.h, src/tuning.cpp, tests/tuning_tests.cpp, tests/consumer/tuning/, tests/consumer/missing_receiver/ and docs/tuning.md are independently written and carry MIT."
+  },
+  "packet_session": {
+    "method": "Narrow-range extraction of the verified generic PX4 packet-session storage/read/drain/final expressions into the internal capture component, under the recorded independent-code policy. Only the expressions listed under moved_scope are in the destinations; the product keeps its GPL bridge, demux, hardware, startup, continuity, and producer stop/join policy in userland/src/q3u4_stream.cpp, which now composes the common state.",
+    "authority": [
+      "agent-workspace branch design/independent-code-policy.md",
+      "D2a executable extraction specification, shared/implementation/packet-session-spec.md",
+      "Expression provenance closure, shared/implementation/capture-common-origin-review.md (independent-implementation candidate for the selected ranges)",
+      "D2 preparation, shared/implementation/capture-common-preparation.md",
+      "Decision critique and incorporated reader-incarnation exception, shared/implementation/packet-session-decision-critique.md"
+    ],
+    "source_files": [
+      {
+        "path": "userland/src/q3u4_stream.cpp",
+        "sha256": "8952d3c43f896ca24ea851cc90316f2b4ea0966b32f363926b6cdc4cbc67b67f",
+        "destination_path": "src/packet_stream_session.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The independently reviewed generic expressions at fixed lines 100-108 (whole compound attachment equality, hash 43ccce9e13da668d6ebe07df015f0ebd1f4aa27ddb5dd9d799af1d945d2428af); 121-134 (generic queue/read/final state fields, 13b44fcebd616978cca61b0f44da52bb73907463cba85bf1b91842bf2d6ec8ed); 466-488 (BUSY check, checked allocation, session reset and current identity, c3c14d5be6f248c8b8515ef06cc64249abd76837cd2b8db19328c57bd3228f57); 526-543 (detach snapshot/invalidation/drain/wake, 52c3844ec5875af22051131e311c8e88f161e3269eb40b809265725c02859c49); 558-563 (post-cleanup exact-identity final amendment, 482c4a201dfe330d51944028644c18f5c9cb000b805eae9cb51b480fbd8d75cf); 580-581 (read output pointer/alignment validation glue, b212ec4952b12056ffaefb7e7ff66d29f82808475297986b9ead7532be0d0713); 585-630 (read lock/identity/wait/EOF/two-span wrap/result, 7385055d1309823f64d1bd257969bc64d209e0521fc02e83ff3dd4ab8c9fd76a); 638-641 (active counter query, fdc8de41bc37d6921f1ce7442b1e28749aac40128cd32a40bb9e1696f4b7b998); 650-654 (exact-identity retained final query, 7085beca16b89ad8bce4b892e6961df064c85338325ffed0da7c268f6f898e30); 662-669 (exact-identity final release/queue retirement, 63d38471d3886eda713981b35a280dd414c991be015892eb5e0d0d58f18448aa); 694-697 (active terminal query, abd46daac07ec2b521987c51b2de3d98cb3047a70c0a46ffc06a97735e7d31af); 807-818 (packet accounting before overflow rejection, append and wake, ebf72e2aa9bb59a279b4c7bde51bdba82fe374f0168316693e49500deca4bc25); 925-932 (terminal mutation/wake, fb03d629ad76b49174e7b50db3832ed81a20da5f4a52745520ebb8ed3d21c2fa); 939-943 (active terminal assignment/wake, 4e248c84ad78f97677f4f6674255be091f7855565fa59019b96680592e575252); 966-980 (shutdown final snapshot and queue retirement, f4e8ffdd7a88b5919942cf1da78cb36a4a901fd64949956be28b5a6578d82c9c); and 1001-1004 (retained final terminal amendment, 35ec3e9af27371ac85bfc70209f6527c4b24664d89ca888ab464d0b2f82a9bfe).",
+        "excluded_scope": "Product facade declarations, receiver/system/bridge validation and lifecycle locks (444-464, 489-511), bridge locking (514-524), attached-count/last-owner producer stop (545-573), tagged receiver routing, startup stabilization, continuity/TEI observation and TEI predicates (770-806, 828-918), transport cancel/stop, USB error mapping and enclosure shutdown, MLT layout, PSB suppression and the public factory/inheritance header. Hardware, demux, and producer-stop ownership stay GPL."
+      },
+      {
+        "path": "userland/include/px4/q3u4_stream.h",
+        "sha256": "6b138782e51868a00d7ee09b8461866d2d2478b1a8ab9e46b5e4d50fc08054d4",
+        "destination_path": "include/dtv/userland/detail/packet_stream_session.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Only the neutral packet-session state/operation shape behind the product facade (queue, capacity/head/count, active/draining identities, retained-final fields, terminal/counters, one mutex/condition variable and the read/drain/final operations). The public product class, its TunerService aliases/inheritance and factories stay GPL.",
+        "excluded_scope": "TunerAttachment/TunerStreamControl inheritance, kMaxReadBytes ceiling, receiver topology, test-access macro and all hardware/layout declarations. Receiver validity and the legacy read ceiling remain product inputs."
+      }
+    ],
+    "neutral_types": "Attachment, StreamCounters, StreamFinalSnapshot, ReceiverId, ReceiverToken, and ReceiverSystem are the unchanged neutral declarations split from include/dtv/userland/detail/receiver_engine.h into include/dtv/userland/detail/stream_session_types.h so a capture-only build does not depend on the disabled receiver header. StreamTerminal and StreamReadResult preserve the legacy PX4 numbering/field set. Declaration names, layout, defaults, and enum values are preserved and old receiver source compatibility is retained.",
+    "incarnation_exception": "The sole approved behavior exception is a session-local nonwrapping u64 incarnation. It is incremented under the same session mutex at admitted logical attachment publication (including a publication whose later bridge startup fails) and never on validation/BUSY/allocation rejection. A read captures it when it first validates the attachment, includes the mismatch in its wait predicate, and checks it immediately after wait/reacquisition before any packet, counter, draining, or final access, returning NOT_FOUND without touching the replacement session. A same-incarnation empty detach keeps the old already-validated reader EOF. Incarnation exhaustion rejects the next logical attach with RESOURCE_LIMIT after the external validation/BUSY checks and before allocating or mutating state; there is no wrap, global shutdown, or physical reset. This is not the old source expression and has no existing oracle.",
+    "new_files": "include/dtv/userland/detail/stream_session_types.h, include/dtv/userland/detail/packet_stream_session.h, src/packet_stream_session.cpp, tests/packet_stream_session_tests.cpp, tests/consumer/capture/, tests/consumer/capture_receiver/, tests/consumer/missing_capture/ and the capture CMake/install wiring are new and carry MIT. The product adapter changes and the instrumented fixed-old test copy remain GPL-2.0-only in px4-userland."
+  },
+  "stream_v1_authority": {
+    "method": "New independent portable implementation of the adopted v1 stream lifecycle in the existing common ReceiverEngine and a v1 per-attachment queue policy in the existing PacketStreamSession. No product poll loop, socket, worker, device, or GPL implementation was copied; the common component keeps its core+Threads dependency and adds no wire/card/capture requirement.",
+    "authority": [
+      "reports/runtime-stream-decision-brief.md and reports/runtime-stream-ownership-design.md",
+      "reports/runtime-stream-preimplementation-critique.md and the 2026-10-18 user standalone-exit decision",
+      "shared/design/adoption-status.md, common-api-contract.md, common-wire-draft.md, wire-record-layout.md, ownership-security-contract.md",
+      "reports/stream-v1-authority-code-task.md and reports/stream-v1-authority-correction-task.md"
+    ],
+    "scope": "Immutable stream contract mode selected before the first ACQUIRE; typed v1 START/reserve/prepare/commit/abort over an owned ticket carrying epoch/owner/lease-instance/slot/stream/reservation; a successful-current-tune revision binding; nonwrapping stream ID and reservation issuance; a two-phase metadata/worker STOP with a once-issued cleanup ticket and a retained unquiesced typed final; and a v1 per-attachment queue policy that evicts the oldest unread complete packet with a saturating eviction count. The legacy entrances and the strict-Hz, card and packet-session behavior are preserved.",
+    "excluded_scope": "The product P poll/worker loop, sockets, ACK writing, OS transports, process shutdown, native Windows/Android execution, writer sequence/partial-frame accounting, CARD/data clients and the final release pin remain outside this phase-1 unit.",
+    "known_limitations": [
+      {
+        "issue": "https://github.com/Khronos31/dtv-userland-core/issues/1",
+        "scope": "Concurrent queued prepare and cleanup before backend start can execute in reverse receiver-mutex order, leaving a live capture after cleanup reported quiescence. Release remains excluded; repeated physical cleanup is unavailable for that ticket.",
+        "disposition": "Deferred under the user's limited-reach issue policy. The reviewed P normal-recording candidate calls prepare and cleanup on the same existing receiver worker lane. Generic concurrent API acceptance remains limited; each product integration must preserve this ordering or address the issue."
+      }
+    ],
+    "source_files": [
+      {
+        "path": "include/dtv/userland/detail/receiver_engine.h",
+        "sha256": "0ec1e23bb37f268c4069e49f8329cd8d2ab76f245938dc165f02b29a7d6bc0df",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/receiver_engine.cpp",
+        "sha256": "b26df34fcf1dcaa95de932c15a71b215baa627f5a8b4acc3c99d56bcad737b70",
+        "spdx": "MIT"
+      },
+      {
+        "path": "include/dtv/userland/detail/packet_stream_session.h",
+        "sha256": "bc7341e7d0baa0d0e1a2c2b475381372cab0ac26cfcd4c2ab5a0540cea13e925",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/packet_stream_session.cpp",
+        "sha256": "3cd961eb5bd1de987cbf4bb69708a5c0c18dad45fcf1cd82921a0807f8641c4e",
+        "spdx": "MIT"
+      },
+      {
+        "path": "CMakeLists.txt",
+        "sha256": "6262e4de43b771c30c25417c0a5af96163abfb268e1538058acf91366c120b5a",
+        "spdx": "MIT"
+      }
+    ],
+    "new_files": "tests/stream_v1_authority_tests.cpp, tests/stream_v1_store_tests.cpp, tests/stream_v1_owner_cleanup_tests.cpp and tests/stream_v1_late_prepare_tests.cpp are new MIT tests; only the records above are the independent v1 authority and store policy."
+  },
+  "normal_recording_control": {
+    "method": "Independent portable recording client control sequence and v1 attachment queue-policy propagation, implemented by DeepSeek V4.1 Flash. No product socket loop, USB driver or device sequence is included.",
+    "scope": "HELLO/LIST/STATUS followed by ACQUIRE/TUNE/START, normal STOP/RELEASE without automatic replay; v1 Attachment selects the existing evict-oldest queue policy.",
+    "evidence": "reports/px4-normal-recording-connection-code.md and px4-normal-recording-connection-acceptance-review.md in agent-workspace. Limited normal local-override acceptance; source pin/default-fetch integration follows. Final-source SAN, separate CLI process, native USB/RF and all-platform acceptance are separate.",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_client.h",
+        "sha256": "0ea100fa83b1f08e831932d6f5a428d18f68e2b00a2422c0cd6713ff9fe3d809",
+        "spdx": "MIT"
+      },
+      {
+        "path": "include/dtv/userland/detail/stream_session_types.h",
+        "sha256": "6c114bb4b3edf4dd14b738377b560b8ed26460c798ad4e1808494f84c5d4fa22",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/control_client.cpp",
+        "sha256": "774eedeb896e5e7ecc922974058b89d686e95898aa8c3911b9a0e0c7e2423242",
+        "spdx": "MIT"
+      },
+      {
+        "path": "src/receiver_engine.cpp",
+        "sha256": "b26df34fcf1dcaa95de932c15a71b215baa627f5a8b4acc3c99d56bcad737b70",
+        "spdx": "MIT"
+      }
+    ]
   }
 }

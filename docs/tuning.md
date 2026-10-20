@@ -1,11 +1,47 @@
-# Common tune input resolution
+# 共通選局入力解決器 (dtv::tuning)
 
-`dtv::tuning::resolve` implements the pure shared channel/Hz/system/selection resolver from the adopted CLI contract. It accepts typed values, uses the wire `System` and `Selection` enums, and allocates no memory. It does not parse numeric option strings, construct a wire request, apply backend capability checks, or quantize requested Hz.
+本ドキュメントは、`dtv_userland_tuning` ターゲット（ヘッダー: `include/dtv/userland/tuning.h`、実装: `src/tuning.cpp`）が提供する選局パラメータ解決器（`dtv::tuning::resolve`）の仕様および境界条件を解説する。
 
-Exactly one of `Request::channel` and `Request::frequency_hz` is required. A channel determines its system; a supplied system must be the same recognized value. A frequency requires an explicit recognized system and must be in 1..9007199254740991 Hz. The returned frequency is the requested software target.
+本関数は、CLI 引数や設定ファイルから与えられるチャンネル名または周波数を入力とし、ワイヤプロトコル上の放送方式（`System`）、要求周波数（Hz）、および選局対象（`Selection`）を純粋関数として導出する。動的メモリ確保は一切行わない。また、文字列オプションの切り出し、ワイヤメッセージの組み立て、バックエンドデバイスの機能確認、および周波数のハードウェア向け量子化は本モジュールの範囲外である。
 
-Channels are exact ASCII tokens: `13`..`62` or `T13`..`T62`; odd `BS01`..`BS23`, optionally followed by `_0`..`_11`; and even `CS2`..`CS24`, with `CS02`, `CS04`, `CS06`, and `CS08` also accepted. BS suffixes use unpadded decimal as an explicit lexical clarification in the implementation spec; `_00` and `_01` are rejected. The maximum token length is seven bytes.
+---
 
-Terrestrial channels use automatic selection and reject slot/TSID. An unsuffixed BS channel requires one slot or TSID. A suffixed BS channel supplies its slot and rejects any extra slot/TSID. CS channels default to slot 0; an explicit slot or TSID replaces that default. A satellite frequency requires an explicit slot or TSID. Explicit slot and TSID conflict. Slot range is 0..11 and TSID range is 1..65534.
+## 1. 入力パラメータの要件
 
-All malformed, incomplete, out-of-range, conflicting, and unknown-enum inputs return `INVALID_ARGUMENT`. Later adapters remain responsible for device support, physical tuning, and hardware quantization. This is a common helper only; no product CLI is switched to it by this increment.
+`Request` 構造体において、以下のルールが適用される：
+
+- **チャンネルまたは周波数の排他指定**:
+  `channel`（文字列トークン）と `frequency_hz`（64 ビット整数）のいずれか一方のみを指定しなければならない（両方指定、または両方省略はエラー）。
+- **チャンネル指定時の動作**:
+  チャンネル名から放送方式（地上波 / BS / CS）が一意に決定される。システム種別が併せて指定された場合は、チャンネルから導出された種別と一致していなければならない。
+- **周波数直接指定時の動作**:
+  放送方式（`System`）の明示指定が必須となる。周波数は 1 〜 9,007,199,254,740,991 Hz（$2^{53} - 1$）の正の整数でなければならない。返却される周波数は、要求されたターゲット周波数の値そのものである。
+
+---
+
+## 2. チャンネル文字列の構文規則
+
+チャンネル名は最大 7 バイトの ASCII トークンであり、以下の形式を受理する：
+
+| 放送波種別 | トークン形式 | 例 | セレクション規則 |
+|---|---|---|---|
+| **地上波 (Terrestrial)** | `13`〜`62` または `T13`〜`T62` | `27`, `T27` | 自動セレクション（`automatic`）。スロットまたは TSID の指定は拒否される。 |
+| **BS (サフィックスなし)** | 奇数番号 `BS01`〜`BS23` | `BS01`, `BS15` | スロット（0〜11）または TSID（1〜65534）のいずれか 1 つの明示指定が必須。 |
+| **BS (サフィックスあり)** | 奇数番号 `BS01`〜`BS23` に続く `_0`〜`_11` | `BS01_0`, `BS15_1` | サフィックスからスロット番号が確定する。追加のスロットまたは TSID 指定は拒否される。サフィックスはゼロ埋めなしの 10 進数でなければならず、`_00` や `_01` は拒否される。 |
+| **CS** | 偶数番号 `CS2`〜`CS24`（`CS02`, `CS04`, `CS06`, `CS08` も許容） | `CS2`, `CS04`, `CS24` | 既定でスロット 0（`slot` 0）が適用される。明示的なスロットまたは TSID が指定された場合はその値で上書きされる。 |
+
+---
+
+## 3. 衛星周波数直接指定時のセレクション規則
+
+衛星放送方式（BS または CS）を周波数（Hz）で直接指定する場合：
+- スロット番号（0〜11）または TSID（1〜65534）のいずれか一方を必ず明示指定しなければならない。
+- スロットと TSID の両方を同時に指定することはできず、競合として拒否される。
+
+---
+
+## 4. エラー契約と未対応境界
+
+不正な構文、不完全な指定、範囲外の値、パラメータの競合、および未定義の enum 値が与えられた場合、関数は直ちに `Error::INVALID_ARGUMENT` を返す。
+
+実際のデバイスが当該周波数や放送方式を物理的にサポートしているかの判定、チューナー PLL への周波数量子化、LNB 電源制御、および物理的な選局動作は、各製品アダプタが担当する。
