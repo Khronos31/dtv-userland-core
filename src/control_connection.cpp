@@ -463,6 +463,8 @@ Error build_status_shell(const ListResponse& canonical, const Context& context,
     out.snapshot = snapshot;
     out.scope = scope;
     out.enclosure = canonical.enclosure;
+    out.lnb_15v_enabled = Optional<bool>{};
+    out.card_inserted = Optional<bool>{};
     if (out.enclosure.present) {
         Identity& identity = out.enclosure.value.identity;
         identity.uniqueness = identity.serial_state == IdentitySerialState::absent
