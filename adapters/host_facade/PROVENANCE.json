@@ -1,0 +1,19 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/px4-userland",
+  "source_commit": "03d4f1ce0c5e39fb864cd845bfd069f891ab5932",
+  "source_paths": [
+    "userland/src/ipc.cpp",
+    "userland/tools/px4d_signals.cpp",
+    "userland/tools/px4d_windows_stdin.cpp",
+    "userland/src/windows/windows_sleep.cpp",
+    "userland/include/px4/ipc.h",
+    "userland/include/px4/error.h",
+    "userland/include/px4/transport.h",
+    "userland/include/px4/platform_sleep.h"
+  ],
+  "local_boundary_additions": [
+    "CardAtrBytes"
+  ]
+}

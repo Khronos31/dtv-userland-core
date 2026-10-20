@@ -85,6 +85,7 @@ struct TsClientProfile final {
     bool (*matches_serial_identity)(
         const dtv::userland::wire::ListResponse&,
         const dtv::userland::identity::ResolvedIdentity&) noexcept = nullptr;
+    bool frequency_system_optional = false;
 };
 
 Px4TsArguments parse_px4_ts_arguments(int argc,

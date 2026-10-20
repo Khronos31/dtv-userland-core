@@ -1,0 +1,30 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/px4-userland",
+  "source_commit": "03d4f1ce0c5e39fb864cd845bfd069f891ab5932",
+  "source_paths": [
+    "userland/src/control_server.cpp",
+    "userland/src/control_workers.cpp",
+    "userland/src/tuner_service.cpp",
+    "userland/src/card_service.cpp",
+    "userland/src/enclosure_context.cpp",
+    "userland/include/px4/control_server.h",
+    "userland/include/px4/tuner_service.h",
+    "userland/include/px4/card_service.h",
+    "userland/include/px4/enclosure_context.h"
+  ],
+  "merged_source_repository": "Khronos31/asicen-userland",
+  "merged_source_commit": "5501b03bec9d768f5c890eab0955f6ab125fbec4",
+  "merged_source_paths": [
+    "userland/src/control_server.cpp",
+    "userland/include/px4/tuner_service.h",
+    "userland/include/px4/card_service.h"
+  ],
+  "local_boundary_additions": [
+    "CardAtrBytes-only shared card API",
+    "bounded ControlExecutionLayout",
+    "shared descriptor-driven worker routing",
+    "private MSVC Win32 thread/mutex/condition pthread-subset binding for worker and enclosure cleanup in src/windows_pthread_compat.h (GPL-2.0-only); lane/queue/lifetime logic unchanged"
+  ]
+}

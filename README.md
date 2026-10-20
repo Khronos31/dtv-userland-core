@@ -1,6 +1,6 @@
 # DTV ユーザー空間共通基盤 (dtv-userland-core)
 
-本リポジトリは、各種 DTV ユーザー空間ドライバ・デーモン（`px4-userland`、`asicen-userland`、`pix-userland`、`siano-userland` など）で共有される C++17 共通基盤ライブラリを提供する。エラー/Result 型、ロギング、モックトランスポート、UDTV 1.0 ワイヤ層、デバイス識別子コーデック、選局解決器、制御接続ディスパッチャ、および内部互換エンジン群（受信機管理、カード所有権管理、パケットストリーム蓄積）で構成される。
+本リポジトリは、各種 DTV ユーザー空間ドライバ・デーモン（`px4-userland`、`asicen-userland`、`pix-userland`、`siano-userland` など）で共有される C++17 共通基盤ライブラリと、製品ビルド専用のoptional host adaptersを提供する。エラー/Result 型、ロギング、モックトランスポート、UDTV 1.0 ワイヤ層、デバイス識別子コーデック、選局解決器、制御接続ディスパッチャ、および内部互換エンジン群（受信機管理、カード所有権管理、パケットストリーム蓄積）で構成される。
 
 本ライブラリは独立したデーモン、ハードウェアトランスポート、完全なスマートカードプロトコルスタック、あるいは特定ハードウェアのアダプタそのものではない。各製品が固定のソースコミット（本仕様が基準とする C++ コード基盤コミット: `643b5af25aed20210ba45a30eed41ec3bbc3739c`、tree `667ae3c1db3268339d1fe795573eeedfe599ed7d`。ドキュメント統合や後続のクライアント統合等によってリポジトリの最新 HEAD は前進するため、コード基準点と動的な最新コミットは区別される）を参照し、ビルド時に静的ライブラリとしてリンクして利用する。
 
@@ -35,6 +35,21 @@
 
 - **スレッド依存性**: `dtv::receiver` および `dtv::capture` のみが `Threads::Threads`（C++11 スレッド・同期プリミティブ）をリンクする。
 - **キャプチャとレシーバの独立性**: `dtv::capture` は `dtv::receiver` に依存しない。そのため、受信機エンジンを無効化したキャプチャ単独（capture-only）の構成が可能である。
+
+### 1.3 製品ビルド用 optional GPL adapters (デフォルト OFF)
+
+以下のadapterは製品側のbuild treeで明示的に有効化して使います。いずれもGPL-2.0-onlyで、CoreのMIT install/export packageには含まれず、installもexportもしません。
+
+| Adapter | CMake option | License text / details |
+|---|---|---|
+| host control frontend (`dtv_userland_host_ctl`) | `DTV_USERLAND_BUILD_HOST_CTL=ON` | [README](adapters/host_ctl/README.md) / [COPYING](adapters/host_ctl/COPYING) |
+| host runtime (`dtv_userland_host_runtime`) | `DTV_USERLAND_BUILD_HOST_RUNTIME=ON` | [README](adapters/host_runtime/README.md) / [COPYING](adapters/host_runtime/COPYING) |
+| host TS consumer (`dtv_userland_host_ts`) | `DTV_USERLAND_BUILD_HOST_TS=ON` | [README](adapters/host_ts/README.md) / [COPYING](adapters/host_ts/COPYING) |
+| host facade (`dtv_userland_host_facade`) | `DTV_USERLAND_BUILD_HOST_FACADE=ON` | [README](adapters/host_facade/README.md) / [COPYING](adapters/host_facade/COPYING) |
+| host daemon (`dtv_userland_host_daemon`) | `DTV_USERLAND_BUILD_HOST_DAEMON=ON` | [README](adapters/host_daemon/README.md) / [COPYING](adapters/host_daemon/COPYING) |
+| Windows WinSCard (`dtv_windows_winscard_client`, DLL helper) | `DTV_USERLAND_BUILD_WINDOWS_WINSCARD=ON` | [README](adapters/windows_winscard/README.md) / [COPYING](adapters/windows_winscard/COPYING) |
+
+各adapterの由来・対象・build-tree境界は個別READMEに、engineの由来・除外範囲は[PROVENANCE.json](PROVENANCE.json)に記録されています。
 
 ---
 
@@ -153,7 +168,6 @@ CLI や設定ファイルから与えられるチャンネル文字列や周波�
 
 ## 4. ライセンスと出所の境界
 
-本共通基盤に含まれる承認済みの基本モジュール、ワイヤ層実装、および新規追加されたビルド・パッケージング・テスト・ドキュメントファイル群には、ルートの **MIT ライセンス**（SPDX-License-Identifier: MIT）が適用される。
+ルートの **MIT ライセンス**（SPDX-License-Identifier: MIT）は、MITとして記載された共通基盤の基本module、engineおよび該当ファイルに適用されます。通常のMIT package install/exportには上記GPL adaptersを含みません。
 
-このライセンス適用は、本リポジトリ内の承認済みソース範囲に限定され、各製品リポジトリ（`px4-userland`、`asicen-userland` 等）の GPL-2.0-only コード、未記載のソースファイル、サードパーティ製素材、あるいは将来の GPL アダプタを再ライセンスするものではない。
-各ファイルの詳細な出所、ハッシュ値、および除外範囲については [PROVENANCE.json](PROVENANCE.json) に記録されている。
+optional host adaptersはそれぞれのディレクトリにある`COPYING`に示す **GPL-2.0-only** で、個別READMEと[PROVENANCE.json](PROVENANCE.json)に由来を記録しています。これらのadapterを含む製品buildをMIT-onlyとみなさず、MIT対象の基本targetをGPLとして扱うものでもありません。各製品リポジトリ、未記載のsource file、サードパーティ製素材のlicenseはそれぞれの記載に従います。
