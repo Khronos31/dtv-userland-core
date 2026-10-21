@@ -24,6 +24,9 @@ enum class Error : std::uint8_t {
     CARD_REMOVED = 13,
     BUFFER_TOO_SMALL = 14,
     SLOW_CONSUMER = 15,
+    // Additive value for the bounded wire codecs: a well-formed record whose
+    // encoded size exceeds the control payload cap. Not used by the foundation.
+    RESOURCE_LIMIT = 17,
     INTERNAL = 255,
 };
 

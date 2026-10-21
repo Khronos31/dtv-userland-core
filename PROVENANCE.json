@@ -115,7 +115,9 @@
     ]
   },
   "wire": {
-    "method": "New independent implementation of the documented first wire subset; no PX4 wire source was copied or modified.",
-    "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request and ACQUIRE request/response. No typed HELLO response, later control opcodes, or full wire protocol."
+    "method": "New independent implementation of the documented common UDTV wire; no PX4 wire source was copied or modified.",
+    "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
+    "error_values_added": "RESOURCE_LIMIT = 17 was added additively for the control-payload cap. All pre-existing Error values and the one-byte size are unchanged.",
+    "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. No product payload, card/hardware sequence or vendor asset was copied."
   }
 }
