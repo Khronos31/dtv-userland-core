@@ -188,5 +188,16 @@
         "excluded_scope": "The Q3U4Runtime/SPEC product-specific comment at original lines 31-33, PX4 IPC enum and header dependencies, and all CardAtr/Native protocol/hardware interpretation. Snapshot values remain opaque and are only defaulted, copied, or returned."
       }
     ]
+  },
+  "json": {
+    "method": "New independent bounded STATUS JSON projection. The previous Core #13 implementation was consulted for size counting, JSON escaping and validation-before-write properties only; its public field map and fixture were not adopted.",
+    "authority": [
+      "agent-workspace design/core-json-next-increment-plan-20261022.md, accepted plan A",
+      "agent-workspace DECISIONS-20261021.md, STATUS public JSON approval",
+      "RC-INTEGRATION-CHECKPOINT-20261019.md, adopted JSON types and meanings",
+      "Core main StatusResponse layout after PR #29"
+    ],
+    "scope": "Pure C++17 StatusResponse-to-JSON size and encoding functions with canonical-context validation, byte-count preflight, bounded output and no allocation. No CLI, daemon, discovery scan aggregation, product backend, product pin or wire layout changes.",
+    "new_files": "include/dtv/userland/json.h, src/json.cpp, tests/status_json_tests.cpp, tests/status_json_consumer.py, tests/consumer/json/, and docs/json-status.md are independently written and carry MIT."
   }
 }
