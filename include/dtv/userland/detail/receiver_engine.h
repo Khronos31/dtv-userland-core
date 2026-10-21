@@ -252,6 +252,10 @@ public:
     bool configured() const noexcept { return configured_; }
 
     Result<AcquireResult> acquire(std::uint64_t client_id, ReceiverId receiver) noexcept;
+    // Releases a live lease identified by client_id and lease_id.  The adopted
+    // contract forbids reusing a lease_id within an epoch, so this synchronous
+    // teardown does not compare the internal ticket lease instance; that
+    // instance only guards queued or executing admitted tickets.
     Result<void> release(std::uint64_t client_id, std::uint64_t lease_id) noexcept;
     Result<void> tune(std::uint64_t client_id, const TuneRequest& request) noexcept;
     Result<void> start_stream(std::uint64_t client_id, std::uint64_t lease_id) noexcept;
@@ -272,11 +276,15 @@ public:
     Result<void> disconnect_client(std::uint64_t client_id) noexcept;
     Result<void> shutdown() noexcept;
 
-    // One-time strict capability setup.  It replaces the legacy virtual
-    // supports query with the supplied immutable table for admission.  It
-    // must list exactly the configured receiver slots, each supported in at
-    // least one system, with no duplicates; otherwise it fails and legacy
-    // mode is unchanged.  It performs no backend, clock, or ID-source call.
+    // Strict capability setup, intended to be called once before workers
+    // start.  It replaces the legacy virtual supports query with the supplied
+    // immutable table for admission.  It must list exactly the configured
+    // receiver slots, each supported in at least one system, with no
+    // duplicates; otherwise it fails and, if strict mode was not yet enabled,
+    // legacy mode is unchanged.  A successful call enables strict mode and
+    // later calls are outside this contract; the engine does not return to
+    // legacy mode after a success.  It performs no backend, clock, or
+    // ID-source call.
     Result<void> configure_strict_capabilities(const ReceiverCapability* capabilities,
                                                std::size_t count) noexcept;
     bool strict_capabilities_configured() const noexcept { return strict_enabled_; }
@@ -285,6 +293,10 @@ public:
     // takes the registry lock with try_lock only: contention returns BUSY
     // before any state change, and the caller must not wait.  It takes no
     // receiver lock and performs no backend, clock, ID-source, or worker call.
+    // The caller captures accepted_at_ms before queue submission in the same
+    // clock domain as the engine; admission stores it without reading the
+    // clock, and the admitted end-to-end budget starts from it, including lane
+    // wait when it is captured before submission.
     Result<AdmittedTune> try_admit_tune(std::uint64_t client_id,
                                         const TuneRequest& request,
                                         std::uint64_t accepted_at_ms) noexcept;
@@ -294,10 +306,15 @@ public:
     Result<void> execute_admitted_tune(const AdmittedTune& ticket) noexcept;
     // Aborts an admitted ticket that will never execute (publication or stop
     // failure after admission).  It keeps the advanced revision and clears
-    // the pending metadata exactly once, without hardware I/O.
+    // the pending metadata exactly once, without hardware I/O.  The error
+    // argument is currently diagnostic only: it is not returned or otherwise
+    // reflected in the result, which reports only whether the exact ticket
+    // was completed.
     Result<void> abort_unstarted_tune(const AdmittedTune& ticket, Error error) noexcept;
     // Synchronous logical-teardown invalidation of a pending admitted ticket.
-    // The receiver stays excluded until the existing hardware cleanup runs.
+    // It identifies the lease by client_id and lease_id, like release, and
+    // does not compare the internal ticket lease instance.  The receiver
+    // stays excluded until the existing hardware cleanup runs.
     Result<void> revoke_tune_ticket(std::uint64_t client_id,
                                     std::uint64_t lease_id) noexcept;
 
