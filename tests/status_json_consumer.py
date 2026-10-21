@@ -278,7 +278,17 @@ for code in (42, 256, 257):
     EXPECTED[f"unknown_error_{code}"] = expected
 examples_path = Path(__file__).parent / "fixtures" / "status_json_examples.json"
 examples = json.loads(examples_path.read_text(encoding="utf-8"), object_pairs_hook=unique_object)
-assert examples["source"] == {"path": "shared/examples/json-records.json", "sha256": "6faa56eb8c0d6ac45873ced1fa5c94ad30868e1edf9cc0f332fccb872034c575"}
+assert examples["source"] == {
+    "path": "shared/examples/json-records.json",
+    "sha256": "6faa56eb8c0d6ac45873ced1fa5c94ad30868e1edf9cc0f332fccb872034c575",
+    "derivation": {
+        "method": "manual_contract_alignment",
+        "changes": [
+            "descriptor.systems[] uses settled uppercase public labels",
+            "enclosure includes nullable lnb_15v_enabled and card_inserted fields",
+        ],
+    },
+}
 example_status = examples["documents"]
 EXPECTED["example_cardless_status"] = example_status["cardless_status_supported_but_unknown_cnr"]
 EXPECTED["example_receiver_scope"] = example_status["receiver_scope_not_empty_readers"]

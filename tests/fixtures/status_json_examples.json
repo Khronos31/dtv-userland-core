@@ -1,7 +1,14 @@
 {
   "source": {
     "path": "shared/examples/json-records.json",
-    "sha256": "6faa56eb8c0d6ac45873ced1fa5c94ad30868e1edf9cc0f332fccb872034c575"
+    "sha256": "6faa56eb8c0d6ac45873ced1fa5c94ad30868e1edf9cc0f332fccb872034c575",
+    "derivation": {
+      "method": "manual_contract_alignment",
+      "changes": [
+        "descriptor.systems[] uses settled uppercase public labels",
+        "enclosure includes nullable lnb_15v_enabled and card_inserted fields"
+      ]
+    }
   },
   "documents": {
     "cardless_status_supported_but_unknown_cnr": {
