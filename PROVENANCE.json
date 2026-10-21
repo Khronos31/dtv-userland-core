@@ -112,7 +112,17 @@
         "moved_scope": "The lifecycle algorithm at original lines 18-58 and 80-983: construction and shutdown on destruction, client and initial-system checks, lease lookup, lease and attachment ID allocation, acquire, release, lock polling, the tune sequence with power rollback and the post-lock settle arithmetic, stream start, attach with compensation, stop with final snapshot, stats, detach, both revoke forms, status, client cleanup, and shutdown.",
         "excluded_scope": "The px4_drv-referenced 340 ms terrestrial settle constant and its citation (11-14), which the product supplies through the backend seam; the PX4 wire request validation table valid_tune (59-78), whose per-request decision the product passes in the tune request; the fixed tune response payload construction (503-504)."
       }
-    ]
+    ],
+    "r2_extension": {
+      "method": "New independent strict admission and deadline implementation layered over the recorded R1 lifecycle; the legacy direct tune path keeps its original post-power sequence, and no product source was copied for this extension.",
+      "authority": [
+        "shared/design/common-api-contract.md sections 3 and 4",
+        "shared/implementation/receiver-r2-spec.md and receiver-r2-spec-review.md",
+        "PR #15 evaluation, review/core-pr15-evaluation-20261021.md"
+      ],
+      "scope": "Internal opt-in strict capabilities, callback-free metadata admission, an end-to-end tune budget measured from admission, cancellation-safe tickets, and token-free operation/tune metadata. No public v1 wire record, token exposure, product facade cutover, or backend change.",
+      "new_files": "tests/receiver_r2_tests.cpp is independently written and carries MIT."
+    }
   },
   "identity": {
     "method": "The selector, instance, USB descriptor and auto-identity codecs are a new independent implementation of the adopted byte representation. The only mechanical transfer is the neutral SHA-256 class, extracted under the standing independent-code policy; no selector/discovery/hardware source was copied.",

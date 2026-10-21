@@ -12,10 +12,12 @@
 // Internal compatibility engine for receiver leases, tuning, and stream
 // attachment.  It carries the existing PX4 TunerService lifecycle unchanged so
 // that product facades can share one implementation.  It is not the adopted
-// v1 receiver contract: tune timing starts after the receiver and power
-// preparation as before (no end-to-end deadline), frequencies are kHz, and
-// there are no public wire IDs, verification results, or JSON records.  These
-// declarations may change without notice and are not a stable API.
+// v1 receiver contract: the legacy direct tune path keeps its post-power
+// origin and enforces no end-to-end deadline, while strict mode after
+// configure_strict_capabilities enforces an end-to-end budget measured from
+// admission.  Frequencies are kHz, and there are no public wire IDs,
+// verification results, or JSON records.  These declarations may change
+// without notice and are not a stable API.
 namespace dtv::userland::detail {
 
 // Stable receiver identity chosen by the consumer.  It is independent of the
