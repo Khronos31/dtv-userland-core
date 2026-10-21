@@ -42,7 +42,9 @@
         },
         "limits": {
           "max_concurrent_streams": 1
-        }
+        },
+        "lnb_15v_enabled": null,
+        "card_inserted": null
       },
       "topology": {
         "state": "complete",
@@ -79,7 +81,7 @@
           "descriptor": {
             "id": "0",
             "systems": [
-              "isdb-t"
+              "ISDB-T"
             ],
             "binding": {
               "function_id": "0",
@@ -265,7 +267,9 @@
         },
         "limits": {
           "max_concurrent_streams": 1
-        }
+        },
+        "lnb_15v_enabled": null,
+        "card_inserted": null
       },
       "topology": {
         "state": "complete",
@@ -276,7 +280,7 @@
           "descriptor": {
             "id": "0",
             "systems": [
-              "isdb-t"
+              "ISDB-T"
             ],
             "binding": {
               "function_id": "0",

@@ -248,7 +248,7 @@ def expected_max_snapshot():
         "context": {"epoch": "00000000000000000000000000000000", "instance": control * 64, "state": "ready", "last_error": copy.deepcopy(error_unknown)},
         "snapshot": {"sequence": "18446744073709551615", "observed_at_ns": "7"},
         "scope": {"kind": "enclosure", "id": None},
-        "enclosure": {"id": "0", "model": {"id": control * 64, "name": control * 128}, "identity": {"serial": control * 512, "serial_state": "present", "uniqueness": "unknown"}, "limits": {"max_concurrent_streams": 32}},
+        "enclosure": {"id": "0", "model": {"id": control * 64, "name": control * 128}, "identity": {"serial": control * 512, "serial_state": "present", "uniqueness": "unknown"}, "limits": {"max_concurrent_streams": 32}, "lnb_15v_enabled": None, "card_inserted": None},
         "topology": {"state": "complete", "expected_function_count": 8},
         "usb_functions": functions, "receivers": receivers, "readers": readers,
     }
