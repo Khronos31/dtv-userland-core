@@ -8,22 +8,46 @@ unchanged during the call.
 
 ## Public field mapping
 
-| STATUS value | JSON representation |
+The emitted root fields are `schema`, `producer`, `context`, `snapshot`, `scope`, `enclosure`,
+and `topology`. `usb_functions`, `receivers`, and `readers` are included only when their
+corresponding optional collection is present.
+
+| Emitted path | JSON representation |
 | --- | --- |
-| `producer` | `product`, `version`, `core_version` strings; missing core version is `null` |
-| `context.epoch` | lowercase hexadecimal string; `instance` and `last_error` are nullable |
-| `context.state`, topology, receiver, operation, stream and card states | readable lowercase strings |
-| `snapshot.sequence`, monotonic timestamps, tune/stream revisions and counters | decimal strings, preserving all 64 bits |
-| scope enclosure/receiver/reader IDs, function/receiver/reader IDs and local IDs | JSON numbers |
-| enclosure model and serial | simple string or `null`; internal serial-state and uniqueness enums are omitted |
-| enclosure LNB and internal CARD observation | `lnb_15v_enabled` and `card_inserted`, each JSON boolean or `null` |
-| receiver broadcast systems | formal names such as `ISDB-T` and `ISDB-S` in an array |
-| USB function VID:PID | lowercase four-digit hexadecimal string such as `0511:084a` |
-| an error whose code is in the Core `Error` enum | its defined symbol in `code` |
-| an error whose code is outside that enum | `code: "UNKNOWN"` and the original numeric `numeric_code` |
+| `producer.product`, `producer.version`, `producer.core_version` | strings; an absent core version is `null` |
+| `context.epoch`, `context.instance`, `context.state`, `context.last_error` | lowercase hexadecimal epoch, nullable instance, readable state string, and nullable error |
+| `snapshot.sequence`, `snapshot.observed_at_ns` | decimal strings preserving all 64 bits |
+| `scope.kind`, `scope.id` | readable kind string; enclosure id is `null`, stream id is a decimal string, and receiver/reader ids are JSON numbers |
+| `enclosure.id`, `enclosure.model`, `enclosure.serial` | JSON number; model name string or `null`; serial string or `null` |
+| `enclosure.lnb_15v_enabled`, `enclosure.card_inserted` | JSON boolean or `null` |
+| `enclosure.limits.max_concurrent_streams` | JSON number or `null` |
+| `topology.state`, `topology.expected_function_count` | readable state string and JSON number or `null` |
+| `usb_functions[]` | objects with `id`, `usb`, `mode`, `location.usb_path`, `location.bus`, `location.address`, `serial`, `model`, `present`, and `last_error` |
+| `receivers[]` | objects with `descriptor`, `present`, `state`, `operation`, `leased`, `tune_revision`, `current_tune`, `last_successful_tune`, `stream`, `last_stream`, `measurements`, `statistics`, and `last_error` |
+| `receivers[].descriptor` | `receiver` number, `systems` array of formal names such as `ISDB-T` and `ISDB-S`, and nullable `binding` |
+| `receivers[].current_tune`, `receivers[].last_successful_tune` | nullable tune object; `selection.kind` is `auto`, `tsid`, or `slot`, and `selection.value` is omitted for `auto` |
+| `receivers[].stream`, `receivers[].last_stream` | nullable active/final stream object; active stream uses `phase` |
+| `receivers[].measurements`, `receivers[].statistics` | supported measurement objects and named counters; each collection reflects only entries represented by the typed STATUS value |
+| `readers[]` | objects with `descriptor`, `present`, `card`, `operation`, `handles_open`, `transaction_active`, and `last_error`; `card` contains `state`, `sampled_at_ns`, and `reason` |
+| error `code` within the Core `Error` enum | its defined symbol |
+| error `code` outside that enum | `code: "UNKNOWN"` and the original numeric `numeric_code` |
+
+Names such as `context`, `limits`, `measurements`, `statistics`, `tune.selection.kind`, and
+`stream.phase` are retained from the implementation's existing projection. Their presence here
+documents the emitted shape; it does not establish additional field semantics beyond the accepted
+STATUS decisions and values validated by Core.
+
+The public `model` value in STATUS and discovery JSON is the model **name only**, represented as a
+string or `null`; a model identifier is not emitted. The example name form is `"PX-Q3U4"`. This
+follows the accepted response 2.A / RC47 decision. `descriptor.capabilities` is not emitted;
+capability publication, including LNA information, is deferred for later investigation.
+
+`usb_functions[]` does not emit the internal `serial_state` or `identification_reason` fields.
+Those fields describe internal query/identification state and are not part of this projection.
 
 An absent optional string or observation is emitted as JSON `null`. Internal enclosure
-`IdentitySerialState` and `Uniqueness` are not public status vocabularies. `serial_unique` is a
+`IdentitySerialState`, `Uniqueness`, `UsbFunction::serial_state`, and
+`UsbFunction::identification_reason` are not public status vocabularies. `serial_unique` is a
 whole-scan discovery result and is not computed from one STATUS response. The enclosure CARD
 field is the internal observation; it is not derived from readers, and reader state stays under
 `readers[].card`. This projection does not build the `enclosures[].devices[].receivers[]`
