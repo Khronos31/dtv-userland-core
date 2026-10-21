@@ -84,10 +84,103 @@ bool valid_systems(Systems systems) noexcept
     return systems.mask != 0U && (systems.mask & ~0x03U) == 0U;
 }
 
+bool valid_status(DiscoveryEnclosureStatus status) noexcept
+{
+    return status <= DiscoveryEnclosureStatus::unknown;
+}
+
+bool valid_status(DiscoveryObservationStatus status) noexcept
+{
+    return status <= DiscoveryObservationStatus::unknown;
+}
+
+const char* enclosure_status_name(DiscoveryEnclosureStatus status) noexcept
+{
+    switch (status) {
+    case DiscoveryEnclosureStatus::ready: return "ready";
+    case DiscoveryEnclosureStatus::incomplete: return "incomplete";
+    case DiscoveryEnclosureStatus::duplicate: return "duplicate";
+    case DiscoveryEnclosureStatus::invalid_observation: return "invalid_observation";
+    case DiscoveryEnclosureStatus::unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+const char* observation_status_name(DiscoveryObservationStatus status) noexcept
+{
+    switch (status) {
+    case DiscoveryObservationStatus::usable: return "usable";
+    case DiscoveryObservationStatus::unsupported: return "unsupported";
+    case DiscoveryObservationStatus::invalid_serial: return "invalid_serial";
+    case DiscoveryObservationStatus::insufficient_speed: return "insufficient_speed";
+    case DiscoveryObservationStatus::invalid_topology: return "invalid_topology";
+    case DiscoveryObservationStatus::open_failed: return "open_failed";
+    case DiscoveryObservationStatus::unknown: return "unknown";
+    }
+    return "unknown";
+}
+
+bool valid_location(const DiscoveryUsbLocation& location) noexcept
+{
+    return !location.port.present ||
+        (location.port.value.length != 0U && valid_text(location.port.value));
+}
+
+void write_location(const DiscoveryUsbLocation& location, Writer& out) noexcept
+{
+    out.text(",\"bus\":");
+    if (location.bus.present) out.number(location.bus.value); else out.text("null");
+    out.text(",\"address\":");
+    if (location.address.present) out.number(location.address.value); else out.text("null");
+    out.text(",\"port\":");
+    if (location.port.present) out.string(location.port.value); else out.text("null");
+}
+
+void write_serial(const Optional<WString<detail::kMaxSerialBytes>>& serial,
+                  Writer& out) noexcept
+{
+    if (serial.present) out.string(serial.value); else out.text("null");
+}
+
 bool valid(const DiscoveryScan& value) noexcept
 {
     if (!valid_text(value.product) || !valid_text(value.version) ||
-        (value.enclosure_count != 0U && value.enclosures == nullptr)) return false;
+        (value.issue_count != 0U && value.issues == nullptr) ||
+        (value.enclosure_count != 0U && value.enclosures == nullptr) ||
+        (value.ungrouped_usb_device_count != 0U && value.ungrouped_usb_devices == nullptr)) return false;
+    for (std::size_t i = 0U; i < value.issue_count; ++i) {
+        if (!valid_text(value.issues[i].code) || value.issues[i].code.length == 0U ||
+            !valid_text(value.issues[i].detail)) return false;
+    }
+    for (std::size_t i = 0U; i < value.ungrouped_usb_device_count; ++i) {
+        const auto& observation = value.ungrouped_usb_devices[i];
+        if (!valid_status(observation.status) || !valid_location(observation.location) ||
+            (observation.serial.present && !valid_text(observation.serial.value)) ||
+            (observation.model.present && !valid_text(observation.model.value))) return false;
+    }
+    for (std::size_t i = 0U; i < value.enclosure_count; ++i) {
+        const auto& enclosure = value.enclosures[i];
+        if (!valid_status(enclosure.status) ||
+            (enclosure.device_count != 0U && enclosure.devices == nullptr) ||
+            (enclosure.candidate_count != 0U && enclosure.candidates == nullptr) ||
+            (enclosure.candidate_count != 0U &&
+             enclosure.status != DiscoveryEnclosureStatus::duplicate) ||
+            (enclosure.status == DiscoveryEnclosureStatus::duplicate &&
+             enclosure.device_count != 0U)) return false;
+        for (std::size_t j = 0U; j < enclosure.candidate_count; ++j) {
+            const auto& candidate = enclosure.candidates[j];
+            if (!valid_location(candidate.location) ||
+                (candidate.serial.present && !valid_text(candidate.serial.value))) return false;
+        }
+    }
+    for (std::size_t i = 0U; i < value.enclosure_count; ++i) {
+        const auto& enclosure = value.enclosures[i];
+        for (std::size_t j = 0U; j < enclosure.device_count; ++j) {
+            const auto& device = enclosure.devices[j];
+            if (!valid_location(device.location) ||
+                (device.serial.present && !valid_text(device.serial.value))) return false;
+        }
+    }
     for (std::size_t i = 0U; i < value.enclosure_count; ++i) {
         const auto& enclosure = value.enclosures[i];
         for (std::size_t before = 0U; before < i; ++before) {
@@ -168,9 +261,16 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
     out.text("{\"schema\":{\"name\":\"userland.discovery\",\"major\":1,\"minor\":0},\"producer\":{\"product\":");
     out.string(value.product);
     out.text(",\"version\":"); out.string(value.version);
-    out.text("},\"scan_complete\":");
+    out.text("},\"scan\":{\"complete\":");
     out.text(value.complete ? "true" : "false");
-    out.text(",\"enclosures\":[");
+    out.text(",\"issues\":[");
+    for (std::size_t i = 0U; i < value.issue_count; ++i) {
+        if (i != 0U) out.put(',');
+        out.text("{\"code\":"); out.string(value.issues[i].code);
+        out.text(",\"detail\":"); out.string(value.issues[i].detail);
+        out.put('}');
+    }
+    out.text("]},\"enclosures\":[");
     for (std::size_t i = 0U; i < value.enclosure_count; ++i) {
         if (i != 0U) out.put(',');
         const auto& enclosure = value.enclosures[i];
@@ -183,6 +283,7 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
         if (!enclosure.serial.present) out.text("null");
         else if (serial_duplicate(value, i)) out.text("false");
         else out.text(value.complete ? "true" : "null");
+        out.text(",\"status\":\""); out.text(enclosure_status_name(enclosure.status)); out.put('"');
         out.text(",\"lnb_15v_supported\":");
         if (enclosure.lnb_15v_supported.present)
             out.text(enclosure.lnb_15v_supported.value ? "true" : "false");
@@ -208,6 +309,8 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
             out.put(':');
             for (int shift = 12; shift >= 0; shift -= 4) out.put(hex[(device.pid >> shift) & 0x0fU]);
             out.put('"');
+            out.text(",\"serial\":"); write_serial(device.serial, out);
+            write_location(device.location, out);
             if (device.receivers_known) {
                 out.text(",\"receivers\":[");
                 for (std::size_t k = 0U; k < device.receiver_count; ++k) {
@@ -226,7 +329,33 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
             }
             out.put('}');
         }
+        out.text("],\"candidates\":[");
+        for (std::size_t j = 0U; j < enclosure.candidate_count; ++j) {
+            if (j != 0U) out.put(',');
+            const auto& candidate = enclosure.candidates[j];
+            out.text("{\"device\":"); out.number(candidate.device);
+            out.text(",\"serial\":"); write_serial(candidate.serial, out);
+            write_location(candidate.location, out);
+            out.put('}');
+        }
         out.text("]}");
+    }
+    out.text("],\"ungrouped_usb_devices\":[");
+    for (std::size_t i = 0U; i < value.ungrouped_usb_device_count; ++i) {
+        if (i != 0U) out.put(',');
+        const auto& observation = value.ungrouped_usb_devices[i];
+        out.text("{\"serial\":"); write_serial(observation.serial, out);
+        out.text(",\"model\":");
+        if (observation.model.present) out.string(observation.model.value); else out.text("null");
+        out.text(",\"usb\":\"");
+        static constexpr char hex[] = "0123456789abcdef";
+        for (int shift = 12; shift >= 0; shift -= 4) out.put(hex[(observation.vid >> shift) & 0x0fU]);
+        out.put(':');
+        for (int shift = 12; shift >= 0; shift -= 4) out.put(hex[(observation.pid >> shift) & 0x0fU]);
+        out.put('"');
+        out.text(",\"status\":\""); out.text(observation_status_name(observation.status)); out.put('"');
+        write_location(observation.location, out);
+        out.put('}');
     }
     out.text("]}\n");
 }

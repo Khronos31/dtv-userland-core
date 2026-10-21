@@ -11,21 +11,28 @@ The output keeps the physical hierarchy:
 {
   "schema": {"name": "userland.discovery", "major": 1, "minor": 0},
   "producer": {"product": "px4", "version": "1.0.0"},
-  "scan_complete": true,
+  "scan": {"complete": true, "issues": []},
   "enclosures": [{
     "enclosure": 1,
     "model": "PX-Q3U4",
     "serial": "serial-value",
     "serial_unique": true,
+    "status": "ready",
     "lnb_15v_supported": null,
     "readers": [{"reader": 0, "device": 2}],
     "devices": [{
       "device": 2,
       "usb": "0511:084a",
+      "serial": "usb-serial",
+      "bus": 1,
+      "address": 6,
+      "port": "1-2.3",
       "receivers": [{"receiver": 3, "device": 2, "local": 0,
                      "systems": ["ISDB-T", "ISDB-S"]}]
-    }]
-  }]
+    }],
+    "candidates": []
+  }],
+  "ungrouped_usb_devices": []
 }
 ```
 
@@ -40,6 +47,18 @@ incomplete and no duplicate was observed. Matching serials on distinct
 enclosures are false even in an incomplete scan. A non-duplicate observed
 serial is true only after a complete scan. This describes uniqueness among
 enclosures in this scan, not a global guarantee.
+
+scan.complete and scan.issues describe enumeration of the whole scan.
+Issues carry a stable code and human-readable detail. Enclosure status
+describes grouping and is independent: ready, incomplete, duplicate, or
+invalid_observation (or unknown when the adapter cannot classify it).
+candidates preserves alternative USB observations for
+a duplicate enclosure; those observations are not asserted as its child
+devices. Each candidate carries its device slot, nullable serial and nullable
+bus/address/port. USB observations that cannot be assigned to an enclosure
+remain in ungrouped_usb_devices, with nullable serial/model/location, VID:PID
+and a status of usable, unsupported, invalid_serial, insufficient_speed,
+invalid_topology, open_failed, or unknown.
 
 `lnb_15v_supported` is the enclosure's static LNB capability; it is `null`
 when unknown and is not the current `lnb_15v_enabled` status. `readers` is
