@@ -224,42 +224,44 @@ Result<InstanceText> canonicalize_instance(std::string_view text) noexcept
     }
     InstanceText value;
     value.length = static_cast<std::uint16_t>(text.size());
+    // Instance spelling is part of the product contract, so the stored token
+    // keeps its case. Only this comparison copy is folded for the syntax and
+    // reserved-name checks.
+    std::array<char, detail::kMaxInstanceBytes> folded{};
     for (std::size_t i = 0U; i < text.size(); ++i) {
         char c = text[i];
         if (static_cast<unsigned char>(c) >= 0x80U) {
             return Result<InstanceText>::failure(Error::INVALID_ARGUMENT);
         }
-        if (c >= 'A' && c <= 'Z') {
-            c = static_cast<char>(c + 32);
-        }
         value.bytes[i] = c;
+        folded[i] = (c >= 'A' && c <= 'Z') ? static_cast<char>(c + 32) : c;
     }
-    if (!ascii_alnum(value.bytes[0])) {
+    if (!ascii_alnum(folded[0])) {
         return Result<InstanceText>::failure(Error::INVALID_ARGUMENT);
     }
     for (std::size_t i = 1U; i < text.size(); ++i) {
-        const char c = value.bytes[i];
+        const char c = folded[i];
         if (!(ascii_alnum(c) || c == '_' || c == '.' || c == '-')) {
             return Result<InstanceText>::failure(Error::INVALID_ARGUMENT);
         }
     }
-    if (value.bytes[text.size() - 1U] == '.') {
+    if (folded[text.size() - 1U] == '.') {
         return Result<InstanceText>::failure(Error::INVALID_ARGUMENT);
     }
     std::size_t stem = 0U;
-    while (stem < text.size() && value.bytes[stem] != '.') {
+    while (stem < text.size() && folded[stem] != '.') {
         ++stem;
     }
     const auto stem_equals = [&](const char* word, std::size_t length) {
-        return stem == length && std::memcmp(value.bytes.data(), word, length) == 0;
+        return stem == length && std::memcmp(folded.data(), word, length) == 0;
     };
     const bool reserved_word =
         stem_equals("con", 3U) || stem_equals("prn", 3U) || stem_equals("aux", 3U) ||
         stem_equals("nul", 3U);
     const bool reserved_device =
-        stem == 4U && (std::memcmp(value.bytes.data(), "com", 3U) == 0 ||
-                       std::memcmp(value.bytes.data(), "lpt", 3U) == 0) &&
-        value.bytes[3] >= '1' && value.bytes[3] <= '9';
+        stem == 4U && (std::memcmp(folded.data(), "com", 3U) == 0 ||
+                       std::memcmp(folded.data(), "lpt", 3U) == 0) &&
+        folded[3] >= '1' && folded[3] <= '9';
     if (reserved_word || reserved_device) {
         return Result<InstanceText>::failure(Error::INVALID_ARGUMENT);
     }

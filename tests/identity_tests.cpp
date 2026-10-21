@@ -205,9 +205,19 @@ void test_usb_selector()
 void test_instance()
 {
     CHECK(id::canonicalize_instance("livingroom").has_value());
+    // Instance case is preserved; these are three distinct tokens.
     const auto upper = id::canonicalize_instance("RoomA");
     CHECK(upper.has_value() && upper.value().length == 5U &&
-          std::string(upper.value().bytes.data(), upper.value().length) == "rooma");
+          std::string(upper.value().bytes.data(), upper.value().length) == "RoomA");
+    const auto lower = id::canonicalize_instance("rooma");
+    CHECK(lower.has_value() && lower.value().length == 5U &&
+          std::string(lower.value().bytes.data(), lower.value().length) == "rooma");
+    const auto all_upper = id::canonicalize_instance("ROOMA");
+    CHECK(all_upper.has_value() && all_upper.value().length == 5U &&
+          std::string(all_upper.value().bytes.data(), all_upper.value().length) == "ROOMA");
+    const auto dotted = id::canonicalize_instance("LivingRoom.1");
+    CHECK(dotted.has_value() && dotted.value().length == 12U &&
+          std::string(dotted.value().bytes.data(), dotted.value().length) == "LivingRoom.1");
     CHECK(id::canonicalize_instance("a.b-c_d1").has_value());
     CHECK(id::canonicalize_instance("a" + std::string(63U, 'b')).has_value());   // 64
     CHECK(id::canonicalize_instance("a" + std::string(64U, 'b')).error() == Error::INVALID_ARGUMENT);

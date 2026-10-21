@@ -24,8 +24,12 @@ Parsing proves syntax only. It never proves enclosure grouping or OS location ex
 ## Instance
 
 `canonicalize_instance` accepts 1..64 ASCII characters, first alphanumeric, rest
-alphanumeric/underscore/dot/hyphen, lowercased for canonical use on every OS. It rejects a
-terminal dot and the reserved first-dot stems `con/prn/aux/nul/com1..com9/lpt1..lpt9`.
+alphanumeric/underscore/dot/hyphen, and returns that spelling unchanged. Case is preserved:
+`RoomA`, `rooma` and `ROOMA` are distinct instance tokens, because a product's adopted instance
+namespace may be case-sensitive. Lowercasing is not an adopted cross-OS rule; a product that wants
+case-insensitive collision detection keeps that as a separate comparison key in its adapter. The
+function rejects a terminal dot and, matched case-insensitively, the reserved first-dot stems
+`con/prn/aux/nul/com1..com9/lpt1..lpt9`.
 
 ## Descriptors
 

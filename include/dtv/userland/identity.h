@@ -71,10 +71,11 @@ struct Selector final {
 // proves syntax only: it never proves enclosure grouping or OS presence.
 Result<Selector> parse_device_selector(std::string_view text) noexcept;
 
-// Canonicalizes a connection instance token: 1..64 ASCII characters, first
-// alphanumeric, rest alphanumeric/underscore/dot/hyphen, lowercased. Rejects a
-// terminal dot and the reserved first-dot stems con/prn/aux/nul/com1..com9/
-// lpt1..lpt9 on every OS.
+// Validates a connection instance token: 1..64 ASCII characters, first
+// alphanumeric, rest alphanumeric/underscore/dot/hyphen. The input spelling is
+// returned unchanged; case is preserved and is part of the product instance
+// namespace. Rejects a terminal dot and, matched case-insensitively, the
+// reserved first-dot stems con/prn/aux/nul/com1..com9/lpt1..lpt9 on every OS.
 Result<InstanceText> canonicalize_instance(std::string_view text) noexcept;
 
 // First LANGID of a validated LANGID table descriptor (bLength == span, type 3,

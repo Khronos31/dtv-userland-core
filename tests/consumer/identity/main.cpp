@@ -36,7 +36,7 @@ int main()
                     std::string_view(instance.value().bytes.data(), instance.value().length) ==
                         "auto-74f46abcd76c5d254051bb810ffc81ff" &&
                     canonical && canonical.value().length == 5U &&
-                    std::memcmp(canonical.value().bytes.data(), "rooma", 5U) == 0 && decoded &&
+                    std::memcmp(canonical.value().bytes.data(), "RoomA", 5U) == 0 && decoded &&
                     std::string(decoded.value().bytes.data(), decoded.value().length) == "Hi";
     return ok ? 0 : 1;
 }
