@@ -18,6 +18,9 @@ is not connected to any product client, daemon, or IPC endpoint.
 | `arr<T,N>` | `u16` count + elements, at most `N` |
 | `opt<T>` | `u8` tag (0 absent / 1 present) + value when present |
 
+`Model` is encoded as `str[128] name`. There is no wire `id` field. In the STATUS
+enclosure and LIST/STATUS function records, the optional Model tag still precedes this value.
+
 Every record is stored in explicit fixed-size storage (`WString`, `BBytes`, `BArray`,
 `Optional`); nothing allocates and no host struct is copied to or from the wire. The one
 exception is `TsData`, which aliases the packet bytes in the input view instead of storing a
@@ -35,7 +38,7 @@ Decoders require the exact payload size. Within a record:
 - `RESOURCE_LIMIT`: a well-formed record whose encoded size would exceed `kMaxControlPayload`
   (65,536). It is returned before any byte is written and is distinct from `BUFFER_TOO_SMALL`,
   which means the caller's own buffer is too short. With the current caps every legal record fits
-  under the control cap (the fully populated maximum STATUS is 42,350 bytes, including both
+  under the control cap (the fully populated maximum STATUS is 41,756 bytes, including both
   enclosure observation optionals present); the guard is kept
   for future layouts.
 - Encoders return `INVALID_ARGUMENT` for any invalid value and `BUFFER_TOO_SMALL` for a short
@@ -53,9 +56,12 @@ card observation and is not derived by aggregating reader states. External reade
 remain in their reader records.
 
 The envelope version remains UDTV 1.0. This record layout is supported only between daemon and
-client components from the same release. Mixed-release STATUS layouts, including the earlier
-main layout without these two optional fields, are unsupported; the decoder retains its exact-size
-and strict optional-tag checks.
+client components from the same release. The `Model` record in this revision is name-only; its
+bytes differ from the earlier development series at Core `af82b7a`, which encoded both `id` and
+`name`. This does not assert that the complete record layout matches that development series.
+Mixed-release STATUS layouts, including the earlier main layout without the two enclosure
+observation optionals, are unsupported; the decoder retains its exact-size and strict optional-tag
+checks.
 
 ## Validation split
 

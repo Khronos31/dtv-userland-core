@@ -23,6 +23,9 @@ int main()
     status.producer.version = text<64>("1.0.0");
     status.context.state = w::ContextState::starting;
     status.scope.kind = w::ScopeKind::enclosure;
+    status.enclosure.present = true;
+    status.enclosure.value.model.present = true;
+    status.enclosure.value.model.value.name = text<128>("PX-Q3U4");
     status.topology.state = w::TopologyState::unknown;
     status.functions.present = true;
 

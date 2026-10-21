@@ -232,7 +232,6 @@ struct Producer final {
 };
 
 struct Model final {
-    WString<64> id;
     WString<128> name;
 };
 

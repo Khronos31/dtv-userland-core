@@ -11,6 +11,7 @@ assert document["schema"] == {"name": "userland.status", "major": 1, "minor": 0}
 assert isinstance(document["snapshot"]["sequence"], str)
 assert isinstance(document["scope"]["id"], type(None))
 assert isinstance(document["enclosure"]["id"], int)
+assert document["enclosure"]["model"] == "PX-Q3U4"
 assert isinstance(document["enclosure"]["lnb_15v_enabled"], bool)
 assert isinstance(document["enclosure"]["card_inserted"], bool)
 assert document["receivers"][0]["descriptor"]["receiver"] == 0

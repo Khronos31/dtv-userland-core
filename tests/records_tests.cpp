@@ -799,33 +799,34 @@ void test_strings_and_malformed()
     CHECK(w::decode_list_request(ByteView{out.data(), 15U}).error() == Error::PROTOCOL_ERROR);
     CHECK(w::decode_list_request(ByteView{nullptr, 16U}).error() == Error::INVALID_ARGUMENT);
 
-    // Strings: over cap, embedded NUL and invalid UTF-8 are rejected.
+    // Model names: over cap, embedded NUL and invalid UTF-8 are rejected.
     w::Model model;
-    model.id.length = 65U;  // cap is 64
+    model.name.length = 129U;  // cap is 128
     CHECK(w::encode_model(model, mutable_view(out)).error() == Error::INVALID_ARGUMENT);
-    model.id.length = 3U;
-    model.id.bytes[0] = 'a';
-    model.id.bytes[1] = '\0';
-    model.id.bytes[2] = 'b';
+    model.name.length = 3U;
+    model.name.bytes[0] = 'a';
+    model.name.bytes[1] = '\0';
+    model.name.bytes[2] = 'b';
     CHECK(w::encode_model(model, mutable_view(out)).error() == Error::INVALID_ARGUMENT);
-    model.id.bytes[0] = static_cast<char>(0xc3);
-    model.id.bytes[1] = static_cast<char>(0x28);
-    model.id.bytes[2] = 'b';
+    model.name.bytes[0] = static_cast<char>(0xc3);
+    model.name.bytes[1] = static_cast<char>(0x28);
+    model.name.bytes[2] = 'b';
     CHECK(w::encode_model(model, mutable_view(out)).error() == Error::INVALID_ARGUMENT);
     // A valid two-byte UTF-8 sequence (U+3042) is accepted.
-    model.id.length = 3U;
-    model.id.bytes[0] = static_cast<char>(0xe3);
-    model.id.bytes[1] = static_cast<char>(0x81);
-    model.id.bytes[2] = static_cast<char>(0x82);
-    model.name = make_str<128>("name");
+    model.name.length = 3U;
+    model.name.bytes[0] = static_cast<char>(0xe3);
+    model.name.bytes[1] = static_cast<char>(0x81);
+    model.name.bytes[2] = static_cast<char>(0x82);
     const auto model_written = w::encode_model(model, mutable_view(out));
-    CHECK(model_written.has_value());
+    const std::array<std::uint8_t, 5> model_golden = {0x03, 0x00, 0xe3, 0x81, 0x82};
+    CHECK(model_written.has_value() && model_written.value() == model_golden.size());
+    CHECK(equals(out.data(), model_golden.size(), model_golden));
     const auto model_decoded = w::decode_model(ByteView{out.data(), model_written.value()});
-    CHECK(model_decoded.has_value() && model_decoded.value().id.length == 3U);
+    CHECK(model_decoded.has_value() && model_decoded.value().name.length == 3U);
 
     // Truncated embedded string inside a record.
     std::array<std::uint8_t, 32> truncated{};
-    truncated[0] = 0x10U;  // declared id length 16 with only a few bytes left
+    truncated[0] = 0x10U;  // declared name length 16 with only a few bytes left
     CHECK(w::decode_model(view(truncated)).error() == Error::PROTOCOL_ERROR);
 }
 
@@ -846,6 +847,22 @@ void test_arrays_and_caps()
     std::vector<std::uint8_t> out(70000);
     const auto written = w::encode_list_response(list, MutableByteView{out.data(), out.size()});
     CHECK(written.has_value() && written.value() <= w::kMaxControlPayload);
+    const std::size_t list_without_model = written.value();
+    list.functions.items[0].model.present = true;
+    list.functions.items[0].model.value.name = make_str<128>("PX-Q3U4");
+    const auto list_with_model = w::encode_list_response(
+        list, MutableByteView{out.data(), out.size()});
+    CHECK(list_with_model.has_value() && list_with_model.value() == list_without_model + 9U);
+    const std::array<std::uint8_t, 10> model_segment = {
+        0x01, 0x07, 0x00, 'P', 'X', '-', 'Q', '3', 'U', '4'};
+    CHECK(bytes_contain(out.data(), list_with_model.value(), model_segment.data(),
+                        model_segment.size()));
+    const auto list_decoded = w::decode_list_response(ByteView{out.data(), list_with_model.value()});
+    CHECK(list_decoded.has_value() && list_decoded.value().functions.items[0].model.present);
+    CHECK(list_decoded.has_value() &&
+          list_decoded.value().functions.items[0].model.value.name.length == 7U &&
+          std::memcmp(list_decoded.value().functions.items[0].model.value.name.bytes.data(),
+                      "PX-Q3U4", 7U) == 0);
     list.functions.count = 9U;
     CHECK(w::encode_list_response(list, MutableByteView{out.data(), out.size()}).error() ==
           Error::INVALID_ARGUMENT);
@@ -1383,7 +1400,6 @@ w::UsbFunction max_usb_function(std::uint16_t id)
     function.serial.present = true;
     function.serial.value = fill_str<512>('s');
     function.model.present = true;
-    function.model.value.id = fill_str<64>('m');
     function.model.value.name = fill_str<128>('n');
     function.identification_reason = w::IdentificationReason::none;
     function.present = true;
@@ -1450,6 +1466,27 @@ void test_status_golden_and_aggregate()
     // A caller comment is not enough: without a canonical context this fails.
     const w::StatusContext none;
     CHECK(w::validate_status_response(decoded.value(), none) == Error::INVALID_ARGUMENT);
+
+    w::StatusResponse modeled_status = base_status();
+    modeled_status.enclosure.present = true;
+    modeled_status.enclosure.value.model.present = true;
+    modeled_status.enclosure.value.model.value.name = make_str<128>("PX-Q3U4");
+    std::vector<std::uint8_t> modeled_bytes(70000U);
+    const auto modeled_written = w::encode_status_response(
+        modeled_status, MutableByteView{modeled_bytes.data(), modeled_bytes.size()});
+    CHECK(modeled_written.has_value() && modeled_written.value() == expected.size() + 16U);
+    const std::array<std::uint8_t, 10> model_segment = {
+        0x01, 0x07, 0x00, 'P', 'X', '-', 'Q', '3', 'U', '4'};
+    CHECK(bytes_contain(modeled_bytes.data(), modeled_written.value(), model_segment.data(),
+                        model_segment.size()));
+    const auto modeled_decoded = w::decode_status_response(
+        ByteView{modeled_bytes.data(), modeled_written.value()});
+    CHECK(modeled_decoded.has_value() && modeled_decoded.value().enclosure.value.model.present);
+    CHECK(modeled_decoded.has_value() &&
+          modeled_decoded.value().enclosure.value.model.value.name.length == 7U &&
+          std::memcmp(
+              modeled_decoded.value().enclosure.value.model.value.name.bytes.data(), "PX-Q3U4",
+              7U) == 0);
 
     auto check_enclosure_observations = [&](bool with_enclosure, bool lnb_present,
                                             bool lnb_enabled, bool card_present,
@@ -1750,7 +1787,6 @@ void test_max_populated_status()
     status.enclosure.present = true;
     status.enclosure.value.id = 0U;
     status.enclosure.value.model.present = true;
-    status.enclosure.value.model.value.id = fill_str<64>('m');
     status.enclosure.value.model.value.name = fill_str<128>('n');
     status.enclosure.value.identity.serial_state = w::IdentitySerialState::present;
     status.enclosure.value.identity.serial.present = true;
@@ -1858,13 +1894,13 @@ void test_max_populated_status()
     }
 
     // Independent size computation: the plain sum of the legal field maxima.
-    // producer 167 + context 381 + snapshot 16 + scope 9 + enclosure 720 +
-    // LNB/CARD optional tags and values 4 + topology 4 + functions (3 + 8*1090) +
+    // producer 167 + context 381 + snapshot 16 + scope 9 + enclosure 654 +
+    // LNB/CARD optional tags and values 4 + topology 4 + functions (3 + 8*1024) +
     // receivers (3 + 32*930) +
-    // readers (3 + 8*320) = 42350. Each receiver carries three valid long
+    // readers (3 + 8*320) = 41756. Each receiver carries three valid long
     // measurements (11 + 14 + 14) and long counters, so the signal metric is the
     // valid form, not the two-byte unknown form.
-    const std::size_t expected_size = 42350U;
+    const std::size_t expected_size = 41756U;
     CHECK(expected_size <= w::kMaxControlPayload);
 
     std::vector<std::uint8_t> out(70000);
