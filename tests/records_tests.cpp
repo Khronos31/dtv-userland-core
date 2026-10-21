@@ -1740,6 +1740,10 @@ void test_max_populated_status()
     status.context.last_error.value.detail = fill_str<256>('d');
     status.snapshot.observed_at_ns = 1000U;
     status.scope.kind = w::ScopeKind::enclosure;
+    status.lnb_15v_enabled.present = true;
+    status.lnb_15v_enabled.value = true;
+    status.card_inserted.present = true;
+    status.card_inserted.value = true;
     status.topology.state = w::TopologyState::complete;
     status.topology.expected_function_count.present = true;
     status.topology.expected_function_count.value = 8U;
@@ -1855,12 +1859,12 @@ void test_max_populated_status()
 
     // Independent size computation: the plain sum of the legal field maxima.
     // producer 167 + context 381 + snapshot 16 + scope 9 + enclosure 720 +
-    // LNB/CARD optional tags 2 + topology 4 + functions (3 + 8*1090) +
+    // LNB/CARD optional tags and values 4 + topology 4 + functions (3 + 8*1090) +
     // receivers (3 + 32*930) +
-    // readers (3 + 8*320) = 42348. Each receiver carries three valid long
+    // readers (3 + 8*320) = 42350. Each receiver carries three valid long
     // measurements (11 + 14 + 14) and long counters, so the signal metric is the
     // valid form, not the two-byte unknown form.
-    const std::size_t expected_size = 42348U;
+    const std::size_t expected_size = 42350U;
     CHECK(expected_size <= w::kMaxControlPayload);
 
     std::vector<std::uint8_t> out(70000);
