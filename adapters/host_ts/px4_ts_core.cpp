@@ -1338,6 +1338,15 @@ static Result<Px4TsRunResult> run_wire_profile(
     std::string selected_instance = arguments.instance;
     wire::StatusSnapshot discovered_snapshot{};
     bool has_discovered_snapshot = false;
+    // The daemon and host_ctl select the same runtime root when --runtime-dir
+    // is omitted; a product client with an explicit --instance must not skip
+    // that selection.
+    if (arguments.product_cli && !arguments.instance.empty() &&
+        selected_runtime_directory.empty()) {
+        const auto candidates = client_runtime_roots();
+        if (!candidates) return Result<Px4TsRunResult>::failure(candidates.error());
+        selected_runtime_directory.assign(candidates.value().paths[0].data());
+    }
     if (arguments.product_cli && arguments.instance.empty()) {
         ipc::posix::RuntimeRootCandidates roots{};
         if (!arguments.runtime_directory.empty()) {

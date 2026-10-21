@@ -33,7 +33,7 @@ def expected_primary():
         }],
         "receivers": [{
             "descriptor": {
-                "id": "0", "systems": ["isdb-t"], "binding": None,
+                "id": "0", "systems": ["ISDB-T"], "binding": None,
                 "capabilities": {"ts": {"scope": "multiplex", "pid_filter": None}, "controls": {}, "measurements": {"lock": {"unit": "boolean"}}},
             },
             "present": True, "state": "streaming", "operation": "idle", "leased": True,
@@ -79,7 +79,7 @@ def expected_active_stream():
     expected.pop("readers")
     receiver = expected["receivers"][0]
     receiver["descriptor"] = {
-        "id": "0", "systems": ["isdb-t", "isdb-s"], "binding": None,
+        "id": "0", "systems": ["ISDB-T", "ISDB-S"], "binding": None,
         "capabilities": {
             "ts": {"scope": "multiplex", "pid_filter": None},
             "controls": {"lna": {"values": [False, True], "default_by_system": {"isdb-t": False, "isdb-s": True}}, "lnb_voltage": {"values": [0, 15]}},
@@ -122,7 +122,7 @@ def expected_empty_receiver():
     expected.pop("usb_functions")
     expected.pop("readers")
     receiver = expected["receivers"][0]
-    receiver["descriptor"]["systems"] = ["isdb-t", "isdb-s"]
+    receiver["descriptor"]["systems"] = ["ISDB-T", "ISDB-S"]
     receiver["descriptor"]["capabilities"]["controls"] = {"lna": {"values": [False, True], "default_by_system": {"isdb-t": False, "isdb-s": None}}}
     receiver["descriptor"]["capabilities"]["measurements"] = {}
     receiver["measurements"] = {}
@@ -188,7 +188,7 @@ def expected_max_snapshot():
     control = "\x01"
     error_unknown = max_error("UNKNOWN", control * 32, control * 256, 4294967295)
     receiver_descriptor = {
-        "id": None, "systems": ["isdb-t", "isdb-s"], "binding": None,
+        "id": None, "systems": ["ISDB-T", "ISDB-S"], "binding": None,
         "capabilities": {
             "ts": {"scope": "pid_subset", "pid_filter": {"max_pids": 8192}},
             "controls": {"lna": {"values": [False, True], "default_by_system": {"isdb-t": False, "isdb-s": True}}, "lnb_voltage": {"values": [0, 15]}},

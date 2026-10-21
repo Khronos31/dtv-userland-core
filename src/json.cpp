@@ -160,7 +160,7 @@ bool capabilities(Writer& w,const Capabilities& v) noexcept
 bool receiver_descriptor(Writer& w,const ReceiverDescriptor& v) noexcept
 {
     if(!w.ch('{')||!key(w,"id")||!w.quoted_number(v.id)||!w.ch(',')||!key(w,"systems")||!w.ch('['))return false;
-    bool comma=false;if((v.systems.mask&1U)!=0U){if(!w.text("\"isdb-t\""))return false;comma=true;}if((v.systems.mask&2U)!=0U){if(comma&&!w.ch(','))return false;if(!w.text("\"isdb-s\""))return false;}
+    bool comma=false;if((v.systems.mask&1U)!=0U){if(!w.text("\"ISDB-T\""))return false;comma=true;}if((v.systems.mask&2U)!=0U){if(comma&&!w.ch(','))return false;if(!w.text("\"ISDB-S\""))return false;}
     return w.ch(']')&&w.ch(',')&&key(w,"binding")&&binding(w,v.binding)&&w.ch(',')&&key(w,"capabilities")&&capabilities(w,v.capabilities)&&w.ch('}');
 }
 bool reader_descriptor(Writer& w,const ReaderDescriptor& v) noexcept
