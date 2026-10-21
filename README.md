@@ -15,7 +15,7 @@
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
-コア側のターゲット（`dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、`dtv::card`）は例外および RTTI を使用せずにコンパイルされ、OS や USB への依存を持たない。オプショナルな `dtv::receiver` のみスレッド（Threads）にリンクする。
+実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。コア側の各ターゲットは OS や USB への依存を持たない（オプショナルな `dtv::receiver` のみスレッド（Threads）にリンクする）。
 
 外部向けの公開契約は ctl CLI および JSON であり、ワイヤプロトコルは同一リリース内の内部通信に限定される。
 
@@ -78,7 +78,7 @@ target_link_libraries(my_consumer PRIVATE
 )
 ```
 
-オプショナルな内部エンジンを利用する場合は `COMPONENTS` を指定する。
+オプショナルな内部エンジンを利用する場合は `COMPONENTS` を指定する。なお、consumer が `COMPONENTS receiver` や `card` を要求する場合、インストール元（ライブラリ側）のビルド時にもそれぞれ `DTV_USERLAND_BUILD_RECEIVER=ON`、`DTV_USERLAND_BUILD_CARD=ON` が指定されてインストールされている必要がある。
 
 ```cmake
 # receiver エンジンを利用する場合（Threads が自動検出される）
@@ -90,6 +90,15 @@ find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS card)
 target_link_libraries(my_consumer PRIVATE dtv::card)
 ```
 
+### 利用側のビルド手順
+
+任意の prefix へインストールしたパッケージを利用する場合、configure 時に `CMAKE_PREFIX_PATH` でインストール先を指定する。
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/path/to/install
+cmake --build build
+```
+
 ## 各コンポーネントの詳細
 
 ### 型付きワイヤペイロード (`dtv::wire`)
@@ -99,9 +108,9 @@ HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベン
 
 ### STATUS JSON 投影 (`dtv::json`)
 
-検証済みの `StatusResponse` を、コンパクトな単一の UTF-8 JSON オブジェクト（末尾改行あり、NUL なし）へ投影する境界付き API（`status_json_size`、`encode_status_json`）を提供する。動的メモリ確保は行わず、書き込み前に容量と値の検証を行うため、バッファ不足や不正な入力があっても出力バッファを破壊しない。
+`StatusResponse` と canonical LIST を含む context を受け取り、API 内で完全検証したうえで、コンパクトな単一の UTF-8 JSON オブジェクト（末尾改行あり、NUL なし）へ投影する境界付き API（`status_json_size`、`encode_status_json`）を提供する。動的メモリ確保は行わず、書き込み前に容量と値の検証を行うため、バッファ不足や不正な入力があっても出力バッファを破壊しない。
 - 公開される `model` はモデル名文字列（例: `"PX-Q3U4"`）または `null` のみであり、数値や内部のモデル識別子は出力しない（採択済みの response 2.A / RC47 決定に基づく）。
-- `receivers[].descriptor.capabilities` は STATUS JSON から出力しない。これは能力情報全体の公開保留を意味するものではなく、カードリーダーおよび LNB の静的構成は discovery JSON 側で公開される。LNA の値および既定値のみが今後の調査課題として保留されている。
+- STATUS JSON では `receivers[].descriptor.capabilities` を出力しない。カードリーダーと LNB の静的構成は discovery JSON で公開する方針であるが、本ブランチには discovery JSON の実装は含まれない。LNA の値および既定値のみが今後の調査対象として保留されている。
 - 全スキャン集約階層（`enclosures[].devices[].receivers[]`）、`serial_unique`、CLI、デーモン、製品接続は本ライブラリには含まれない。詳細は [docs/json-status.md](docs/json-status.md) を参照のこと。
 
 ### デバイス識別コーデック (`dtv::identity`)
@@ -123,4 +132,4 @@ HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベン
 
 ## ライセンス範囲
 
-ルートの MIT ライセンスは、本候補で承認された基盤の移行先、独自実装されたワイヤサブセット、ならびに新規に追加されたビルド、パッケージング、テスト、ドキュメントの各ファイルに適用される。PX4 製品全体、リストされていないソースファイル、サードパーティの成果物、および将来の GPL アダプタを再ライセンスするものではない。これは承認されたライセンス範囲を記録するものであり、著作権の所有権や著作者を主張または推定するものではない。適用範囲は `design/independent-code-policy.md`、2026-10-18 02:44 JST に記録されたユーザーの継続方針、および 2026-10-18 03:06 JST の初期インクリメント実装開始に従う。
+ルートの MIT ライセンスは、本候補で承認された基盤の移行先、独自実装されたワイヤサブセット、ならびに新規に追加されたビルド、パッケージング、テスト、ドキュメントの各ファイルに適用される。PX4 製品全体、リストされていないソースファイル、サードパーティの成果物、および将来の GPL アダプタを再ライセンスするものではない。これは承認されたライセンス範囲を記録するものであり、著作権の所有権や著作者を主張または推定するものではない。適用範囲は、外部ワークスペースの設計方針資料 `design/independent-code-policy.md`（本リポジトリには非同梱）、2026-10-18 02:44 JST に記録されたユーザーの継続方針、および 2026-10-18 03:06 JST の初期インクリメント実装開始に従う。本リポジトリにおける詳細なソースピン、抽出ハッシュ、SPDX 識別子、除外範囲の記録は `PROVENANCE.json` を参照のこと。
