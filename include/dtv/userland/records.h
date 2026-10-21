@@ -473,6 +473,8 @@ struct StatusResponse final {
     Snapshot snapshot;
     Scope scope;
     Optional<Enclosure> enclosure;
+    Optional<bool> lnb_15v_enabled;
+    Optional<bool> card_inserted;
     Topology topology;
     Optional<BArray<UsbFunction, kMaxFunctions>> functions;
     Optional<BArray<ReceiverStatus, kMaxPublicReceivers>> receivers;

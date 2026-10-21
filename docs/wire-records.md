@@ -41,6 +41,21 @@ Decoders require the exact payload size. Within a record:
   output. An encoder measures the whole record with a counting pass first, so a short output
   leaves the caller buffer untouched and a record is never truncated.
 
+## STATUS enclosure observations
+
+Within a release, `StatusResponse` encodes `opt(enclosure)` followed by
+`opt<bool> lnb_15v_enabled` and `opt<bool> card_inserted`, in that order, before `topology`.
+Each optional boolean is a one-byte presence tag (0 absent, 1 present) followed by a one-byte
+boolean (0 false, 1 true) when present. An absent value means unknown, unavailable, or unobserved;
+it is distinct from an observed `false`. `card_inserted` represents an enclosure-level internal
+card observation and is not derived by aggregating reader states. External reader observations
+remain in their reader records.
+
+The envelope version remains UDTV 1.0. This record layout is supported only between daemon and
+client components from the same release. Mixed-release STATUS layouts, including the earlier
+main layout without these two optional fields, are unsupported; the decoder retains its exact-size
+and strict optional-tag checks.
+
 ## Validation split
 
 Byte codecs check only what is local to a record plus the bounded containers. A separate set of
