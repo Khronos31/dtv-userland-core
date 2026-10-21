@@ -28,7 +28,8 @@ struct Fixture final {
     w::DiscoveryScan scan;
     w::DiscoveryEnclosure enclosures[2]{};
     w::DiscoveryDevice devices[2]{};
-    w::DiscoveryReceiver receivers[1]{};
+    w::DiscoveryReceiver receivers[2]{};
+    w::DiscoveryReader readers[1]{};
 };
 
 void make_scan(Fixture& fixture)
@@ -45,6 +46,12 @@ void make_scan(Fixture& fixture)
     first.model.value = text<128>("PX-Q3U4");
     first.serial.present = true;
     first.serial.value = text<dtv::userland::detail::kMaxSerialBytes>("serial-a");
+    first.lnb_15v_supported.present = true;
+    first.lnb_15v_supported.value = true;
+    first.readers_known = true;
+    first.reader_count = 1U;
+    first.readers = fixture.readers;
+    fixture.readers[0] = {6U, 2U};
     first.device_count = 1U;
     first.devices = &fixture.devices[0];
     fixture.devices[0].device = 2U;
@@ -88,10 +95,44 @@ void test_scan_projection()
     CHECK(json.find("\"serial_unique\":true") != std::string::npos);
     CHECK(json.find("\"serial_unique\":false") == std::string::npos);
     CHECK(json.find("\"receivers\":[]") == std::string::npos);
+    CHECK(json.find(
+              "\"lnb_15v_supported\":true,\"readers\":[{\"reader\":6,\"device\":2}]") !=
+          std::string::npos);
 
     fixture.enclosures[0].model.value = text<128>("PX\\\"Q3U4");
     const auto escaped = encode(fixture.scan);
     CHECK(escaped.find("PX\\\\\\\"Q3U4") != std::string::npos);
+}
+
+void test_shared_capability_presence_and_reader_references()
+{
+    Fixture fixture;
+    make_scan(fixture);
+    fixture.enclosures[0].lnb_15v_supported.present = false;
+    fixture.enclosures[0].readers_known = true;
+    fixture.enclosures[0].reader_count = 0U;
+    fixture.enclosures[0].readers = nullptr;
+    auto json = encode(fixture.scan);
+    CHECK(json.find("\"lnb_15v_supported\":null,\"readers\":[]") != std::string::npos);
+
+    fixture.enclosures[0].readers_known = false;
+    json = encode(fixture.scan);
+    CHECK(json.find("\"lnb_15v_supported\":null,\"readers\"") == std::string::npos);
+
+    fixture.enclosures[0].readers_known = true;
+    fixture.enclosures[0].reader_count = 1U;
+    fixture.enclosures[0].readers = fixture.readers;
+    fixture.readers[0].device = 99U;
+    CHECK(!w::discovery_json_size(fixture.scan));
+}
+
+void test_receiver_number_is_unique_within_device()
+{
+    Fixture fixture;
+    make_scan(fixture);
+    fixture.devices[0].receiver_count = 2U;
+    fixture.receivers[1] = {3U, 2U, 8U, {1U}};
+    CHECK(!w::discovery_json_size(fixture.scan));
 }
 
 void test_serial_uniqueness_and_unknown_receivers()
@@ -145,6 +186,8 @@ int main(int argc, char** argv)
         return failures == 0 ? 0 : 1;
     }
     test_scan_projection();
+    test_shared_capability_presence_and_reader_references();
+    test_receiver_number_is_unique_within_device();
     test_serial_uniqueness_and_unknown_receivers();
     test_atomic_failures();
     return failures == 0 ? 0 : 1;

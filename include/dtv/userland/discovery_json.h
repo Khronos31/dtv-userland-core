@@ -22,10 +22,19 @@ struct DiscoveryDevice final {
     const DiscoveryReceiver* receivers = nullptr;
 };
 
+struct DiscoveryReader final {
+    std::uint16_t reader = 0U;
+    std::uint16_t device = 0U;
+};
+
 struct DiscoveryEnclosure final {
     std::uint16_t enclosure = 0U;
     Optional<WString<128>> model;
     Optional<WString<detail::kMaxSerialBytes>> serial;
+    Optional<bool> lnb_15v_supported;
+    bool readers_known = false;
+    std::size_t reader_count = 0U;
+    const DiscoveryReader* readers = nullptr;
     std::size_t device_count = 0U;
     const DiscoveryDevice* devices = nullptr;
 };

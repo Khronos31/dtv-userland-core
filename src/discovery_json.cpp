@@ -99,6 +99,20 @@ bool valid(const DiscoveryScan& value) noexcept
         if (enclosure.serial.present && (enclosure.serial.value.length == 0U ||
                 !valid_text(enclosure.serial.value.bytes.data(), enclosure.serial.value.length,
                             enclosure.serial.value.bytes.size()))) return false;
+        if (!enclosure.readers_known && enclosure.reader_count != 0U) return false;
+        if (enclosure.readers_known && enclosure.reader_count != 0U &&
+            enclosure.readers == nullptr) return false;
+        for (std::size_t j = 0U; j < enclosure.reader_count; ++j) {
+            const auto& reader = enclosure.readers[j];
+            bool device_found = false;
+            for (std::size_t k = 0U; k < enclosure.device_count; ++k) {
+                if (enclosure.devices[k].device == reader.device) device_found = true;
+            }
+            if (!device_found) return false;
+            for (std::size_t before = 0U; before < j; ++before) {
+                if (enclosure.readers[before].reader == reader.reader) return false;
+            }
+        }
         for (std::size_t j = 0U; j < enclosure.device_count; ++j) {
             const auto& device = enclosure.devices[j];
             for (std::size_t before = 0U; before < j; ++before) {
@@ -110,12 +124,15 @@ bool valid(const DiscoveryScan& value) noexcept
                 const auto& receiver = device.receivers[k];
                 if (!valid_systems(receiver.systems) || receiver.device != device.device) return false;
                 for (std::size_t before = 0U; before < k; ++before) {
-                    if (device.receivers[before].local == receiver.local) return false;
+                    if (device.receivers[before].local == receiver.local ||
+                        device.receivers[before].receiver == receiver.receiver) return false;
                 }
-                for (std::size_t prior_device = 0U; prior_device < j; ++prior_device) {
+                for (std::size_t prior_device = 0U; prior_device <= j;
+                     ++prior_device) {
+                    const std::size_t receiver_limit = prior_device == j ? k :
+                        enclosure.devices[prior_device].receiver_count;
                     for (std::size_t prior_receiver = 0U;
-                         prior_receiver < enclosure.devices[prior_device].receiver_count;
-                         ++prior_receiver) {
+                         prior_receiver < receiver_limit; ++prior_receiver) {
                         if (enclosure.devices[prior_device].receivers[prior_receiver].receiver ==
                             receiver.receiver) return false;
                     }
@@ -166,6 +183,20 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
         if (!enclosure.serial.present) out.text("null");
         else if (serial_duplicate(value, i)) out.text("false");
         else out.text(value.complete ? "true" : "null");
+        out.text(",\"lnb_15v_supported\":");
+        if (enclosure.lnb_15v_supported.present)
+            out.text(enclosure.lnb_15v_supported.value ? "true" : "false");
+        else out.text("null");
+        if (enclosure.readers_known) {
+            out.text(",\"readers\":[");
+            for (std::size_t j = 0U; j < enclosure.reader_count; ++j) {
+                if (j != 0U) out.put(',');
+                out.text("{\"reader\":"); out.number(enclosure.readers[j].reader);
+                out.text(",\"device\":"); out.number(enclosure.readers[j].device);
+                out.put('}');
+            }
+            out.put(']');
+        }
         out.text(",\"devices\":[");
         for (std::size_t j = 0U; j < enclosure.device_count; ++j) {
             if (j != 0U) out.put(',');
