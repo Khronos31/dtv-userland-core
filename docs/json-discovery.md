@@ -13,7 +13,7 @@ The output keeps the physical hierarchy:
   "producer": {"product": "px4", "version": "1.0.0"},
   "scan": {"complete": true, "issues": []},
   "enclosures": [{
-    "enclosure": 1,
+    "id": 1,
     "model": "PX-Q3U4",
     "serial": "serial-value",
     "serial_unique": true,
@@ -21,7 +21,7 @@ The output keeps the physical hierarchy:
     "lnb_15v_supported": null,
     "readers": [{"reader": 0, "device": 2}],
     "devices": [{
-      "device": 2,
+      "id": 2,
       "usb": "0511:084a",
       "serial": "usb-serial",
       "bus": 1,
@@ -41,6 +41,13 @@ string. A device whose receiver inventory is unknown omits `receivers`; a
 known zero-receiver device emits an empty array. The projector only emits
 enclosures and devices supplied by the scan and never invents missing parents
 or children.
+
+Enclosure `id` and USB function `id` use the same identifier meanings as the
+STATUS projection. In receiver records, `receiver` is the receiver number and
+`device` references the containing USB function id; `local` is the receiver's
+local index on that device. Reader `device` also references a USB function id.
+Candidate `device` is the legacy device slot within the candidate observation,
+not the enclosure id or an assertion that the candidate is a child device.
 
 `serial_unique` is null if the serial was not observed or the scan was
 incomplete and no duplicate was observed. Matching serials on distinct

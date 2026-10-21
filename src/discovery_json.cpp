@@ -274,7 +274,7 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
     for (std::size_t i = 0U; i < value.enclosure_count; ++i) {
         if (i != 0U) out.put(',');
         const auto& enclosure = value.enclosures[i];
-        out.text("{\"enclosure\":"); out.number(enclosure.enclosure);
+        out.text("{\"id\":"); out.number(enclosure.enclosure);
         out.text(",\"model\":");
         if (enclosure.model.present) out.string(enclosure.model.value); else out.text("null");
         out.text(",\"serial\":");
@@ -302,7 +302,7 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
         for (std::size_t j = 0U; j < enclosure.device_count; ++j) {
             if (j != 0U) out.put(',');
             const auto& device = enclosure.devices[j];
-            out.text("{\"device\":"); out.number(device.device);
+            out.text("{\"id\":"); out.number(device.device);
             out.text(",\"usb\":\"");
             static constexpr char hex[] = "0123456789abcdef";
             for (int shift = 12; shift >= 0; shift -= 4) out.put(hex[(device.vid >> shift) & 0x0fU]);

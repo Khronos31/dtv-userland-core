@@ -111,8 +111,8 @@ void test_scan_projection()
     Fixture fixture;
     make_scan(fixture);
     const auto json = encode(fixture.scan);
-    CHECK(json.find("\"enclosures\":[{\"enclosure\":4") != std::string::npos);
-    CHECK(json.find("\"device\":2,\"usb\":\"0511:084a\"") != std::string::npos);
+    CHECK(json.find("\"enclosures\":[{\"id\":4") != std::string::npos);
+    CHECK(json.find("\"id\":2,\"usb\":\"0511:084a\"") != std::string::npos);
     CHECK(json.find("\"receiver\":3,\"device\":2,\"local\":7,\"systems\":[\"ISDB-T\",\"ISDB-S\"]") != std::string::npos);
     CHECK(json.find("\"serial_unique\":true") != std::string::npos);
     CHECK(json.find("\"serial_unique\":false") == std::string::npos);
@@ -224,7 +224,7 @@ void test_serial_uniqueness_and_unknown_receivers()
     fixture.devices[1].receivers_known = false;
     json = encode(scan);
     CHECK(json.find("\"serial\":null,\"serial_unique\":null") != std::string::npos);
-    const auto second = json.find("\"enclosure\":5");
+    const auto second = json.find("\"id\":5");
     CHECK(second != std::string::npos && json.find("\"receivers\"", second) == std::string::npos);
 }
 

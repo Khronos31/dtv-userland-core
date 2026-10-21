@@ -207,7 +207,7 @@
       "RC-INTEGRATION-CHECKPOINT-20261019.md, accepted discovery hierarchy, fields and serial uniqueness meaning",
       "evidence/user-statements-followup-20261019.md, direct accepted JSON decisions"
     ],
-    "scope": "A scan envelope containing observed enclosures, scan completeness/issues and grouped or ungrouped USB observations with nullable location/serial data. Projects physical enclosure/device/reader/receiver hierarchy, static LNB capability, enclosure grouping status and duplicate candidates, systems, numeric IDs, VID:PID strings and scan-local serial uniqueness. It validates receiver-number uniqueness across each enclosure and does not adapt one ListResponse into a full scan or add STATUS dynamic state.",
+    "scope": "A scan envelope containing observed enclosures, scan completeness/issues and grouped or ungrouped USB observations with nullable location/serial data. Projects physical enclosure/device/reader/receiver hierarchy, static LNB capability, enclosure grouping status and duplicate candidates, systems, STATUS-aligned enclosure/USB function id keys, VID:PID strings and scan-local serial uniqueness. It validates receiver-number uniqueness across each enclosure and does not adapt one ListResponse into a full scan or add STATUS dynamic state.",
     "new_files": "include/dtv/userland/discovery_json.h, src/discovery_json.cpp, tests/discovery_json_tests.cpp, tests/discovery_json_consumer.py, tests/consumer/discovery_json/, and docs/json-discovery.md are independently written and carry MIT."
   }
 }
