@@ -193,52 +193,6 @@ struct Decoder final {
     }
 };
 
-bool valid_utf8(const std::uint8_t* p, std::size_t n) noexcept
-{
-    std::size_t i = 0U;
-    while (i < n) {
-        const std::uint8_t lead = p[i];
-        std::size_t extra = 0U;
-        std::uint32_t codepoint = 0U;
-        std::uint32_t lower = 0U;
-        if (lead < 0x80U) {
-            ++i;
-            continue;
-        }
-        if ((lead & 0xE0U) == 0xC0U) {
-            extra = 1U;
-            codepoint = static_cast<std::uint32_t>(lead & 0x1FU);
-            lower = 0x80U;
-        } else if ((lead & 0xF0U) == 0xE0U) {
-            extra = 2U;
-            codepoint = static_cast<std::uint32_t>(lead & 0x0FU);
-            lower = 0x800U;
-        } else if ((lead & 0xF8U) == 0xF0U) {
-            extra = 3U;
-            codepoint = static_cast<std::uint32_t>(lead & 0x07U);
-            lower = 0x10000U;
-        } else {
-            return false;
-        }
-        if (n - i < extra + 1U) {
-            return false;
-        }
-        for (std::size_t k = 1U; k <= extra; ++k) {
-            if ((p[i + k] & 0xC0U) != 0x80U) {
-                return false;
-            }
-            codepoint = (codepoint << 6U) | static_cast<std::uint32_t>(p[i + k] & 0x3FU);
-        }
-        if (codepoint < lower || codepoint > 0x10FFFFU) {
-            return false;
-        }
-        if (codepoint >= 0xD800U && codepoint <= 0xDFFFU) {
-            return false;
-        }
-        i += extra + 1U;
-    }
-    return true;
-}
 
 template <std::size_t N, typename Ar>
 bool string_field(Ar& ar, WString<N>& value) noexcept
@@ -255,7 +209,7 @@ bool string_field(Ar& ar, WString<N>& value) noexcept
         }
     }
     if (value.length != 0U) {
-        if (!valid_utf8(reinterpret_cast<const std::uint8_t*>(value.bytes.data()), value.length)) {
+        if (!detail::strict_utf8(reinterpret_cast<const std::uint8_t*>(value.bytes.data()), value.length)) {
             return ar.reject(Error::PROTOCOL_ERROR);
         }
         for (std::size_t i = 0U; i < value.length; ++i) {

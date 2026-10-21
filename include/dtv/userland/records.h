@@ -2,6 +2,7 @@
 #ifndef DTV_USERLAND_RECORDS_H
 #define DTV_USERLAND_RECORDS_H
 
+#include <dtv/userland/detail/text.h>
 #include <dtv/userland/wire.h>
 
 #include <array>
@@ -52,8 +53,9 @@ inline constexpr std::uint16_t kOpcodeTsDataEvent = 0x8040U;
 inline constexpr std::uint16_t kOpcodeStateEvent = 0x80f0U;
 inline constexpr std::uint16_t kOpcodeStreamEndEvent = 0x80ffU;
 
-// Resource caps from wire-record-layout.md section 1.
-inline constexpr std::size_t kMaxFunctions = 8U;
+// Resource caps from wire-record-layout.md section 1. The function count is
+// the one shared definition used by the identity codecs as well.
+inline constexpr std::size_t kMaxFunctions = detail::kMaxFunctions;
 inline constexpr std::size_t kMaxPublicReceivers = 32U;
 inline constexpr std::size_t kMaxReaders = 8U;
 inline constexpr std::size_t kMaxPids = 8192U;
@@ -244,12 +246,12 @@ struct ErrorRecord final {
 
 struct Identity final {
     IdentitySerialState serial_state = IdentitySerialState::unknown;
-    Optional<WString<512>> serial;
+    Optional<WString<detail::kMaxSerialBytes>> serial;
     Uniqueness uniqueness = Uniqueness::unknown;
 };
 
 struct Location final {
-    Optional<WString<64>> usb_path;
+    Optional<WString<detail::kMaxUsbPathBytes>> usb_path;
     Optional<std::uint8_t> bus;
     Optional<std::uint8_t> address;
 };
@@ -320,7 +322,7 @@ struct UsbFunction final {
     Mode mode = Mode::unknown;
     Location location;
     SerialState serial_state = SerialState::not_queried;
-    Optional<WString<512>> serial;
+    Optional<WString<detail::kMaxSerialBytes>> serial;
     Optional<Model> model;
     IdentificationReason identification_reason = IdentificationReason::none;
     bool present = false;
@@ -339,7 +341,7 @@ struct Snapshot final {
 
 struct Context final {
     Uuid epoch{};
-    Optional<WString<64>> instance;
+    Optional<WString<detail::kMaxInstanceBytes>> instance;
     ContextState state = ContextState::starting;
     Optional<ErrorRecord> last_error;
 };

@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations and the two receiver destinations listed below, the independently implemented wire subset, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset and identity codecs, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -113,6 +113,27 @@
         "excluded_scope": "The px4_drv-referenced 340 ms terrestrial settle constant and its citation (11-14), which the product supplies through the backend seam; the PX4 wire request validation table valid_tune (59-78), whose per-request decision the product passes in the tune request; the fixed tune response payload construction (503-504)."
       }
     ]
+  },
+  "identity": {
+    "method": "The selector, instance, USB descriptor and auto-identity codecs are a new independent implementation of the adopted byte representation. The only mechanical transfer is the neutral SHA-256 class, extracted under the standing independent-code policy; no selector/discovery/hardware source was copied.",
+    "authority": [
+      "agent-workspace branch design/identity-encoding-draft.md and examples/identity-vectors.json",
+      "agent-workspace branch design/adoption-status.md, design/device-selection-proposal.md and design/runtime-command-draft.md",
+      "I1 internal identity codec specification, shared/implementation/identity-codec-spec.md",
+      "SHA origin classification, shared/research/identity-sha256-origin.md"
+    ],
+    "source_files": [
+      {
+        "path": "userland/src/firmware.cpp",
+        "sha256": "2e1ad344b71d92d91c4f5acac5601fbbc48d4e16976f39cda0b8269d6058d0a4",
+        "destination_path": "include/dtv/userland/detail/sha256.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "Only the `class Sha256 final { ... };` body at original lines 28-171. The identical class body also appears in ASICEN fixed 76299585 userland/src/sha256.h lines 18-161; both calculate to class-body sha256 4117bc2b38ac968a5b1519a3e30fc5224aa94f15ddfb02a8b38d34590a35279b (no trailing newline), re-checked equal to the copied destination class body.",
+        "excluded_scope": "The file header comments, include guard, namespace, firmware policy, file reads, IT930x operations, firmware constants and product types. Class dependencies are only array/cstddef/cstdint."
+      }
+    ],
+    "new_files": "include/dtv/userland/identity.h, src/identity.cpp, include/dtv/userland/detail/text.h, tests/identity_tests.cpp and tests/consumer/identity/ are independently written under the standing policy and carry MIT."
   },
   "wire": {
     "method": "New independent implementation of the documented common UDTV wire; no PX4 wire source was copied or modified.",
