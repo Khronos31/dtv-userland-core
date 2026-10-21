@@ -35,11 +35,27 @@ Decoders require the exact payload size. Within a record:
 - `RESOURCE_LIMIT`: a well-formed record whose encoded size would exceed `kMaxControlPayload`
   (65,536). It is returned before any byte is written and is distinct from `BUFFER_TOO_SMALL`,
   which means the caller's own buffer is too short. With the current caps every legal record fits
-  under the control cap (the fully populated maximum STATUS is 42,346 bytes); the guard is kept
+  under the control cap (the fully populated maximum STATUS is 42,350 bytes, including both
+  enclosure observation optionals present); the guard is kept
   for future layouts.
 - Encoders return `INVALID_ARGUMENT` for any invalid value and `BUFFER_TOO_SMALL` for a short
   output. An encoder measures the whole record with a counting pass first, so a short output
   leaves the caller buffer untouched and a record is never truncated.
+
+## STATUS enclosure observations
+
+Within a release, `StatusResponse` encodes `opt(enclosure)` followed by
+`opt<bool> lnb_15v_enabled` and `opt<bool> card_inserted`, in that order, before `topology`.
+Each optional boolean is a one-byte presence tag (0 absent, 1 present) followed by a one-byte
+boolean (0 false, 1 true) when present. An absent value means unknown, unavailable, or unobserved;
+it is distinct from an observed `false`. `card_inserted` represents an enclosure-level internal
+card observation and is not derived by aggregating reader states. External reader observations
+remain in their reader records.
+
+The envelope version remains UDTV 1.0. This record layout is supported only between daemon and
+client components from the same release. Mixed-release STATUS layouts, including the earlier
+main layout without these two optional fields, are unsupported; the decoder retains its exact-size
+and strict optional-tag checks.
 
 ## Validation split
 

@@ -1397,7 +1397,7 @@ w::UsbFunction max_usb_function(std::uint16_t id)
 void test_status_golden_and_aggregate()
 {
     // Independent literal vector for a minimal global STATUS.
-    const std::array<std::uint8_t, 113> expected = {
+    const std::array<std::uint8_t, 115> expected = {
         // producer
         0x03, 0x00, 'p', 'x', '4', 0x01, 0x00, '1', 0x00,
         // context
@@ -1410,6 +1410,8 @@ void test_status_golden_and_aggregate()
         0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
         // enclosure absent
         0x00,
+        // enclosure LNB and internal card observations absent
+        0x00, 0x00,
         // topology complete, expected 1
         0x02, 0x01, 0x01, 0x00,
         // functions present, count 1
@@ -1438,6 +1440,7 @@ void test_status_golden_and_aggregate()
     CHECK(equals(out.data(), expected.size(), expected));
     const auto decoded = w::decode_status_response(view(expected));
     CHECK(decoded.has_value());
+    CHECK(!decoded.value().lnb_15v_enabled.present && !decoded.value().card_inserted.present);
     CHECK(w::validate_status_response_scope(decoded.value()) == Error::OK);
     const w::ListResponse canonical = canonical_list();
     CHECK(w::validate_list_response(canonical) == Error::OK);
@@ -1447,6 +1450,88 @@ void test_status_golden_and_aggregate()
     // A caller comment is not enough: without a canonical context this fails.
     const w::StatusContext none;
     CHECK(w::validate_status_response(decoded.value(), none) == Error::INVALID_ARGUMENT);
+
+    auto check_enclosure_observations = [&](bool with_enclosure, bool lnb_present,
+                                            bool lnb_enabled, bool card_present,
+                                            bool card_inserted) {
+        w::StatusResponse observed = base_status();
+        if (with_enclosure) {
+            observed.enclosure.present = true;
+            observed.enclosure.value.id = 9U;
+        }
+        observed.lnb_15v_enabled.present = lnb_present;
+        observed.lnb_15v_enabled.value = lnb_enabled;
+        observed.card_inserted.present = card_present;
+        observed.card_inserted.value = card_inserted;
+
+        std::vector<std::uint8_t> expected_payload(expected.begin(), expected.end());
+        std::size_t optional_offset = 54U;
+        if (with_enclosure) {
+            const std::array<std::uint8_t, 8> enclosure = {
+                0x01, 0x09, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
+            expected_payload.erase(expected_payload.begin() + 53, expected_payload.begin() + 54);
+            expected_payload.insert(expected_payload.begin() + 53, enclosure.begin(),
+                                    enclosure.end());
+            optional_offset += 7U;
+        }
+        expected_payload.erase(
+            expected_payload.begin() + static_cast<std::ptrdiff_t>(optional_offset),
+            expected_payload.begin() + static_cast<std::ptrdiff_t>(optional_offset + 2U));
+        std::vector<std::uint8_t> optional_bytes;
+        optional_bytes.push_back(lnb_present ? 1U : 0U);
+        if (lnb_present) {
+            optional_bytes.push_back(lnb_enabled ? 1U : 0U);
+        }
+        optional_bytes.push_back(card_present ? 1U : 0U);
+        if (card_present) {
+            optional_bytes.push_back(card_inserted ? 1U : 0U);
+        }
+        expected_payload.insert(
+            expected_payload.begin() + static_cast<std::ptrdiff_t>(optional_offset),
+            optional_bytes.begin(), optional_bytes.end());
+
+        std::vector<std::uint8_t> observed_bytes(70000U);
+        const auto observed_written = w::encode_status_response(
+            observed, MutableByteView{observed_bytes.data(), observed_bytes.size()});
+        CHECK(observed_written.has_value() && observed_written.value() == expected_payload.size());
+        CHECK(std::memcmp(observed_bytes.data(), expected_payload.data(),
+                          expected_payload.size()) == 0);
+
+        const auto observed_decoded = w::decode_status_response(
+            ByteView{expected_payload.data(), expected_payload.size()});
+        CHECK(observed_decoded.has_value());
+        if (observed_decoded.has_value()) {
+            CHECK(observed_decoded.value().enclosure.present == with_enclosure);
+            CHECK(observed_decoded.value().lnb_15v_enabled.present == lnb_present);
+            CHECK(!lnb_present || observed_decoded.value().lnb_15v_enabled.value == lnb_enabled);
+            CHECK(observed_decoded.value().card_inserted.present == card_present);
+            CHECK(!card_present || observed_decoded.value().card_inserted.value == card_inserted);
+        }
+        return expected_payload;
+    };
+
+    check_enclosure_observations(false, false, false, false, false);
+    check_enclosure_observations(true, false, false, false, false);
+    const auto lnb_false = check_enclosure_observations(false, true, false, false, false);
+    const auto card_true = check_enclosure_observations(false, false, false, true, true);
+    const auto enclosure_with_both = check_enclosure_observations(true, true, true, true, false);
+
+    CHECK(w::decode_status_response(ByteView{card_true.data(), card_true.size() - 1U}).error() ==
+          Error::PROTOCOL_ERROR);
+    std::vector<std::uint8_t> trailing = card_true;
+    trailing.push_back(0U);
+    CHECK(w::decode_status_response(ByteView{trailing.data(), trailing.size()}).error() ==
+          Error::PROTOCOL_ERROR);
+    std::vector<std::uint8_t> invalid_optional = enclosure_with_both;
+    invalid_optional[61U] = 2U;
+    CHECK(w::decode_status_response(
+              ByteView{invalid_optional.data(), invalid_optional.size()}).error() ==
+          Error::PROTOCOL_ERROR);
+    std::vector<std::uint8_t> invalid_boolean = card_true;
+    invalid_boolean[56U] = 2U;
+    CHECK(w::decode_status_response(
+              ByteView{invalid_boolean.data(), invalid_boolean.size()}).error() ==
+          Error::INVALID_ARGUMENT);
 
     // A response from another epoch than the canonical list.
     w::StatusResponse other_epoch = base_status();
@@ -1655,6 +1740,10 @@ void test_max_populated_status()
     status.context.last_error.value.detail = fill_str<256>('d');
     status.snapshot.observed_at_ns = 1000U;
     status.scope.kind = w::ScopeKind::enclosure;
+    status.lnb_15v_enabled.present = true;
+    status.lnb_15v_enabled.value = true;
+    status.card_inserted.present = true;
+    status.card_inserted.value = true;
     status.topology.state = w::TopologyState::complete;
     status.topology.expected_function_count.present = true;
     status.topology.expected_function_count.value = 8U;
@@ -1770,11 +1859,12 @@ void test_max_populated_status()
 
     // Independent size computation: the plain sum of the legal field maxima.
     // producer 167 + context 381 + snapshot 16 + scope 9 + enclosure 720 +
-    // topology 4 + functions (3 + 8*1090) + receivers (3 + 32*930) +
-    // readers (3 + 8*320) = 42346. Each receiver carries three valid long
+    // LNB/CARD optional tags and values 4 + topology 4 + functions (3 + 8*1090) +
+    // receivers (3 + 32*930) +
+    // readers (3 + 8*320) = 42350. Each receiver carries three valid long
     // measurements (11 + 14 + 14) and long counters, so the signal metric is the
     // valid form, not the two-byte unknown form.
-    const std::size_t expected_size = 42346U;
+    const std::size_t expected_size = 42350U;
     CHECK(expected_size <= w::kMaxControlPayload);
 
     std::vector<std::uint8_t> out(70000);

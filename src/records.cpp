@@ -974,6 +974,7 @@ bool codec(Ar& ar, StatusResponse& value) noexcept
 {
     return codec(ar, value.producer) && codec(ar, value.context) && codec(ar, value.snapshot) &&
            codec(ar, value.scope) && optional_field(ar, value.enclosure) &&
+           optional_field(ar, value.lnb_15v_enabled) && optional_field(ar, value.card_inserted) &&
            codec(ar, value.topology) && optional_field(ar, value.functions) &&
            optional_field(ar, value.receivers) && optional_field(ar, value.readers);
 }
