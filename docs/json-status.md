@@ -24,10 +24,12 @@ corresponding optional collection is present.
 | `topology.state`, `topology.expected_function_count` | readable state string and JSON number or `null` |
 | `usb_functions[]` | objects with `id`, `usb`, `mode`, `location.usb_path`, `location.bus`, `location.address`, `serial`, `model`, `present`, and `last_error` |
 | `receivers[]` | objects with `descriptor`, `present`, `state`, `operation`, `leased`, `tune_revision`, `current_tune`, `last_successful_tune`, `stream`, `last_stream`, `measurements`, `statistics`, and `last_error` |
-| `receivers[].descriptor` | `receiver` number, `systems` array of formal names such as `ISDB-T` and `ISDB-S`, and nullable `binding` |
-| `receivers[].current_tune`, `receivers[].last_successful_tune` | nullable tune object; `selection.kind` is `auto`, `tsid`, or `slot`, and `selection.value` is omitted for `auto` |
-| `receivers[].stream`, `receivers[].last_stream` | nullable active/final stream object; active stream uses `phase` |
+| `receivers[].descriptor` | `receiver` number, `systems` array of formal names such as `ISDB-T` and `ISDB-S`, and nullable `binding`; a present binding has numeric `function_id` and `local_id` |
+| `receivers[].current_tune`, `receivers[].last_successful_tune` | nullable tune object with decimal-string `revision`, `system`, numeric `frequency_hz`, nullable numeric `programmed_hz`, `selection`, and `verification`; `selection.kind` is `auto`, `tsid`, or `slot`, and `selection.value` is omitted for `auto` |
+| `receivers[].stream` | nullable active stream object with decimal-string `id` and `tune_revision`, and `phase` |
+| `receivers[].last_stream` | nullable final stream object with decimal-string `id` and `tune_revision`, `reason`, nullable `error`, and `statistics` counter map |
 | `receivers[].measurements`, `receivers[].statistics` | supported measurement objects and named counters; each collection reflects only entries represented by the typed STATUS value |
+| `receivers[].statistics.receiver`, `receivers[].statistics.stream` | receiver counter map and nullable stream counter map; each counter value object contains `value`, `sampled_at_ns`, `reason`, and `overflow` |
 | `readers[]` | objects with `descriptor`, `present`, `card`, `operation`, `handles_open`, `transaction_active`, and `last_error`; `card` contains `state`, `sampled_at_ns`, and `reason` |
 | error `code` within the Core `Error` enum | its defined symbol |
 | error `code` outside that enum | `code: "UNKNOWN"` and the original numeric `numeric_code` |
@@ -39,8 +41,10 @@ STATUS decisions and values validated by Core.
 
 The public `model` value in STATUS and discovery JSON is the model **name only**, represented as a
 string or `null`; a model identifier is not emitted. The example name form is `"PX-Q3U4"`. This
-follows the accepted response 2.A / RC47 decision. `descriptor.capabilities` is not emitted;
-capability publication, including LNA information, is deferred for later investigation.
+follows the accepted response 2.A / RC47 decision. `receivers[].descriptor.capabilities` is not
+emitted in this STATUS projection. This does not defer capability publication as a whole:
+discovery JSON publishes static reader and LNB configuration. LNA values and defaults alone remain
+held for later investigation; their publication details are not established here.
 
 `usb_functions[]` does not emit the internal `serial_state` or `identification_reason` fields.
 Those fields describe internal query/identification state and are not part of this projection.
