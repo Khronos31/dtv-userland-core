@@ -4,7 +4,7 @@
 
 Exactly one of `Request::channel` and `Request::frequency_hz` is required. A channel determines its system; a supplied system must be the same recognized value. A frequency requires an explicit recognized system and must be in 1..9007199254740991 Hz. The returned frequency is the requested software target.
 
-Channels are exact ASCII tokens: `13`..`62` or `T13`..`T62`; odd `BS01`..`BS23`, optionally followed by `_0`..`_11`; and even `CS2`..`CS24`, with `CS02`, `CS04`, `CS06`, and `CS08` also accepted. BS suffixes accept only the unpadded decimal `_0`..`_11`; zero-padded forms such as `_00`..`_09` are rejected. The maximum token length is seven bytes.
+Channels are exact ASCII tokens: `13`..`62` or `T13`..`T62`; odd `BS01`..`BS23`, optionally followed by `_0`..`_11`; and even `CS2`..`CS24`, with `CS02`, `CS04`, `CS06`, and `CS08` also accepted. BS suffixes accept only the unpadded decimal `_0`..`_11`; zero-padded forms such as `_00`..`_09` are rejected. This unpadded rule is an explicit lexical clarification proposed by the T1 implementation specification; the rejection of zero-padded forms is not a verbatim user instruction or a verified compatibility fact. The maximum token length is seven bytes.
 
 Terrestrial channels use automatic selection and reject slot/TSID. An unsuffixed BS channel requires one slot or TSID. A suffixed BS channel supplies its slot and rejects any extra slot/TSID. CS channels default to slot 0; an explicit slot or TSID replaces that default. A satellite frequency requires an explicit slot or TSID. Explicit slot and TSID conflict. Slot range is 0..11 and TSID range is 1..65534.
 
