@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset, identity codecs, and tuning subset, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset, identity codecs, and tuning subset, and this candidate's new build, packaging, test, and documentation files.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -160,5 +160,33 @@
     ],
     "scope": "Pure C++17 channel/typed-Hz/system/selection resolution using the existing wire System and Selection enums. No CLI option parser, repeated-option policy, wire request construction, backend capability checks, hardware quantization, product endpoint, or C ABI.",
     "new_files": "include/dtv/userland/tuning.h, src/tuning.cpp, tests/tuning_tests.cpp, tests/consumer/tuning/, tests/consumer/missing_receiver/ and docs/tuning.md are independently written and carry MIT."
+  },
+  "card_ownership": {
+    "method": "Adapted from the isolated PX4 card ownership implementation under the recorded independent-code policy. AtrSnapshot is an opaque template value; product CardAtr, NativeCardProtocolSession, IPC enums, and the APDU compatibility limit remain in the GPL facade.",
+    "authority": [
+      "agent-workspace branch implementation/card-ownership-spec.md",
+      "agent-workspace branch implementation/card-ownership-final-review.md",
+      "agent-workspace branch design/independent-code-policy.md"
+    ],
+    "source_files": [
+      {
+        "path": "userland/include/px4/card_service.h",
+        "sha256": "0e7cbe6d23a98867d54796b8abd07003b129602e1429418452c86212864d938a",
+        "destination_path": "include/dtv/userland/detail/card_ownership_engine.h",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The protocol session operation set at original lines 14-25, backend operations and result/presence value fields at 47-71, and ownership operations/state declarations at 73-157, adapted to neutral card-share/disposition enums, byte spans, and CardOwnershipSession/Backend seams.",
+        "excluded_scope": "NativeCardProtocolSession and CardSession binding at original lines 27-43; Q3U4/device-specific backend policy in the comment at 45-46; PX4 IPC types; product CardAtr definition and hardware session implementation."
+      },
+      {
+        "path": "userland/src/card_service.cpp",
+        "sha256": "45eb44af207efad7d6cfd77b8cf8358df0d1767fe49e5f95e5d11d5651f8a8f2",
+        "destination_path": "include/dtv/userland/detail/card_ownership_engine.tpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "MIT",
+        "moved_scope": "The ownership, sharing, presence/generation, session, transaction, disconnect, cleanup, and error-order algorithm at original lines 10-551. The source's ipc::kMaxCardPayload check at 461-464 is parameterized by the facade constructor at the same validation position.",
+        "excluded_scope": "The Q3U4Runtime/SPEC product-specific comment at original lines 31-33, PX4 IPC enum and header dependencies, and all CardAtr/Native protocol/hardware interpretation. Snapshot values remain opaque and are only defaulted, copied, or returned."
+      }
+    ]
   }
 }
