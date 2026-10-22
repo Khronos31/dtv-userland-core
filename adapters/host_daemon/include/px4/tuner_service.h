@@ -13,6 +13,7 @@
 namespace px4::userland {
 
 class HostAuthorityOwner;
+namespace ipc::posix { class ControlWorkerLanes; }
 class HostAuthorityOwnerTestAccess;
 
 // R3 strict frequency facts, data only.  A backend reports them per receiver
@@ -506,6 +507,7 @@ public:
 
 private:
     friend class HostAuthorityOwner;
+    friend class ipc::posix::ControlWorkerLanes;
     friend class HostAuthorityOwnerTestAccess;
 
     // The lease, tune, and stream lifecycle runs in the common receiver

@@ -333,10 +333,11 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         if (session.pending_)
             return error_reply(session, request.opcode, request.request_id,
                                Error::BUSY, "release");
-        bool owns = false;
-        for (std::size_t i = 0U; i < session.lease_count_; ++i)
-            owns = owns || session.lease_ids_[i] == request.release.lease_id;
-        if (!owns)
+        std::size_t lease_slot = 0U;
+        while (lease_slot < session.lease_count_ &&
+               session.lease_ids_[lease_slot] != request.release.lease_id)
+            ++lease_slot;
+        if (lease_slot == session.lease_count_)
             return error_reply(session, request.opcode, request.request_id,
                                Error::NOT_FOUND, "release");
         AuthorityJob job;
@@ -344,6 +345,7 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         job.key = SessionKey{session.client_id_, request.request_id};
         job.client_id = session.client_id_;
         job.lease_id = request.release.lease_id;
+        job.receiver = session.lease_receivers_[lease_slot];
         if (!executor.submit(job))
             return error_reply(session, request.opcode, request.request_id,
                                Error::RESOURCE_LIMIT, "release");

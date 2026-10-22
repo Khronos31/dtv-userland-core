@@ -5,7 +5,9 @@
 default. Build it with
 `DTV_USERLAND_BUILD_RECEIVER=ON`, `DTV_USERLAND_BUILD_CARD=ON`,
 `DTV_USERLAND_BUILD_HOST_TUNER=ON`, and
-`DTV_USERLAND_BUILD_HOST_WORKERS=ON`. Installed consumers request the
+`DTV_USERLAND_BUILD_CONTROL=ON`, `DTV_USERLAND_BUILD_STATUS_PROJECTION=ON`,
+`DTV_USERLAND_BUILD_AUTHORITY=ON`, and `DTV_USERLAND_BUILD_HOST_WORKERS=ON`.
+Installed consumers request the
 `host_workers` component and link `dtv::host_workers`:
 
 ```cmake
@@ -13,10 +15,13 @@ find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS host_workers)
 target_link_libraries(app PRIVATE dtv::host_workers)
 ```
 
-The target reuses the existing TunerService owner and CARD ownership engine.
-It does not add a control server, socket, runtime, authority dispatch,
-production producer, or product connection. The worker owns submitted task
-values; it does not retain a client, socket, or frame-buffer view.
+The target reuses the existing TunerService owner, CARD ownership engine, and
+ControlAuthority job values. A worker can execute an already-admitted
+Authority TUNE, RELEASE, or DISCONNECT against the same private TunerService
+Engine; it does not expose an Engine accessor. The worker owns submitted task
+values; it does not retain a client, session, socket, or frame-buffer view.
+There is no control server, socket, session coordinator, runtime dispatch,
+production producer, or product connection in this target.
 
 The bounded completion queue applies normal backpressure: while it is full,
 the worker waits for the poll-side consumer to remove a completion and signal

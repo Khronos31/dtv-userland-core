@@ -6,13 +6,13 @@
   "source_files": [
     {
       "path": "adapters/host_daemon/src/control_workers.cpp",
-      "lines": 1440,
-      "sha256": "c20140088cafa4d0663992b21ee647482f3c07ea05f4a40930149a2031d918d2"
+      "lines": 1507,
+      "sha256": "cffd9db570b391ef03bde3ccba8a0080f7133d48b39213f7cd4fba50f389e053"
     },
     {
       "path": "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h",
-      "lines": 231,
-      "sha256": "a5778ef09b19a020d6b42a92a78a0781b8e8f187cbd1f295b5cb3dca23d5f7c8"
+      "lines": 243,
+      "sha256": "95b08133f0ba592b9ba6a775847b26c1d1f6677889304a98f688493a7e20bbf7"
     },
     {
       "path": "adapters/host_daemon/include/px4/control_execution_layout.h",
@@ -40,5 +40,5 @@
       "sha256": "73e7b79d3ee6b3f2c9d760254f862462f99736d5d33123deb0da9f8f8c62c5f2"
     }
   ],
-  "scope": "Existing ControlWorkerLanes and CardService source/header snapshot only; no authority dispatch, server, socket, runtime, facade implementation, or product backend"
+  "scope": "Existing ControlWorkerLanes and CardService GPL source/header snapshot, extended to execute owned ControlAuthority job values through the same private TunerService Engine; no session coordinator, server, socket, runtime, facade implementation, or product backend"
 }

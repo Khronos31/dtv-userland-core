@@ -6,6 +6,8 @@
 #include "px4/control_execution_layout.h"
 #include "px4/tuner_service.h"
 
+#include <dtv/userland/detail/control_authority.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -72,6 +74,7 @@ enum class ControlWorkerOperation : std::uint8_t {
     card_end_transaction,
     card_release_connection,
     card_shutdown,
+    tuner_authority_job,
 };
 
 // Internal routing/ownership classification. This is separate from
@@ -80,6 +83,8 @@ enum class ControlWorkerTaskKind : std::uint8_t {
     client_request,
     cleanup,
     background,
+    authority_request,
+    authority_cleanup,
 };
 
 // All task fields own their data. In particular, no task contains a Client,
@@ -127,6 +132,7 @@ struct ControlWorkerTask final {
     bool attachment_valid = false;
     // Exact v1 attachment ticket for prepare and the physical cleanup.
     dtv::userland::detail::StreamAttachTicket stream_ticket{};
+    dtv::userland::detail::AuthorityJob authority_job{};
     bool lnb_enabled = false;
     dtv::userland::wire::Scope status_scope{};
 };
@@ -140,6 +146,9 @@ struct ControlWorkerCompletion final {
     std::uint32_t request_id = 0U;
     std::uint8_t receiver = 0U;
     std::uint64_t lease_id = 0U;
+    dtv::userland::detail::SessionKey authority_key{};
+    dtv::userland::detail::AuthorityJobKind authority_job_kind =
+        dtv::userland::detail::AuthorityJobKind::tune;
     std::uint64_t card_handle = 0U;
     Error error = Error::OK;
     TunerAcquireResult tuner_acquire{};
@@ -221,6 +230,9 @@ public:
     Result<void> join() noexcept;
 
 private:
+    static Error execute_authority_job(
+        TunerService& tuner_service,
+        const dtv::userland::detail::AuthorityJob& job) noexcept;
     struct Impl;
     explicit ControlWorkerLanes(std::unique_ptr<Impl> impl) noexcept;
     std::unique_ptr<Impl> impl_;
