@@ -259,6 +259,11 @@ if(DTV_USERLAND_BUILD_TESTING)
         endif()
         add_test(NAME receiver_r2_tests COMMAND receiver_r2_tests)
         set_tests_properties(receiver_r2_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(receiver_hz_tests tests/receiver_hz_tests.cpp)
+        target_link_libraries(receiver_hz_tests PRIVATE dtv::receiver)
+        add_test(NAME receiver_hz_tests COMMAND receiver_hz_tests)
+        set_tests_properties(receiver_hz_tests PROPERTIES TIMEOUT 120)
     endif()
 
     set(DTV_LEGACY_SOURCE "" CACHE PATH "Fixed PX4 userland source tree for equivalence check")

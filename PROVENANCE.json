@@ -122,6 +122,17 @@
       ],
       "scope": "Internal opt-in strict capabilities, callback-free metadata admission, an end-to-end tune budget measured from admission, cancellation-safe tickets, and token-free operation/tune metadata. No public v1 wire record, token exposure, product facade cutover, or backend change.",
       "new_files": "tests/receiver_r2_tests.cpp is independently written and carries MIT."
+    },
+    "exact_hz_extension": {
+      "method": "New internal engine entrance and backend seam, adapting the accepted Hz request contract to the existing strict admission, pending ticket, tune stages and final publication. No product source or arithmetic was copied.",
+      "authority": [
+        "design/common-api-contract.md section 5",
+        "design/adoption-status.md, frequency and hardware capability qualifications",
+        "design/core-pr16-next-increment-plan-20261022.md, candidate A",
+        "subagent/instructions/20261022-core-exact-hz-code.md"
+      ],
+      "scope": "Exact u64 requested Hz is passed to an opt-in backend callback and retained with optional backend-reported programmed Hz. Legacy direct and strict kHz entrances retain the existing kHz callback. No rounding, common upper bound, channel formula, product adapter, capture, control-client, CLI, or wire connection is introduced.",
+      "new_files": "tests/receiver_hz_tests.cpp is independently written and carries MIT."
     }
   },
   "identity": {

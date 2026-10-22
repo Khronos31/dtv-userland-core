@@ -8,6 +8,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <mutex>
+#include <optional>
 
 // Internal compatibility engine for receiver leases, tuning, and stream
 // attachment.  It carries the existing PX4 TunerService lifecycle unchanged so
@@ -15,7 +16,8 @@
 // v1 receiver contract: the legacy direct tune path keeps its post-power
 // origin and enforces no end-to-end deadline, while strict mode after
 // configure_strict_capabilities enforces an end-to-end budget measured from
-// admission.  Frequencies are kHz, and there are no public wire IDs,
+// admission.  The legacy tune entrance uses kHz; the strict Hz overload keeps
+// its requested frequency as u64 Hz.  There are no public wire IDs,
 // verification results, or JSON records.  These declarations may change
 // without notice and are not a stable API.
 namespace dtv::userland::detail {
@@ -66,6 +68,26 @@ struct TuneRequest final {
     Error validation = Error::OK;
 };
 
+// Strict tune request with an exact canonical frequency in Hz.  The caller
+// supplies the same bounded validation decision as for the kHz request; this
+// engine does not add a frequency range or conversion rule.
+struct HzTuneRequest final {
+    std::uint64_t lease_id = 0U;
+    ReceiverSystem system = ReceiverSystem::terrestrial;
+    std::uint64_t requested_hz = 0U;
+    std::uint16_t stream_id = 0xffffU;
+    std::uint16_t slot = 0xffffU;
+    std::uint8_t lnb_voltage = 0U;
+    std::uint32_t timeout_ms = 0U;
+    Error validation = Error::OK;
+};
+
+// Optional backend-reported command value in the same domain as requested_hz.
+// It is a programmed value, not an RF measurement.
+struct TuneProgramming final {
+    std::optional<std::uint64_t> programmed_hz{};
+};
+
 // Immutable per-receiver capability descriptor for strict admission.  The
 // product supplies the audited model/count metadata once before its workers
 // start; strict admission then never calls the virtual supports predicate.
@@ -73,6 +95,7 @@ struct ReceiverCapability final {
     ReceiverId receiver = 0U;
     bool supports_terrestrial = false;
     bool supports_satellite = false;
+    bool native_hz = false;
 };
 
 // Conservative per-receiver strict operation marker.  It is independent of
@@ -84,9 +107,9 @@ enum class ReceiverTuneOperation : std::uint8_t {
     cleanup = 2U,
 };
 
-// Permitted internal R2 tune fields in kHz.  It deliberately excludes the
-// lease ID, client identity, token, and validation credential that a request
-// carries, so a status snapshot can never expose them.
+// Permitted internal tune fields.  frequency_khz is populated for legacy
+// kHz requests; exact-Hz requests use requested_hz.  Lease identity and
+// validation credentials are never exposed in a status snapshot.
 struct TuneRecord final {
     ReceiverSystem system = ReceiverSystem::terrestrial;
     std::uint32_t frequency_khz = 0U;
@@ -94,10 +117,13 @@ struct TuneRecord final {
     std::uint16_t slot = 0xffffU;
     std::uint8_t lnb_voltage = 0U;
     std::uint32_t timeout_ms = 0U;
+    bool exact_hz = false;
+    std::uint64_t requested_hz = 0U;
+    std::optional<std::uint64_t> programmed_hz{};
 };
 
-// Internal R2 tune metadata in kHz.  It is not the adopted public v1 Hz
-// record and is never presented as a completed wire record.
+// Internal tune metadata.  It is not the adopted public v1 record and is
+// never presented as a completed wire record.
 struct TuneMetadata final {
     std::uint64_t revision = 0U;
     bool current_valid = false;
@@ -122,6 +148,8 @@ struct AdmittedTune final {
     std::uint64_t tune_revision = 0U;
     std::uint64_t accepted_at_ms = 0U;
     TuneRequest request{};
+    bool exact_hz = false;
+    std::uint64_t requested_hz = 0U;
 };
 
 struct AcquireResult final {
@@ -160,8 +188,8 @@ struct ReceiverEngineStatus final {
     std::size_t receiver_count = 0U;
     std::array<ReceiverId, kReceiverEngineCapacity> receivers{};
     std::array<ReceiverState, kReceiverEngineCapacity> states{};
-    // Token-free strict operation and tune metadata.  It is internal kHz
-    // compatibility state, not a completed public v1 record.
+    // Token-free strict operation and tune metadata.  It is internal engine
+    // state, not a completed public v1 record.
     std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
     std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata{};
 };
@@ -179,6 +207,20 @@ public:
     virtual Result<void> tune(ReceiverId receiver, ReceiverSystem system,
                               std::uint32_t frequency_khz,
                               std::uint32_t timeout_ms) noexcept = 0;
+    // Strict Hz programming has no shared kHz fallback.  Backends opt in by
+    // declaring native_hz in their immutable capability table and overriding
+    // this callback.
+    virtual Result<TuneProgramming> program_hz(ReceiverId receiver,
+                                               ReceiverSystem system,
+                                               std::uint64_t requested_hz,
+                                               std::uint32_t timeout_ms) noexcept
+    {
+        (void)receiver;
+        (void)system;
+        (void)requested_hz;
+        (void)timeout_ms;
+        return Result<TuneProgramming>::failure(Error::UNSUPPORTED);
+    }
     virtual Result<bool> is_locked(ReceiverId receiver, ReceiverSystem system) noexcept = 0;
     virtual Result<void> select_satellite_slot(ReceiverId receiver, std::uint8_t slot,
                                                std::uint32_t timeout_ms) noexcept = 0;
@@ -300,6 +342,9 @@ public:
     Result<AdmittedTune> try_admit_tune(std::uint64_t client_id,
                                         const TuneRequest& request,
                                         std::uint64_t accepted_at_ms) noexcept;
+    Result<AdmittedTune> try_admit_tune(std::uint64_t client_id,
+                                        const HzTuneRequest& request,
+                                        std::uint64_t accepted_at_ms) noexcept;
     // Executes one admitted ticket with the shared tune algorithm and the
     // admitted end-to-end budget.  It rechecks ticket identity, revision and
     // cancellation before the hardware stages and at the final commit.
@@ -385,6 +430,11 @@ private:
                            std::uint32_t timeout_ms, bool admitted,
                            const AdmittedTune& ticket) noexcept;
     bool capability_supports_locked(std::size_t slot, ReceiverSystem system) const noexcept;
+    Result<AdmittedTune> admit_tune(std::uint64_t client_id,
+                                    const TuneRequest& request,
+                                    std::uint64_t accepted_at_ms,
+                                    bool exact_hz,
+                                    std::uint64_t requested_hz) noexcept;
     bool ticket_current_locked(const AdmittedTune& ticket) const noexcept;
     // True when this exact ticket owns the slot: a matching pending ticket, or
     // the operation this ticket started (same lease instance and revision).
@@ -406,7 +456,10 @@ private:
                                          std::uint64_t revision) noexcept;
     // Invalidate current while retaining the last-successful history.
     void invalidate_current_locked(std::size_t slot) noexcept;
-    static TuneRecord tune_record(const TuneRequest& request) noexcept;
+    static TuneRecord tune_record(const TuneRequest& request,
+                                  bool exact_hz = false,
+                                  std::uint64_t requested_hz = 0U,
+                                  std::optional<std::uint64_t> programmed_hz = {}) noexcept;
     // Drops the pending ticket but leaves the operation marker alone, so a
     // synchronous logical-teardown invalidation keeps the receiver excluded
     // until the in-flight execution returns.
@@ -420,7 +473,8 @@ private:
     // Admitted tickets use the acceptance origin and end-to-end budget; the
     // legacy direct entrance keeps its post-power origin.
     Result<void> run_tune(std::size_t slot, const TuneRequest& request, bool admitted,
-                          const AdmittedTune& ticket) noexcept;
+                          const AdmittedTune& ticket, bool exact_hz = false,
+                          std::uint64_t requested_hz = 0U) noexcept;
 
     ReceiverBackend& backend_;
     ReceiverTokenSource& token_source_;
