@@ -28,6 +28,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `identity_tests`（`dtv::identity`）
 - `tuning_tests`（`dtv::tuning`）
 - `status_json_tests`、`status_json_consumer`（`dtv::json`）
+- `discovery_json_tests`、`discovery_json_consumer`（`dtv::json`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
 - `receiver_engine_tests`、`receiver_r2_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
 
@@ -110,8 +111,11 @@ HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベン
 
 `StatusResponse` と canonical LIST を含む context を受け取り、API 内で完全検証したうえで、コンパクトな単一の UTF-8 JSON オブジェクト（末尾改行あり、NUL なし）へ投影する境界付き API（`status_json_size`、`encode_status_json`）を提供する。動的メモリ確保は行わず、書き込み前に容量と値の検証を行うため、バッファ不足や不正な入力があっても出力バッファを破壊しない。
 - 公開される `model` はモデル名文字列（例: `"PX-Q3U4"`）または `null` のみであり、数値や内部のモデル識別子は出力しない（採択済みの response 2.A / RC47 決定に基づく）。
-- STATUS JSON では `receivers[].descriptor.capabilities` を出力しない。カードリーダーと LNB の静的構成は discovery JSON で公開する方針であるが、本ブランチには discovery JSON の実装は含まれない。LNA の値および既定値のみが今後の調査対象として保留されている。
-- 全スキャン集約階層（`enclosures[].devices[].receivers[]`）、`serial_unique`、CLI、デーモン、製品接続は本ライブラリには含まれない。詳細は [docs/json-status.md](docs/json-status.md) を参照のこと。
+- STATUS JSON では `receivers[].descriptor.capabilities` を出力しない。カードリーダーと LNB の静的構成は discovery JSON で公開する。LNA の値および既定値のみが今後の調査対象として保留されている。
+
+### Discovery JSON 投影 (`dtv::json`)
+
+全スキャン結果を `enclosures[].devices[].receivers[]` の階層と `serial_unique` を含む JSON へ投影する。[Discovery JSON の仕様](docs/json-discovery.md) を参照のこと。物理的な探索、CLI、デーモン、製品接続は本ライブラリでは行わない。STATUS JSON の詳細は [docs/json-status.md](docs/json-status.md) を参照のこと。
 
 ### デバイス識別コーデック (`dtv::identity`)
 
