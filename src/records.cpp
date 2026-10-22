@@ -525,7 +525,7 @@ bool codec(Ar& ar, Producer& value) noexcept
 template <typename Ar>
 bool codec(Ar& ar, Model& value) noexcept
 {
-    return string_field(ar, value.id) && string_field(ar, value.name);
+    return string_field(ar, value.name);
 }
 
 template <typename Ar>

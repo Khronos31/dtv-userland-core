@@ -124,6 +124,8 @@ void test_projection_contract()
     w::ListResponse list;
     w::StatusResponse status = make_status(list);
     const std::string json = encode(status, list);
+    CHECK(json.find("\"model\":\"PX-Q3U4\"") != std::string::npos);
+    CHECK(json.find("model_id") == std::string::npos);
     CHECK(json.find("\"serial\":\"serial-\\\"\\\\\\t\"") != std::string::npos);
     CHECK(json.find("\"lnb_15v_enabled\":true") != std::string::npos);
     CHECK(json.find("\"card_inserted\":false") != std::string::npos);
