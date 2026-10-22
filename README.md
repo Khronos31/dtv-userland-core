@@ -4,7 +4,7 @@
 
 ## 提供ライブラリと構成
 
-静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）、`dtv::control`（`DTV_USERLAND_BUILD_CONTROL`、既定値 OFF）、`dtv::status_projection`（`DTV_USERLAND_BUILD_STATUS_PROJECTION`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
+静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）、`dtv::control`（`DTV_USERLAND_BUILD_CONTROL`、既定値 OFF）、`dtv::status_projection`（`DTV_USERLAND_BUILD_STATUS_PROJECTION`、既定値 OFF）、`dtv::authority`（`DTV_USERLAND_BUILD_AUTHORITY`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
 
 ### 依存関係
 
@@ -14,11 +14,12 @@
 - `dtv::json`: `dtv::wire` にリンク
 - `dtv::control`: `dtv::wire` にリンク。socketなしprotocol gateと、transport注入のHELLO/LIST/STATUS read-only clientを提供
 - `dtv::status_projection`: `dtv::control` と `dtv::receiver` にリンク。canonical LIST由来のSTATUS shellへengine状態を投影
+- `dtv::authority`: `dtv::status_projection` にリンク。socketなしcontrol authority/session serviceを提供
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
 - `dtv::capture`: `dtv::core` および `Threads` にリンク。receiver エンジンには依存しない
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
-実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` / `dtv::capture` / `dtv::control` / `dtv::status_projection` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。これらは OS や USB に依存しない。スレッド（Threads）を使うのはオプショナルな `dtv::receiver`、`dtv::capture`、`dtv::status_projection` である。
+実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` / `dtv::capture` / `dtv::control` / `dtv::status_projection` / `dtv::authority` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。これらは OS や USB に依存しない。スレッド（Threads）を使うのはオプショナルな `dtv::receiver`、`dtv::capture`、`dtv::status_projection` である。
 
 外部向けの公開契約は ctl CLI および JSON であり、ワイヤプロトコルは同一リリース内の内部通信に限定される。
 

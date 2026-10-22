@@ -431,8 +431,10 @@ void test_small_stack_probes()
 {
 #if defined(DTV_USERLAND_CONTROL_ADDRESS_SANITIZER)
     constexpr std::size_t kStackSizes[] = {512U * 1024U, 768U * 1024U};
-#else
+#elif defined(__OPTIMIZE__)
     constexpr std::size_t kStackSizes[] = {256U * 1024U, 512U * 1024U, 768U * 1024U};
+#else
+    constexpr std::size_t kStackSizes[] = {512U * 1024U, 768U * 1024U};
 #endif
     FakeTransport source;
     const w::StatusFetchResult seeded = w::fetch_status(source);

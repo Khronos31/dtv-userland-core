@@ -29,8 +29,10 @@ authority resolves the key in its live session table while producing a reply.
 Closing removes the session from the table first and revokes each pending tune
 ticket before the disconnect cleanup job is handed off. Queued jobs then fail
 Engine ticket revalidation; running work completes against the live Engine,
-and its later key lookup is discarded. Engine/backend ownership must outlive
-both outcomes.
+and its later key lookup is discarded. A completion discarded after its
+session has been removed (including a duplicate completion) has no reply frame
+and no cleanup job. The host must not close a still-live connection because of
+that discard result. Engine/backend ownership must outlive both outcomes.
 
 The host executor must provide parallel progress for cleanup on one receiver
 while another receiver is blocked in TUNE. `ReceiverEngine` already serializes
