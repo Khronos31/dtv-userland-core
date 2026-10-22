@@ -200,6 +200,20 @@
       }
     ]
   },
+  "capture": {
+    "method": "Adapted only the bounded complete-packet store and session/read-ticket state from the isolated Core capture increment. Receiver identity and observation declarations were split into a neutral header so receiver-only and capture-only builds remain independent. No product producer, control client, transport owner, or USB code is included.",
+    "authority": [
+      "agent-workspace design/independent-code-policy.md and continuation policy",
+      "agent-workspace design/core-pr16-next-increment-plan-20261022.md, candidate B",
+      "agent-workspace implementation/capture-common-origin-review.md",
+      "agent-workspace implementation/packet-session-spec-review.md",
+      "agent-workspace design/common-api-contract.md section 7",
+      "subagent/instructions/20261022-core-capture-store-code.md"
+    ],
+    "reuse": "The generic PacketStreamSession declarations and storage/read/final algorithms were selectively adapted from Core commit fc69ca2. The v1 queue policy is separately adapted from the later old-stack implementation at 80ccc7b; the old stack was not merged or cherry-picked. The prior old-race proof harness is not reused.",
+    "scope": "Internal opt-in dtv::capture target with bounded 188-byte packet storage, full-identity attach/final checks, drain/final observation, and incarnation-guarded read tickets. legacy keeps full-ring rejection and slow_consumer; evict_oldest drops the oldest unread complete packet and continues. Receiver, transport byte views, OS, USB, producer, callback quiescence, socket/control, CLI, product composition, and hardware are excluded.",
+    "new_files": "include/dtv/userland/detail/stream_session_types.h, include/dtv/userland/detail/packet_stream_session.h, src/packet_stream_session.cpp, tests/packet_stream_session_tests.cpp, tests/consumer/capture/, and tests/consumer/capture_receiver/ are MIT."
+  },
   "json": {
     "method": "New independent bounded STATUS JSON projection. The previous Core #13 implementation was consulted for size counting, JSON escaping and validation-before-write properties only; its public field map and fixture were not adopted.",
     "authority": [
