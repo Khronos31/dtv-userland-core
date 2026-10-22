@@ -1,19 +1,135 @@
 # DTV userland common core
 
-This repository contains a first, portable C++17 increment of shared DTV userland code. It provides the reviewed error/result, logging, mock transport foundation and a bounded UDTV 1.0 wire subset. It is not a daemon, hardware transport, complete wire protocol, or card implementation.
+本リポジトリは、DTV ユーザーランド製品群で共有する C++17 の移植可能な共通基盤（初期インクリメント）を提供する。レビュー済みの error/result、ロギング、モック転送基盤、および境界付き UDTV 1.0 ワイヤサブセットを備える。デーモン、ハードウェア転送、完全なワイヤプロトコル、カードの実装そのものではない。
 
-The static libraries are `dtv::core`, `dtv::wire`, `dtv::identity`, `dtv::tuning`, and the optional `dtv::receiver` (CMake option `DTV_USERLAND_BUILD_RECEIVER`, default off). Consumers can use the installed CMake package with `find_package(dtv_userland_core CONFIG REQUIRED)`. The wire library links the core library, identity links core, tuning links wire, and receiver links core plus Threads. The core-facing targets compile without exceptions or RTTI and have no operating-system or USB dependency; the optional receiver target is described below.
+## 提供ライブラリと構成
 
-Configure with CMake and enable `BUILD_TESTING` to build the standalone tests for the enabled targets: foundation, wire/records, identity, tuning, and, with `DTV_USERLAND_BUILD_RECEIVER`, the receiver engine tests. The optional `DTV_LEGACY_SOURCE` cache path enables the behavioral equivalence check against a fixed PX4 source checkout. See `PROVENANCE.json` for the source pin, extracted-file hashes, per-file source/destination SPDX identifiers, moved ranges, and exclusions.
+静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部互換エンジンとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）および `dtv::card`（CMake オプション `DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
 
-The root MIT license applies to this candidate's approved foundation destinations, independently implemented wire subset, and newly added build, packaging, test, and documentation files. It does not relicense the full PX4 product, unlisted source files, third-party material, or any future GPL adapter. This records the approved license scope and does not assert or infer copyright ownership or authorship. The scope follows `design/independent-code-policy.md`, the user's continuation policy recorded at 2026-10-18 02:44 JST, and the first-increment implementation start at 2026-10-18 03:06 JST.
+### 依存関係
 
-The optional static library `dtv::receiver` (CMake option `DTV_USERLAND_BUILD_RECEIVER`, default off; consumers that need it enable it explicitly) contains an internal compatibility engine for receiver leases, tuning, and stream attachment in `dtv/userland/detail/receiver_engine.h`. It is the PX4 TunerService lifecycle moved behind neutral types, so that product facades share one implementation; it is not the adopted v1 receiver contract and not a stable API. The legacy direct tune path starts timing after the receiver and power preparation exactly as before and has no end-to-end deadline; strict mode (`configure_strict_capabilities`) instead enforces an end-to-end budget measured from admission. Frequencies are kHz. Receiver IDs are u16 identities independent of the eight-slot table. The receiver set is fixed when the engine is constructed; the supported consumers (the PX4 Q3U4, W3U4, MLT, and single-receiver backends, and ASICEN after its profile selection) have fixed receiver counts for the life of the service. Receivers that appear or disappear later are not supported by this increment. Only this target links Threads; installed consumers request it with `find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS receiver)`.
+- `dtv::wire`: `dtv::core` にリンク
+- `dtv::identity`: `dtv::core` にリンク
+- `dtv::tuning`: `dtv::wire` にリンク
+- `dtv::json`: `dtv::wire` にリンク
+- `dtv::receiver`: `dtv::core` および `Threads` にリンク
+- `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
-The typed wire payload API includes HELLO, ACQUIRE, LIST/STATUS, tune and stream operations, events, and card/transaction records, alongside the bounded UDTV 1.0 envelope and frame handling. [Typed record documentation](docs/wire-records.md) separates byte syntax from complete context validation; callers must validate snapshots before publishing them. The original framing subset is described in [docs/wire-subset.md](docs/wire-subset.md). Connection state, dispatch, timers, sockets, JSON/CLI translation and product endpoint migration remain outside this library increment. No current product client or daemon is wired to the new wire API.
+実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。コア側の各ターゲットは OS や USB への依存を持たない（オプショナルな `dtv::receiver` のみスレッド（Threads）にリンクする）。
 
-The optional `dtv::card` interface target (CMake option `DTV_USERLAND_BUILD_CARD`, default off) exposes the internal `detail::CardOwnershipEngine<AtrSnapshot>` in `card_ownership_engine.h` and its template implementation. It carries the existing serialized ownership, sharing, presence/generation, transaction, and cleanup behavior behind neutral byte/session/backend seams. ATR snapshots are opaque values; product `CardAtr`, native protocol sessions, ATR parsing, T=1, IPC enums, and hardware code stay in their separately licensed product facade. The engine has no Threads, USB, or operating-system dependency and is not a public v1 card/deadline/multiple-reader contract. Installed consumers request it with `find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS card)`.
+外部向けの公開契約は ctl CLI および JSON であり、ワイヤプロトコルは同一リリース内の内部通信に限定される。
 
-The static library `dtv::identity` implements the adopted portable identity codecs: the `serial:`/`usb:` device selector grammar, case-preserving connection instance validation and reserved-name rejection, the exact-span LANGID/USB string descriptor decoders (strict UTF-16LE to lossless UTF-8), and the versioned `DTVI` auto-identity encoding with `auto-` SHA-256-prefixed instances. It is pure and bounded, never allocates and never touches USB/OS state; physical discovery, serial trust/uniqueness, permissions/ACL and USB FD ownership stay in the OS adapters. The one mechanically transferred part is the neutral SHA-256 class in `dtv/userland/detail/sha256.h`; all other code is new. See [docs/identity.md](docs/identity.md).
+## ビルドとテスト
 
-The portable `dtv::tuning` helper resolves adopted channel or typed-Hz inputs into a wire system, requested Hz, and wire selection. Its grammar and boundaries are documented in [docs/tuning.md](docs/tuning.md). It preserves requested Hz and does not implement option parsing, device capability checks, backend quantization, or a product CLI cutover.
+CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）を有効にすると、有効化されたターゲットの単体テストをビルドできる。
+
+- `foundation_tests`（`dtv::core`）
+- `wire_tests`、`records_tests`（`dtv::wire`）
+- `identity_tests`（`dtv::identity`）
+- `tuning_tests`（`dtv::tuning`）
+- `status_json_tests`、`status_json_consumer`（`dtv::json`）
+- `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
+- `receiver_engine_tests`、`receiver_r2_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
+
+### ビルド・テスト手順
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+オプショナルコンポーネントを有効にする場合:
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
+  -DDTV_USERLAND_BUILD_RECEIVER=ON \
+  -DDTV_USERLAND_BUILD_CARD=ON
+cmake --build build
+ctest --test-dir build --output-on-failure
+```
+
+オプションの `DTV_LEGACY_SOURCE` キャッシュパスを指定すると、固定された PX4 ソースツリーとの振る舞い等価性検証（`legacy_equivalence`）を実行できる。
+ソースの固定位置、抽出ファイルのハッシュ、ファイル単位の SPDX 識別子、移動範囲、除外項目は `PROVENANCE.json` を参照のこと。
+
+## インストールと利用 (CMake Consumer)
+
+### インストール
+
+```sh
+cmake --install build --prefix /path/to/install
+```
+
+### 利用側の設定 (CMakeLists.txt)
+
+利用側プロジェクトでは `find_package` でパッケージを読み込み、必要なターゲットをリンクする。
+
+```cmake
+find_package(dtv_userland_core CONFIG REQUIRED)
+
+# 基本ライブラリの利用例
+add_executable(my_consumer main.cpp)
+target_link_libraries(my_consumer PRIVATE
+    dtv::core
+    dtv::wire
+    dtv::identity
+    dtv::tuning
+    dtv::json
+)
+```
+
+オプショナルな内部エンジンを利用する場合は `COMPONENTS` を指定する。なお、consumer が `COMPONENTS receiver` や `card` を要求する場合、インストール元（ライブラリ側）のビルド時にもそれぞれ `DTV_USERLAND_BUILD_RECEIVER=ON`、`DTV_USERLAND_BUILD_CARD=ON` が指定されてインストールされている必要がある。
+
+```cmake
+# receiver エンジンを利用する場合（Threads が自動検出される）
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS receiver)
+target_link_libraries(my_consumer PRIVATE dtv::receiver)
+
+# card エンジンを利用する場合
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS card)
+target_link_libraries(my_consumer PRIVATE dtv::card)
+```
+
+### 利用側のビルド手順
+
+任意の prefix へインストールしたパッケージを利用する場合、configure 時に `CMAKE_PREFIX_PATH` でインストール先を指定する。
+
+```sh
+cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DCMAKE_PREFIX_PATH=/path/to/install
+cmake --build build
+```
+
+## 各コンポーネントの詳細
+
+### 型付きワイヤペイロード (`dtv::wire`)
+
+HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベント、カード／トランザクションレコード、ならびに境界付き UDTV 1.0 エンベロープとフレーム処理を提供する。[型付きレコードの仕様](docs/wire-records.md) ではバイト構文と文脈検証を分離しており、呼び出し側はスナップショットを公開する前に検証を行わなければならない。初期のフレーム処理サブセットは [docs/wire-subset.md](docs/wire-subset.md) に記載されている。
+接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は本インクリメントの対象外である。現行の製品クライアントやデーモンは、新しいワイヤ API に直接接続されていない。
+
+### STATUS JSON 投影 (`dtv::json`)
+
+`StatusResponse` と canonical LIST を含む context を受け取り、API 内で完全検証したうえで、コンパクトな単一の UTF-8 JSON オブジェクト（末尾改行あり、NUL なし）へ投影する境界付き API（`status_json_size`、`encode_status_json`）を提供する。動的メモリ確保は行わず、書き込み前に容量と値の検証を行うため、バッファ不足や不正な入力があっても出力バッファを破壊しない。
+- 公開される `model` はモデル名文字列（例: `"PX-Q3U4"`）または `null` のみであり、数値や内部のモデル識別子は出力しない（採択済みの response 2.A / RC47 決定に基づく）。
+- STATUS JSON では `receivers[].descriptor.capabilities` を出力しない。カードリーダーと LNB の静的構成は discovery JSON で公開する方針であるが、本ブランチには discovery JSON の実装は含まれない。LNA の値および既定値のみが今後の調査対象として保留されている。
+- 全スキャン集約階層（`enclosures[].devices[].receivers[]`）、`serial_unique`、CLI、デーモン、製品接続は本ライブラリには含まれない。詳細は [docs/json-status.md](docs/json-status.md) を参照のこと。
+
+### デバイス識別コーデック (`dtv::identity`)
+
+採択されたポータブル識別コーデックを実装する。`serial:` / `usb:` デバイスセレクタ文法、大文字小文字を保持する接続インスタンス検証と予約名拒絶、正確なスパンによる LANGID/USB 文字列記述子デコーダ（厳格な UTF-16LE から可逆 UTF-8 への変換）、および `auto-` SHA-256 接頭辞付きインスタンスによるバージョン付き `DTVI` 自動識別エンコーディングを提供する。純粋かつ有界で、動的メモリ確保を行わず、OS や USB の状態を変更しない。物理的な探索、シリアルの一意性・信頼性判定、権限／ACL、USB ファイルディスクリプタの所有権は OS アダプタ側に留まる。機械的に移植された部分は `dtv/userland/detail/sha256.h` 内の中立な SHA-256 クラスのみであり、他は新規実装である。詳細は [docs/identity.md](docs/identity.md) を参照のこと。
+
+### 選局リゾルバ (`dtv::tuning`)
+
+採択されたチャンネル表記または型付き周波数（Hz）入力を、ワイヤシステム、要求周波数（Hz）、ワイヤ選局パラメータへと解決するポータブルヘルパーである。要求周波数をそのまま保持し、オプション解析、デバイス能力検査、バックエンドでの量子化、製品 CLI の切り替えは本インクリメントでは扱わない。文法と境界は [docs/tuning.md](docs/tuning.md) を参照のこと。
+
+### 受信機ライフサイクル互換エンジン (`dtv::receiver`)
+
+受信機のリース、選局、ストリーム接続を扱う内部互換エンジンを `dtv/userland/detail/receiver_engine.h` で提供する（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）。各製品ファサードが単一の実装を共有できるよう、PX4 TunerService のライフサイクルを中立な型へ移行したものであり、採択された v1 受信機契約ではなく、安定した公開 API でもない。
+従来の直接選局パスは受信機と電源の準備完了後から計時を開始し、エンドツーエンドのデッドラインを持たない。一方、厳格モード（`configure_strict_capabilities`）では受付時からのエンドツーエンドの予算を強制する。周波数単位は kHz、受信機 ID は 8 スロットテーブルから独立した u16 識別子である。受信機セットはエンジン構築時に固定される。サポート対象のコンシューマ（PX4 Q3U4、W3U4、MLT、単一受信機バックエンド、およびプロファイル選択後の ASICEN）はサービスの存続期間中に固定の受信機数を持つ。後から出現または消失する動的受信機は本インクリメントではサポートしない。本ターゲットのみスレッド（Threads）にリンクする。
+
+### カード排他制御互換エンジン (`dtv::card`)
+
+`card_ownership_engine.h` およびテンプレート実装 `card_ownership_engine.tpp` において、内部の `detail::CardOwnershipEngine<AtrSnapshot>` を公開する（CMake オプション `DTV_USERLAND_BUILD_CARD`、既定値 OFF）。既存のシリアライズされた排他制御、共有、存在／世代管理、トランザクション、解放処理を、中立なバイト／セッション／バックエンド境界の背後で提供する。ATR スナップショットは不透明な値として扱い、製品固有の `CardAtr`、ネイティブプロトコルセッション、ATR パース、T=1、IPC 列挙型、ハードウェアコードは別ライセンスの製品ファサード側に保持する。本エンジンはスレッド、USB、OS への依存を持たず、公開された v1 カード／デッドライン／複数リーダー契約ではない。
+
+## ライセンス範囲
+
+ルートの MIT ライセンスは、本候補で承認された基盤の移行先、独自実装されたワイヤサブセット、ならびに新規に追加されたビルド、パッケージング、テスト、ドキュメントの各ファイルに適用される。PX4 製品全体、リストされていないソースファイル、サードパーティの成果物、および将来の GPL アダプタを再ライセンスするものではない。これは承認されたライセンス範囲を記録するものであり、著作権の所有権や著作者を主張または推定するものではない。適用範囲は、外部ワークスペースの設計方針資料 `design/independent-code-policy.md`（本リポジトリには非同梱）、2026-10-18 02:44 JST に記録されたユーザーの継続方針、および 2026-10-18 03:06 JST の初期インクリメント実装開始に従う。本リポジトリにおける詳細なソースピン、抽出ハッシュ、SPDX 識別子、除外範囲の記録は `PROVENANCE.json` を参照のこと。
