@@ -118,6 +118,8 @@ CardStatusResult card_status(TimedClientTransport& transport,
                              Timeout timeout) noexcept;
 
 struct CardDisconnectResult final {
+    // A matching consumed completion clears the session even when cleanup fails;
+    // response and remote_error_code preserve the daemon's physical outcome.
     CardDisconnectResponse response;
     Error error = Error::OK;
     std::uint32_t remote_error_code = 0U;

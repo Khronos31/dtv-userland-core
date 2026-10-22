@@ -862,15 +862,21 @@ CardDisconnectResult card_disconnect(TimedClientTransport& transport,
         transport.close();
         return result;
     }
+    result.response = decoded.value();
+    session.card_handle = 0U;
+    session.bound_generation = 0U;
+    session.protocol = Optional<CardProtocol>{};
     if (decoded.value().error.present) {
+        result.remote_error_code = decoded.value().error.value.code;
+        result.error = remote_error(result.remote_error_code);
+        transport.close();
+        return result;
+    }
+    if (!decoded.value().quiesced) {
         result.error = Error::PROTOCOL_ERROR;
         transport.close();
         return result;
     }
-    session.card_handle = 0U;
-    session.bound_generation = 0U;
-    session.protocol = Optional<CardProtocol>{};
-    result.response = decoded.value();
     result.error = Error::OK;
     return result;
 }

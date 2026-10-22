@@ -133,6 +133,8 @@ enum class Fault : std::uint8_t {
     bad_disconnect_key,
     bad_disconnect_handle,
     card_not_consumed,
+    card_disconnect_unquiesced_error,
+    card_disconnect_unquiesced_without_error,
     truncated_card_connect,
 };
 
@@ -429,7 +431,12 @@ private:
             response.key.reader_id = request.card_disconnect.key.reader_id;
             response.card_handle = request.card_disconnect.key.card_handle;
             response.consumed = fault_ != Fault::card_not_consumed;
-            response.quiesced = true;
+            response.quiesced = fault_ != Fault::card_disconnect_unquiesced_error &&
+                                fault_ != Fault::card_disconnect_unquiesced_without_error;
+            if (fault_ == Fault::card_disconnect_unquiesced_error) {
+                response.error.present = true;
+                response.error.value.code = static_cast<std::uint32_t>(Error::USB_IO);
+            }
             if (fault_ == Fault::bad_disconnect_key) response.key.reader_id++;
             if (fault_ == Fault::bad_disconnect_handle) response.card_handle++;
             const auto encoded = w::encode_record_frame(
@@ -869,9 +876,12 @@ void test_card_session_failures_close_without_retry()
     CHECK(stale.request_count() == 6U);
 
     const Fault disconnect_faults[] = {Fault::bad_disconnect_key, Fault::bad_disconnect_handle,
-                                       Fault::card_not_consumed, Fault::card_disconnect_eof};
+                                       Fault::card_not_consumed,
+                                       Fault::card_disconnect_unquiesced_without_error,
+                                       Fault::card_disconnect_eof};
     const Error disconnect_errors[] = {Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR,
-                                       Error::PROTOCOL_ERROR, Error::DISCONNECTED};
+                                       Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR,
+                                       Error::DISCONNECTED};
     for (std::size_t index = 0U;
          index < sizeof(disconnect_faults) / sizeof(disconnect_faults[0]); ++index) {
         FakeTransport transport(disconnect_faults[index], false,
@@ -884,9 +894,35 @@ void test_card_session_failures_close_without_retry()
             transport, card_session, w::Disposition::leave,
             dtv::userland::Timeout{1000U});
         CHECK(!result && result.error == disconnect_errors[index]);
-        CHECK(card_session.card_handle == card.session.card_handle);
+        if (disconnect_faults[index] == Fault::card_disconnect_unquiesced_without_error) {
+            CHECK(result.response.consumed && !result.response.quiesced &&
+                  !result.response.error.present);
+            CHECK(card_session.card_handle == 0U && card_session.bound_generation == 0U &&
+                  !card_session.protocol.present);
+        } else {
+            CHECK(card_session.card_handle == card.session.card_handle);
+        }
         CHECK(transport.closed() && transport.request_count() == 6U);
     }
+
+    FakeTransport unquiesced(Fault::card_disconnect_unquiesced_error, false,
+                             w::kFeatureCardService, true);
+    const auto card = w::begin_card(
+        unquiesced, options, dtv::userland::Timeout{1000U});
+    CHECK(card);
+    auto card_session = card.session;
+    const auto cleanup_failed = w::card_disconnect(
+        unquiesced, card_session, w::Disposition::leave,
+        dtv::userland::Timeout{1000U});
+    CHECK(!cleanup_failed && cleanup_failed.error == Error::USB_IO);
+    CHECK(cleanup_failed.remote_error_code == static_cast<std::uint32_t>(Error::USB_IO));
+    CHECK(cleanup_failed.response.consumed && !cleanup_failed.response.quiesced &&
+          cleanup_failed.response.error.present &&
+          cleanup_failed.response.error.value.code == cleanup_failed.remote_error_code);
+    CHECK(card_session.card_handle == 0U && card_session.bound_generation == 0U &&
+          !card_session.protocol.present);
+    CHECK(unquiesced.closed() && unquiesced.request_count() == 6U &&
+          unquiesced.request_id(5U) == 6U);
 }
 
 void test_begin_recording_validator_and_two_budgets()
