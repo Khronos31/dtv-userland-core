@@ -78,9 +78,10 @@ struct RecordingControlResult final {
 using RecordingStatusValidator = Error (*)(const StatusSnapshot&, void*) noexcept;
 
 // Performs HELLO/LIST/STATUS with one timeout budget, then ACQUIRE/TUNE/START
-// with a fresh budget of the same size. The transport remains open on success
-// and closes on failure. A successful START means armed/accepted, not active
-// TS delivery; data connection and ATTACH remain caller-owned.
+// with a fresh budget of the same size for compatibility with the existing
+// recording helper. The transport remains open on success and closes on
+// failure. A successful START means armed/accepted, not active TS delivery;
+// data connection and ATTACH remain caller-owned.
 RecordingControlResult begin_recording(TimedClientTransport& transport,
                                        const RecordingOptions& options,
                                        Timeout timeout,
