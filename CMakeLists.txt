@@ -289,6 +289,12 @@ if(DTV_USERLAND_BUILD_TESTING)
 
         add_executable(control_client_tests tests/control_client_tests.cpp)
         target_link_libraries(control_client_tests PRIVATE dtv::control)
+        if(UNIX)
+            find_package(Threads REQUIRED)
+            target_link_libraries(control_client_tests PRIVATE Threads::Threads)
+            target_compile_definitions(control_client_tests PRIVATE
+                DTV_USERLAND_CONTROL_STACK_PROBES=1)
+        endif()
         add_test(NAME control_client_tests COMMAND control_client_tests)
     endif()
 

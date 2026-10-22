@@ -5,6 +5,8 @@
 
 #include <array>
 #include <cstring>
+#include <memory>
+#include <new>
 #include <utility>
 
 namespace dtv::userland::wire {
@@ -12,16 +14,23 @@ namespace {
 
 struct RawReply final {
     Header header{};
-    std::array<std::uint8_t, kMaxControlPayload> payload{};
     std::size_t length = 0U;
     bool seen = false;
+};
+
+constexpr std::size_t kRequestPayloadCapacity = 64U;
+
+struct ExchangeWorkspace final {
+    std::array<std::uint8_t, kHeaderSize + kRequestPayloadCapacity> outgoing{};
+    std::array<std::uint8_t, kMaxControlPayload> payload{};
+    std::array<std::uint8_t, 4096U> input{};
 };
 
 class ReplyHandler final : public FrameHandler {
 public:
     ReplyHandler(std::uint16_t opcode, std::uint32_t request_id,
-                 RawReply& reply) noexcept
-        : opcode_(opcode), request_id_(request_id), reply_(reply) {}
+                 RawReply& reply, MutableByteView payload) noexcept
+        : opcode_(opcode), request_id_(request_id), reply_(reply), payload_(payload) {}
 
     Result<void> on_frame(const Frame& frame) noexcept override
     {
@@ -29,14 +38,11 @@ public:
             (frame.header.kind != Kind::response &&
              frame.header.kind != Kind::error_response) ||
             frame.header.opcode != opcode_ || frame.header.request_id != request_id_ ||
-            frame.payload.size > reply_.payload.size()) {
+            frame.payload.size > payload_.size) {
             return Result<void>::failure(Error::PROTOCOL_ERROR);
         }
         reply_.header = frame.header;
         reply_.length = frame.payload.size;
-        if (frame.payload.size != 0U) {
-            std::memcpy(reply_.payload.data(), frame.payload.data, frame.payload.size);
-        }
         reply_.seen = true;
         return Result<void>::success();
     }
@@ -45,58 +51,59 @@ private:
     std::uint16_t opcode_;
     std::uint32_t request_id_;
     RawReply& reply_;
+    MutableByteView payload_;
 };
 
-Result<RawReply> exchange(ClientTransport& transport, std::uint16_t opcode,
-                          std::uint32_t request_id, ByteView payload) noexcept
+Result<void> exchange(ClientTransport& transport, std::uint16_t opcode,
+                      std::uint32_t request_id, ByteView payload,
+                      ExchangeWorkspace& workspace, RawReply& reply) noexcept
 {
-    std::array<std::uint8_t, kHeaderSize + kMaxControlPayload> outgoing{};
     Header header;
     header.kind = Kind::request;
     header.opcode = opcode;
     header.request_id = request_id;
     header.payload_length = static_cast<std::uint32_t>(payload.size);
     const auto encoded = encode_frame(
-        header, payload, MutableByteView{outgoing.data(), outgoing.size()});
+        header, payload, MutableByteView{workspace.outgoing.data(), workspace.outgoing.size()});
     if (!encoded) {
-        return Result<RawReply>::failure(encoded.error());
+        return Result<void>::failure(encoded.error());
     }
-    const auto sent = transport.write_all(ByteView{outgoing.data(), encoded.value()});
+    const auto sent = transport.write_all(ByteView{workspace.outgoing.data(), encoded.value()});
     if (!sent) {
-        return Result<RawReply>::failure(sent.error());
+        return Result<void>::failure(sent.error());
     }
 
-    RawReply reply{};
-    ReplyHandler handler(opcode, request_id, reply);
-    std::array<std::uint8_t, kMaxControlPayload> payload_storage{};
-    FrameReceiver receiver(MutableByteView{payload_storage.data(), payload_storage.size()});
-    std::array<std::uint8_t, 4096U> input{};
+    reply = RawReply{};
+    ReplyHandler handler(opcode, request_id, reply,
+                         MutableByteView{workspace.payload.data(), workspace.payload.size()});
+    FrameReceiver receiver(MutableByteView{workspace.payload.data(), workspace.payload.size()});
     while (!reply.seen) {
-        const auto read = transport.read_some(MutableByteView{input.data(), input.size()});
+        const auto read = transport.read_some(
+            MutableByteView{workspace.input.data(), workspace.input.size()});
         if (!read) {
             if (read.error() == Error::DISCONNECTED) {
                 const auto ended = receiver.finish();
-                return Result<RawReply>::failure(ended ? Error::DISCONNECTED : ended.error());
+                return Result<void>::failure(ended ? Error::DISCONNECTED : ended.error());
             }
-            return Result<RawReply>::failure(read.error());
+            return Result<void>::failure(read.error());
         }
         if (read.value() == 0U) {
             const auto ended = receiver.finish();
-            return Result<RawReply>::failure(ended ? Error::DISCONNECTED : ended.error());
+            return Result<void>::failure(ended ? Error::DISCONNECTED : ended.error());
         }
-        if (read.value() > input.size()) {
-            return Result<RawReply>::failure(Error::PROTOCOL_ERROR);
+        if (read.value() > workspace.input.size()) {
+            return Result<void>::failure(Error::PROTOCOL_ERROR);
         }
-        const auto fed = receiver.feed(ByteView{input.data(), read.value()}, handler);
+        const auto fed = receiver.feed(ByteView{workspace.input.data(), read.value()}, handler);
         if (!fed) {
-            return Result<RawReply>::failure(fed.error());
+            return Result<void>::failure(fed.error());
         }
     }
     const auto finished = receiver.finish();
     if (!finished) {
-        return Result<RawReply>::failure(finished.error());
+        return Result<void>::failure(finished.error());
     }
-    return Result<RawReply>::success(std::move(reply));
+    return Result<void>::success();
 }
 
 Error remote_error(std::uint32_t code) noexcept
@@ -123,28 +130,28 @@ Error remote_error(std::uint32_t code) noexcept
     }
 }
 
-Result<RawReply> roundtrip(ClientTransport& transport, std::uint16_t opcode,
-                           std::uint32_t request_id, ByteView payload,
-                           std::uint32_t& remote_code,
-                           const Uuid* expected_epoch = nullptr) noexcept
+Result<void> roundtrip(ClientTransport& transport, std::uint16_t opcode,
+                       std::uint32_t request_id, ByteView payload,
+                       std::uint32_t& remote_code, ExchangeWorkspace& workspace,
+                       RawReply& reply, const Uuid* expected_epoch = nullptr) noexcept
 {
-    auto reply = exchange(transport, opcode, request_id, payload);
-    if (!reply) {
-        return reply;
+    const auto exchanged = exchange(transport, opcode, request_id, payload, workspace, reply);
+    if (!exchanged) {
+        return exchanged;
     }
-    if (reply.value().header.kind == Kind::error_response) {
+    if (reply.header.kind == Kind::error_response) {
         const auto error = decode_error_response(
-            ByteView{reply.value().payload.data(), reply.value().length});
+            ByteView{workspace.payload.data(), reply.length});
         if (!error) {
-            return Result<RawReply>::failure(error.error());
+            return Result<void>::failure(error.error());
         }
         if (expected_epoch != nullptr && error.value().epoch != *expected_epoch) {
-            return Result<RawReply>::failure(Error::PROTOCOL_ERROR);
+            return Result<void>::failure(Error::PROTOCOL_ERROR);
         }
         remote_code = error.value().error.code;
-        return Result<RawReply>::failure(remote_error(remote_code));
+        return Result<void>::failure(remote_error(remote_code));
     }
-    return reply;
+    return Result<void>::success();
 }
 
 template <std::size_t N>
@@ -246,8 +253,13 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
     const auto fail = [&transport, &result](Error error) noexcept {
         result.error = error;
         transport.close();
-        return result;
     };
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        fail(Error::RESOURCE_LIMIT);
+        return result;
+    }
+    RawReply reply{};
 
     HelloRequest hello_request{};
     hello_request.min = Version{kVersionMajor, kVersionMinor};
@@ -256,54 +268,68 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
     const auto hello_size = encode_hello_request(
         hello_request, MutableByteView{hello_payload.data(), hello_payload.size()});
     if (!hello_size) {
-        return fail(hello_size.error());
+        fail(hello_size.error());
+        return result;
     }
     std::uint32_t remote_code = 0U;
-    auto hello_reply = roundtrip(transport, kOpcodeHello, 1U,
-                                 ByteView{hello_payload.data(), hello_size.value()}, remote_code);
+    const auto hello_reply = roundtrip(
+        transport, kOpcodeHello, 1U, ByteView{hello_payload.data(), hello_size.value()},
+        remote_code, *workspace, reply);
     if (!hello_reply) {
         result.remote_error_code = remote_code;
-        return fail(hello_reply.error());
+        fail(hello_reply.error());
+        return result;
     }
     const auto hello = decode_hello_response(
-        ByteView{hello_reply.value().payload.data(), hello_reply.value().length});
+        ByteView{workspace->payload.data(), reply.length});
     if (!hello) {
-        return fail(hello.error());
+        fail(hello.error());
+        return result;
     }
     if (hello.value().major != kVersionMajor || hello.value().minor != kVersionMinor) {
-        return fail(Error::VERSION_MISMATCH);
+        fail(Error::VERSION_MISMATCH);
+        return result;
     }
-    if (hello.value().features != 0U) return fail(Error::PROTOCOL_ERROR);
+    if (hello.value().features != 0U) {
+        fail(Error::PROTOCOL_ERROR);
+        return result;
+    }
 
-    std::array<std::uint8_t, kMaxControlPayload> request_payload{};
+    std::array<std::uint8_t, kRequestPayloadCapacity> request_payload{};
     ListRequest list_request{};
     list_request.epoch = hello.value().epoch;
     const auto list_size = encode_request(
         list_request, MutableByteView{request_payload.data(), request_payload.size()},
         encode_list_request);
     if (!list_size) {
-        return fail(list_size.error());
+        fail(list_size.error());
+        return result;
     }
     remote_code = 0U;
-    auto list_reply = roundtrip(
+    const auto list_reply = roundtrip(
         transport, kOpcodeList, 2U,
-        ByteView{request_payload.data(), list_size.value()}, remote_code, &hello.value().epoch);
+        ByteView{request_payload.data(), list_size.value()}, remote_code, *workspace, reply,
+        &hello.value().epoch);
     if (!list_reply) {
         result.remote_error_code = remote_code;
-        return fail(list_reply.error());
+        fail(list_reply.error());
+        return result;
     }
     const auto list = decode_list_response(
-        ByteView{list_reply.value().payload.data(), list_reply.value().length});
+        ByteView{workspace->payload.data(), reply.length});
     if (!list) {
-        return fail(list.error());
+        fail(list.error());
+        return result;
     }
     if (list.value().epoch != hello.value().epoch ||
         !same_producer(list.value().producer, hello.value().producer)) {
-        return fail(Error::PROTOCOL_ERROR);
+        fail(Error::PROTOCOL_ERROR);
+        return result;
     }
     const Error list_valid = validate_list_response(list.value());
     if (list_valid != Error::OK) {
-        return fail(list_valid);
+        fail(list_valid);
+        return result;
     }
 
     StatusRequest status_request{};
@@ -313,34 +339,41 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
         status_request, MutableByteView{request_payload.data(), request_payload.size()},
         encode_status_request);
     if (!status_size) {
-        return fail(status_size.error());
+        fail(status_size.error());
+        return result;
     }
     remote_code = 0U;
-    auto status_reply = roundtrip(
+    const auto status_reply = roundtrip(
         transport, kOpcodeStatus, 3U,
-        ByteView{request_payload.data(), status_size.value()}, remote_code, &hello.value().epoch);
+        ByteView{request_payload.data(), status_size.value()}, remote_code, *workspace, reply,
+        &hello.value().epoch);
     if (!status_reply) {
         result.remote_error_code = remote_code;
-        return fail(status_reply.error());
+        fail(status_reply.error());
+        return result;
     }
     const auto status = decode_status_response(
-        ByteView{status_reply.value().payload.data(), status_reply.value().length});
+        ByteView{workspace->payload.data(), reply.length});
     if (!status) {
-        return fail(status.error());
+        fail(status.error());
+        return result;
     }
     if (status.value().scope.kind != status_request.scope.kind ||
         status.value().scope.id != status_request.scope.id ||
         status.value().context.epoch != hello.value().epoch ||
         !same_producer(status.value().producer, hello.value().producer)) {
-        return fail(Error::PROTOCOL_ERROR);
+        fail(Error::PROTOCOL_ERROR);
+        return result;
     }
     const StatusContext context{&list.value()};
     const Error status_valid = validate_status_response(status.value(), context);
     if (status_valid != Error::OK) {
-        return fail(status_valid);
+        fail(status_valid);
+        return result;
     }
     if (!same_snapshot_identity(list.value(), status.value())) {
-        return fail(Error::PROTOCOL_ERROR);
+        fail(Error::PROTOCOL_ERROR);
+        return result;
     }
 
     result.snapshot.list = list.value();

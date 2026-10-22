@@ -6,6 +6,10 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
+#include <new>
+#include <pthread.h>
+#endif
 
 namespace {
 
@@ -134,6 +138,11 @@ public:
         connection_.complete();
         reply_offset_ = 0U;
         apply_fault(opcode, request_id);
+        if (reply_size_ != 0U && request_count_ <= recorded_replies_.size()) {
+            const std::size_t index = request_count_ - 1U;
+            std::memcpy(recorded_replies_[index].data(), reply_.data(), reply_size_);
+            recorded_sizes_[index] = reply_size_;
+        }
         return Result<void>::success();
     }
 
@@ -161,6 +170,11 @@ public:
     std::size_t request_count() const noexcept { return request_count_; }
     std::uint32_t request_id(std::size_t index) const noexcept { return request_ids_[index]; }
     std::uint16_t request_opcode(std::size_t index) const noexcept { return request_opcodes_[index]; }
+    const std::uint8_t* recorded_reply(std::size_t index) const noexcept
+    {
+        return recorded_replies_[index].data();
+    }
+    std::size_t recorded_size(std::size_t index) const noexcept { return recorded_sizes_[index]; }
 
 private:
     bool queue_dispatch(const w::ControlRequest& request) noexcept
@@ -176,7 +190,8 @@ private:
                 reply_size_ = encoded.value();
                 return true;
             }
-            w::ListResponse response = list_;
+            response_list_ = list_;
+            w::ListResponse& response = response_list_;
             if (fault_ == Fault::wrong_list_epoch) response.epoch[0] ^= 0x01U;
             const auto encoded = w::encode_record_frame(
                 w::Kind::response, request.opcode, request.request_id, response,
@@ -186,7 +201,8 @@ private:
             return true;
         }
         if (request.kind == w::ControlRequestKind::status) {
-            w::StatusResponse response{};
+            response_status_ = w::StatusResponse{};
+            w::StatusResponse& response = response_status_;
             if (w::build_status_shell(list_, context_, snapshot_,
                                       w::Scope{w::ScopeKind::enclosure, 0U}, response) != Error::OK) {
                 return false;
@@ -247,6 +263,8 @@ private:
     w::ServerHello server_;
     w::ControlConnection connection_;
     w::ListResponse list_{};
+    w::ListResponse response_list_{};
+    w::StatusResponse response_status_{};
     w::Context context_{};
     w::Snapshot snapshot_{};
     Fault fault_;
@@ -256,6 +274,8 @@ private:
     std::size_t reply_offset_ = 0U;
     std::array<std::uint32_t, 3U> request_ids_{};
     std::array<std::uint16_t, 3U> request_opcodes_{};
+    std::array<std::array<std::uint8_t, kFrameCapacity>, 3U> recorded_replies_{};
+    std::array<std::size_t, 3U> recorded_sizes_{};
     std::size_t request_count_ = 0U;
     bool closed_ = false;
 };
@@ -304,6 +324,119 @@ void test_remote_error_code_is_preserved()
     CHECK(result.snapshot.list.epoch == w::Uuid{});
 }
 
+#if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
+class ReplayTransport final : public w::ClientTransport {
+public:
+    explicit ReplayTransport(const FakeTransport& source) noexcept : source_(source) {}
+
+    Result<void> write_all(ByteView bytes) noexcept override
+    {
+        if (closed_ || reply_index_ != request_count_ || request_count_ >= 3U) {
+            return Result<void>::failure(Error::PROTOCOL_ERROR);
+        }
+        const auto frame = w::decode_frame(bytes);
+        if (!frame || frame.value().header.kind != w::Kind::request ||
+            frame.value().header.request_id != request_count_ + 1U ||
+            frame.value().header.opcode != expected_opcodes_[request_count_]) {
+            return Result<void>::failure(Error::PROTOCOL_ERROR);
+        }
+        reply_offset_ = 0U;
+        ++request_count_;
+        return Result<void>::success();
+    }
+
+    Result<std::size_t> read_some(MutableByteView bytes) noexcept override
+    {
+        const std::size_t index = request_count_ - 1U;
+        const std::size_t size = source_.recorded_size(index);
+        if (reply_offset_ == size) {
+            return Result<std::size_t>::success(0U);
+        }
+        const std::size_t remaining = size - reply_offset_;
+        const std::size_t count = remaining < bytes.size ? remaining : bytes.size;
+        std::memcpy(bytes.data, source_.recorded_reply(index) + reply_offset_, count);
+        reply_offset_ += count;
+        if (reply_offset_ == size) ++reply_index_;
+        return Result<std::size_t>::success(count);
+    }
+
+    void close() noexcept override { closed_ = true; }
+    bool closed() const noexcept { return closed_; }
+    std::size_t request_count() const noexcept { return request_count_; }
+
+private:
+    const FakeTransport& source_;
+    const std::uint16_t expected_opcodes_[3U] = {w::kOpcodeHello, w::kOpcodeList,
+                                                  w::kOpcodeStatus};
+    std::size_t request_count_ = 0U;
+    std::size_t reply_index_ = 0U;
+    std::size_t reply_offset_ = 0U;
+    bool closed_ = false;
+};
+
+class EofTransport final : public w::ClientTransport {
+public:
+    Result<void> write_all(ByteView) noexcept override { return Result<void>::success(); }
+    Result<std::size_t> read_some(MutableByteView) noexcept override
+    {
+        return Result<std::size_t>::success(0U);
+    }
+    void close() noexcept override { closed_ = true; }
+    bool closed() const noexcept { return closed_; }
+
+private:
+    bool closed_ = false;
+};
+
+struct StackProbe final {
+    w::ClientTransport* transport;
+    w::StatusFetchResult result;
+};
+
+void* fetch_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<StackProbe*>(value);
+    ::new (static_cast<void*>(&probe.result)) w::StatusFetchResult(
+        w::fetch_status(*probe.transport));
+    return nullptr;
+}
+
+bool run_stack_probe(w::ClientTransport& transport, std::size_t stack_size,
+                     Error expected_error)
+{
+    StackProbe probe{&transport, {}};
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, fetch_on_thread, &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    if (pthread_join(thread, nullptr) != 0) return false;
+    return probe.result.error == expected_error;
+}
+
+void test_small_stack_probes()
+{
+    constexpr std::size_t kStackSizes[] = {128U * 1024U, 512U * 1024U, 768U * 1024U};
+    FakeTransport source;
+    const w::StatusFetchResult seeded = w::fetch_status(source);
+    CHECK(seeded);
+    for (const std::size_t stack_size : kStackSizes) {
+        EofTransport eof;
+        CHECK(run_stack_probe(eof, stack_size, Error::DISCONNECTED));
+        CHECK(eof.closed());
+
+        ReplayTransport normal(source);
+        CHECK(run_stack_probe(normal, stack_size, Error::OK));
+        CHECK(!normal.closed());
+        CHECK(normal.request_count() == 3U);
+    }
+}
+#endif
+
 }  // namespace
 
 int main()
@@ -311,6 +444,9 @@ int main()
     test_successful_read_only_exchange();
     test_invalid_responses_close_without_publishing_snapshot();
     test_remote_error_code_is_preserved();
+#if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
+    test_small_stack_probes();
+#endif
     std::printf("control_client_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
 }
