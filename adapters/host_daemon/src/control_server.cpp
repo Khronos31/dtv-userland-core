@@ -234,7 +234,8 @@ wire::Tune wire_tune(std::uint64_t revision,
     tune.revision = revision;
     tune.system = wire_system(record.system);
     tune.frequency_hz = record.requested_hz;
-    tune.programmed_hz = record.programmed_hz;
+    tune.programmed_hz.present = record.programmed_hz.has_value();
+    if (record.programmed_hz) tune.programmed_hz.value = *record.programmed_hz;
     tune.verification = record.verification;
     if (record.stream_id != 0xffffU) {
         tune.selection = wire::Selection::tsid;
@@ -2035,7 +2036,8 @@ struct PosixControlServer::Impl final {
             result.epoch = hello.epoch;
             result.tune_revision = completion.tune_metadata.current_revision;
             result.requested_hz = record.requested_hz;
-            result.programmed_hz = record.programmed_hz;
+            result.programmed_hz.present = record.programmed_hz.has_value();
+            if (record.programmed_hz) result.programmed_hz.value = *record.programmed_hz;
             result.verification = record.verification;
             result.lock = context_measurement(record.lock, context_start_ms, context_now_ns());
             if (record.stream_id != 0xffffU) {

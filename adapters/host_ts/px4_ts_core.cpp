@@ -907,7 +907,7 @@ namespace {
 
 namespace wire = dtv::userland::wire;
 
-class SocketClientTransport final : public wire::ClientTransport {
+class SocketClientTransport final : public wire::TimedClientTransport {
 public:
     explicit SocketClientTransport(SocketStream& stream) noexcept : stream_(stream) {}
     Result<void> write_all(ByteView bytes, Timeout timeout) noexcept override
@@ -1241,9 +1241,9 @@ Error validate_product_status(const wire::StatusSnapshot& snapshot,
             snapshot.list.enclosure.value.model.present !=
                 prior.list.enclosure.value.model.present ||
             (snapshot.list.enclosure.value.model.present &&
-             !equal_text(snapshot.list.enclosure.value.model.value.id,
-                         std::string_view(prior.list.enclosure.value.model.value.id.bytes.data(),
-                                          prior.list.enclosure.value.model.value.id.length))))
+             !equal_text(snapshot.list.enclosure.value.model.value.name,
+                         std::string_view(prior.list.enclosure.value.model.value.name.bytes.data(),
+                                          prior.list.enclosure.value.model.value.name.length))))
             return Error::NOT_FOUND;
         const auto& current_identity = snapshot.list.enclosure.value.identity;
         const auto& prior_identity = prior.list.enclosure.value.identity;

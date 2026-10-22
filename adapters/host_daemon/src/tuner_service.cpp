@@ -14,6 +14,7 @@ namespace engine = dtv::userland::detail;
 // px4_drv/driver/px4_device.c:1258 (PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T).
 // The terrestrial lock path settles for 340 ms from check_lock start.
 constexpr std::uint32_t kWaitAfterLockTcTMs = 340U;
+constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
 
 static_assert(ipc::kNonceLength == engine::kReceiverTokenLength,
               "the attach nonce is carried as the engine token");
@@ -117,7 +118,7 @@ bool valid_strict_profile(const TunerStrictProfile& profile) noexcept
 {
     if (!profile.native_hz) return true;
     if (profile.min_hz == 0U || profile.min_hz > profile.max_hz ||
-        profile.max_hz > engine::kMaxRequestedHz || profile.row_sets > profile.rows.size() ||
+        profile.max_hz > kMaxRequestedHz || profile.row_sets > profile.rows.size() ||
         (profile.lnb_voltage_mask & static_cast<std::uint8_t>(~0x03U)) != 0U)
         return false;
     for (std::size_t index = 0U; index < profile.row_sets; ++index) {
@@ -581,11 +582,10 @@ TunerPreparedTune TunerService::prepare_tune(
     prepared.hz_entrance = true;
     engine::HzTuneRequest& hz = prepared.hz;
     hz.lease_id = request.lease_id;
-    hz.prepared_receiver = receiver;
     hz.system = to_engine(request.system);
     // The old-wire scalar is u64 kHz: check it before multiplying; nothing
     // is narrowed first.  An out-of-range value is already invalid above.
-    hz.requested_hz = request.frequency_khz <= engine::kMaxRequestedHz / 1000U
+    hz.requested_hz = request.frequency_khz <= kMaxRequestedHz / 1000U
         ? request.frequency_khz * 1000U
         : 0U;
     hz.stream_id = request.stream_id;
@@ -610,12 +610,10 @@ TunerPreparedTune TunerService::prepare_tune_hz(
     prepared.hz_entrance = true;
     engine::HzTuneRequest& hz = prepared.hz;
     hz.lease_id = request.lease_id;
-    hz.prepared_receiver = receiver;
     hz.system = to_engine(request.system);
     hz.requested_hz = request.frequency_hz;
     hz.timeout_ms = request.timeout_ms;
     hz.lnb_voltage = request.lnb_voltage.present ? request.lnb_voltage.value : 0U;
-    hz.lnb_voltage_present = request.lnb_voltage.present;
     const bool satellite = request.system == ipc::System::ISDB_S;
     if (satellite && request.selection == Selection::tsid) hz.stream_id = request.selection_value;
     if (satellite && request.selection == Selection::slot) hz.slot = request.selection_value;
@@ -625,7 +623,7 @@ TunerPreparedTune TunerService::prepare_tune_hz(
     const bool known_selection = request.selection == Selection::automatic ||
                                  request.selection == Selection::tsid ||
                                  request.selection == Selection::slot;
-    if (request.frequency_hz == 0U || request.frequency_hz > engine::kMaxRequestedHz ||
+    if (request.frequency_hz == 0U || request.frequency_hz > kMaxRequestedHz ||
         request.timeout_ms < 100U || request.timeout_ms > 30000U || !known_selection) {
         decision = Error::INVALID_ARGUMENT;
     } else if (request.system == ipc::System::ISDB_T) {

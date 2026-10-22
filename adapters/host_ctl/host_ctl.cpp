@@ -231,7 +231,7 @@ void print_hex(const char* label, const std::uint8_t* data, std::size_t size) no
     std::putchar('\n');
 }
 
-class SocketTransport final : public wire::ClientTransport {
+class SocketTransport final : public wire::TimedClientTransport {
 public:
     explicit SocketTransport(SocketStream stream) noexcept : stream_(std::move(stream)) {}
 
