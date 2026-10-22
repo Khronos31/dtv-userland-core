@@ -248,7 +248,10 @@ Result<std::size_t> encode_request(const Request& request, MutableByteView outpu
 
 }  // namespace
 
-StatusFetchResult fetch_status(ClientTransport& transport) noexcept
+namespace {
+
+StatusFetchResult fetch_status_with_required_features(ClientTransport& transport,
+                                                     std::uint64_t required_features) noexcept
 {
     StatusFetchResult result{};
     const auto fail = [&transport, &result](Error error) noexcept {
@@ -265,6 +268,7 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
     HelloRequest hello_request{};
     hello_request.min = Version{kVersionMajor, kVersionMinor};
     hello_request.max = Version{kVersionMajor, kVersionMinor};
+    hello_request.required_features = required_features;
     std::array<std::uint8_t, kHelloRequestSize> hello_payload{};
     const auto hello_size = encode_hello_request(
         hello_request, MutableByteView{hello_payload.data(), hello_payload.size()});
@@ -291,8 +295,11 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
         fail(Error::VERSION_MISMATCH);
         return result;
     }
-    if (hello.value().features != 0U) {
-        fail(Error::PROTOCOL_ERROR);
+    if (hello.value().features != required_features) {
+        const Error error =
+            (hello.value().features & required_features) == required_features
+                ? Error::PROTOCOL_ERROR : Error::UNSUPPORTED;
+        fail(error);
         return result;
     }
 
@@ -383,6 +390,13 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
     return result;
 }
 
+}  // namespace
+
+StatusFetchResult fetch_status(ClientTransport& transport) noexcept
+{
+    return fetch_status_with_required_features(transport, 0U);
+}
+
 namespace {
 
 class TimedTransportAdapter final : public ClientTransport {
@@ -458,6 +472,12 @@ Result<std::size_t> encode_body(const Request& value, MutableByteView output,
 
 StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout) noexcept
 {
+    return fetch_status(transport, timeout, 0U);
+}
+
+StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout,
+                               std::uint64_t required_features) noexcept
+{
     TimedTransportAdapter adapter(transport);
     if (timeout.milliseconds == 0U) {
         transport.close();
@@ -467,7 +487,77 @@ StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout)
         transport.close();
         return StatusFetchResult{StatusSnapshot{}, Error::TIMEOUT, 0U};
     }
-    return fetch_status(adapter);
+    return fetch_status_with_required_features(adapter, required_features);
+}
+
+LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
+                             Timeout timeout) noexcept
+{
+    LnbPowerResult result{};
+    if (timeout.milliseconds == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+
+    const StatusFetchResult status = fetch_status_with_required_features(adapter, 0U);
+    if (!status) {
+        result.error = status.error;
+        result.remote_error_code = status.remote_error_code;
+        return result;
+    }
+
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    LnbPowerRequest request{};
+    request.epoch = status.snapshot.status.context.epoch;
+    request.enabled = enabled;
+    const auto size = encode_body(request,
+                                 MutableByteView{workspace->payload.data(),
+                                                 workspace->payload.size()},
+                                 encode_lnb_power_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto exchanged = roundtrip(adapter, kOpcodeLnbPower, 4U,
+                                     ByteView{workspace->payload.data(), size.value()},
+                                     remote_code, *workspace, reply, &request.epoch);
+    if (!exchanged) {
+        result.error = exchanged.error();
+        result.remote_error_code = remote_code;
+        transport.close();
+        return result;
+    }
+    const auto response = decode_lnb_power_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!response) {
+        result.error = response.error();
+        transport.close();
+        return result;
+    }
+    if (response.value().epoch != request.epoch || response.value().enabled != enabled) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = response.value();
+    result.error = Error::OK;
+    return result;
 }
 
 RecordingControlResult begin_recording(TimedClientTransport& transport,

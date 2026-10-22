@@ -50,6 +50,25 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept;
 // success the caller retains the open transport. No request is retried.
 StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout) noexcept;
 
+// Requests the required HELLO feature mask using the same status sequence and
+// deadline. Missing required features fail with UNSUPPORTED and close the
+// transport; the zero-mask overload above keeps its original behavior.
+StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout,
+                               std::uint64_t required_features) noexcept;
+
+struct LnbPowerResult final {
+    LnbPowerResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Fetches status and sends one independent LNB power request on that
+// connection. The response reports the requested control state, not measured
+// voltage; failures close the transport and are never retried.
+LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
+                             Timeout timeout) noexcept;
+
 struct RecordingOptions final {
     std::uint16_t receiver_id = 0U;
     TuneRequest tune{};

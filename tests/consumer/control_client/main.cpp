@@ -53,6 +53,20 @@ int main()
         return 1;
 
     timed.closed = false;
+    const auto required_status = dtv::userland::wire::fetch_status(
+        timed, dtv::userland::Timeout{100U},
+        dtv::userland::wire::kFeatureCardService);
+    if (required_status || required_status.error != dtv::userland::Error::DISCONNECTED ||
+        !timed.closed)
+        return 1;
+
+    timed.closed = false;
+    const auto lnb = dtv::userland::wire::set_lnb_power(
+        timed, false, dtv::userland::Timeout{100U});
+    if (lnb || lnb.error != dtv::userland::Error::DISCONNECTED || !timed.closed)
+        return 1;
+
+    timed.closed = false;
     const auto recording = dtv::userland::wire::begin_recording(
         timed, dtv::userland::wire::RecordingOptions{}, dtv::userland::Timeout{100U});
     if (recording || recording.error != dtv::userland::Error::DISCONNECTED || !timed.closed)

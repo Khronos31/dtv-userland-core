@@ -52,7 +52,7 @@ void set_text(w::WString<N>& out, const char* text)
     }
 }
 
-w::ServerHello make_server()
+w::ServerHello make_server(std::uint64_t features = 0U)
 {
     w::ServerHello server;
     for (std::size_t i = 0U; i < server.epoch.size(); ++i) {
@@ -60,6 +60,7 @@ w::ServerHello make_server()
     }
     set_text(server.producer.product, "test-product");
     set_text(server.producer.version, "1.2.3");
+    server.features = features;
     return server;
 }
 
@@ -114,12 +115,19 @@ enum class Fault : std::uint8_t {
     release_wire_error,
     release_without_error,
     bad_release_epoch,
+    lnb_remote_error,
+    lnb_eof,
+    timeout_lnb,
+    bad_lnb_epoch,
+    bad_lnb_enabled,
+    truncated_lnb,
 };
 
 class FakeTransport final : public w::ClientTransport, public w::TimedClientTransport {
 public:
-    explicit FakeTransport(Fault fault = Fault::none, bool accept_pid_requests = false)
-        : server_(make_server()), connection_(server_), fault_(fault),
+    explicit FakeTransport(Fault fault = Fault::none, bool accept_pid_requests = false,
+                           std::uint64_t server_features = 0U)
+        : server_(make_server(server_features)), connection_(server_), fault_(fault),
           accept_pid_requests_(accept_pid_requests)
     {
         sparse_list(list_, server_.epoch);
@@ -154,6 +162,8 @@ public:
             tune_pid_first_ = request.tune.pids.value.items[0U];
             tune_pid_last_ = request.tune.pids.value.items[tune_pid_count_ - 1U];
         }
+        if (request.kind == w::ControlRequestKind::lnb_power)
+            last_lnb_enabled_ = request.lnb_power.enabled;
         // PID fixtures isolate client request sizing from feature negotiation.
         if (inbound.action == w::InboundAction::respond &&
             !(accept_pid_requests_ && request.kind == w::ControlRequestKind::tune &&
@@ -206,7 +216,8 @@ public:
         if ((fault_ == Fault::timeout_list && request_count_ == 2U) ||
             (fault_ == Fault::timeout_start && request_count_ == 6U) ||
             (fault_ == Fault::timeout_stop && request_count_ == 7U) ||
-            (fault_ == Fault::timeout_release && request_count_ == 8U)) {
+            (fault_ == Fault::timeout_release && request_count_ == 8U) ||
+            (fault_ == Fault::timeout_lnb && request_count_ == 4U)) {
             now_ms_ += timeout.milliseconds;
             return Result<std::size_t>::failure(Error::TIMEOUT);
         }
@@ -230,6 +241,7 @@ public:
     std::uint32_t read_timeout(std::size_t index) const noexcept { return read_timeouts_[index]; }
     std::size_t write_timeout_count() const noexcept { return write_timeout_count_; }
     std::size_t read_timeout_count() const noexcept { return read_timeout_count_; }
+    bool last_lnb_enabled() const noexcept { return last_lnb_enabled_; }
     void advance_per_read(std::uint32_t milliseconds) noexcept
     {
         advance_per_read_ms_ = milliseconds;
@@ -283,6 +295,33 @@ private:
                                              MutableByteView{reply_.data(), reply_.size()})
                     : w::encode_status_frame(request.request_id, response, list_,
                                              MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::lnb_power) {
+            if (fault_ == Fault::lnb_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::UNSUPPORTED), "lnb_power",
+                    w::Scope{w::ScopeKind::enclosure, 0U},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            if (fault_ == Fault::lnb_eof) {
+                reply_size_ = 0U;
+                return true;
+            }
+            w::LnbPowerResponse response{};
+            response.epoch = server_.epoch;
+            response.enabled = request.lnb_power.enabled;
+            if (fault_ == Fault::bad_lnb_epoch) response.epoch[0] ^= 0x01U;
+            if (fault_ == Fault::bad_lnb_enabled) response.enabled = !response.enabled;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_lnb_power_response, MutableByteView{reply_.data(), reply_.size()});
             if (!encoded) return false;
             reply_size_ = encoded.value();
             return true;
@@ -391,6 +430,9 @@ private:
         } else if (fault_ == Fault::truncated_status && opcode == w::kOpcodeStatus &&
                    reply_size_ != 0U) {
             --reply_size_;
+        } else if (fault_ == Fault::truncated_lnb && opcode == w::kOpcodeLnbPower &&
+                   reply_size_ != 0U) {
+            --reply_size_;
         }
     }
 
@@ -438,6 +480,7 @@ private:
     std::uint64_t now_ms_ = 0U;
     bool closed_ = false;
     bool accept_pid_requests_ = false;
+    bool last_lnb_enabled_ = false;
 };
 
 void test_successful_read_only_exchange()
@@ -515,6 +558,85 @@ void test_timed_status_uses_one_deadline_and_preserves_old_transport()
         w::fetch_status(zero_timeout, dtv::userland::Timeout{0U});
     CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
     CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+}
+
+void test_timed_status_required_features()
+{
+    const std::uint64_t supported_features =
+        w::kFeatureCardService | w::kFeatureStateEvent;
+    FakeTransport supported(Fault::none, false, supported_features);
+    const auto result = w::fetch_status(
+        supported, dtv::userland::Timeout{1000U}, w::kFeatureCardService);
+    CHECK(result);
+    CHECK(!supported.closed() && supported.request_count() == 3U);
+    CHECK(supported.request_id(0U) == 1U && supported.request_opcode(0U) == w::kOpcodeHello);
+    CHECK(supported.request_id(1U) == 2U && supported.request_opcode(1U) == w::kOpcodeList);
+    CHECK(supported.request_id(2U) == 3U && supported.request_opcode(2U) == w::kOpcodeStatus);
+
+    FakeTransport missing;
+    const auto missing_result = w::fetch_status(
+        missing, dtv::userland::Timeout{1000U}, w::kFeatureCardService);
+    CHECK(!missing_result && missing_result.error == Error::UNSUPPORTED);
+    CHECK(missing_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(missing.closed() && missing.request_count() == 1U);
+    CHECK(missing.request_opcode(0U) == w::kOpcodeHello);
+
+    FakeTransport unknown;
+    const std::uint64_t unknown_feature = std::uint64_t{1U} << 63U;
+    const auto unknown_result = w::fetch_status(
+        unknown, dtv::userland::Timeout{1000U}, unknown_feature);
+    CHECK(!unknown_result && unknown_result.error == Error::UNSUPPORTED);
+    CHECK(unknown_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(unknown.closed() && unknown.request_count() == 1U);
+
+    FakeTransport zero_timeout;
+    const auto invalid = w::fetch_status(
+        zero_timeout, dtv::userland::Timeout{0U}, w::kFeatureCardService);
+    CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
+    CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+}
+
+void test_lnb_power_client_success_and_failures()
+{
+    FakeTransport on;
+    on.advance_per_read(1U);
+    const auto enabled = w::set_lnb_power(on, true, dtv::userland::Timeout{1000U});
+    CHECK(enabled && enabled.response.enabled);
+    CHECK(enabled.response.epoch == make_server().epoch);
+    CHECK(!on.closed() && on.last_lnb_enabled() && on.request_count() == 4U);
+    CHECK(on.request_id(3U) == 4U && on.request_opcode(3U) == w::kOpcodeLnbPower);
+    CHECK(on.write_timeout(3U) < 1000U);
+
+    FakeTransport off;
+    const auto disabled = w::set_lnb_power(off, false, dtv::userland::Timeout{1000U});
+    CHECK(disabled && !disabled.response.enabled);
+    CHECK(!off.closed() && !off.last_lnb_enabled() && off.request_count() == 4U);
+    CHECK(off.request_id(3U) == 4U && off.request_opcode(3U) == w::kOpcodeLnbPower);
+
+    FakeTransport zero_timeout;
+    const auto invalid = w::set_lnb_power(
+        zero_timeout, true, dtv::userland::Timeout{0U});
+    CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
+    CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+
+    FakeTransport remote(Fault::lnb_remote_error);
+    const auto remote_result = w::set_lnb_power(
+        remote, true, dtv::userland::Timeout{1000U});
+    CHECK(!remote_result && remote_result.error == Error::UNSUPPORTED);
+    CHECK(remote_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(remote.closed() && remote.request_count() == 4U);
+
+    const Fault faults[] = {Fault::lnb_eof, Fault::timeout_lnb, Fault::bad_lnb_epoch,
+                            Fault::bad_lnb_enabled, Fault::truncated_lnb};
+    const Error errors[] = {Error::DISCONNECTED, Error::TIMEOUT, Error::PROTOCOL_ERROR,
+                            Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR};
+    for (std::size_t index = 0U; index < sizeof(faults) / sizeof(faults[0]); ++index) {
+        FakeTransport failed(faults[index]);
+        const auto failed_result = w::set_lnb_power(
+            failed, false, dtv::userland::Timeout{1000U});
+        CHECK(!failed_result && failed_result.error == errors[index]);
+        CHECK(failed.closed() && failed.request_count() == 4U);
+    }
 }
 
 void test_begin_recording_validator_and_two_budgets()
@@ -834,6 +956,12 @@ struct TimedEofStackProbe final {
     Error result = Error::INTERNAL;
 };
 
+struct LnbStackProbe final {
+    w::TimedClientTransport* transport;
+    Error result = Error::INTERNAL;
+    bool enabled = false;
+};
+
 void* fetch_on_thread(void* value) noexcept
 {
     auto& probe = *static_cast<StackProbe*>(value);
@@ -893,6 +1021,16 @@ void* timed_eof_on_thread(void* value) noexcept
     return nullptr;
 }
 
+void* lnb_power_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<LnbStackProbe*>(value);
+    const auto result = w::set_lnb_power(*probe.transport, true,
+                                         dtv::userland::Timeout{1000U});
+    probe.result = result.error;
+    probe.enabled = result && result.response.enabled;
+    return nullptr;
+}
+
 bool run_timed_eof_stack_probe(TimedEofStackProbe& probe, std::size_t stack_size)
 {
     pthread_attr_t attributes;
@@ -901,6 +1039,21 @@ bool run_timed_eof_stack_probe(TimedEofStackProbe& probe, std::size_t stack_size
     pthread_t thread{};
     const int create_result = set_result == 0
                                   ? pthread_create(&thread, &attributes, timed_eof_on_thread,
+                                                   &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
+bool run_lnb_stack_probe(LnbStackProbe& probe, std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, lnb_power_on_thread,
                                                    &probe)
                                   : set_result;
     pthread_attr_destroy(&attributes);
@@ -954,6 +1107,15 @@ void test_small_stack_probes()
         CHECK(eof_probe.result == Error::DISCONNECTED && timed_eof->closed());
     }
 
+    std::unique_ptr<FakeTransport> lnb(new (std::nothrow) FakeTransport{});
+    CHECK(lnb != nullptr);
+    if (lnb) {
+        LnbStackProbe lnb_probe{lnb.get()};
+        CHECK(run_lnb_stack_probe(lnb_probe, 512U * 1024U));
+        CHECK(lnb_probe.result == Error::OK && lnb_probe.enabled);
+        CHECK(!lnb->closed() && lnb->request_count() == 4U);
+    }
+
     std::unique_ptr<FakeTransport> recording(new (std::nothrow) FakeTransport{});
     CHECK(recording != nullptr);
     if (recording) {
@@ -976,6 +1138,8 @@ int main()
     test_invalid_responses_close_without_publishing_snapshot();
     test_remote_error_code_is_preserved();
     test_timed_status_uses_one_deadline_and_preserves_old_transport();
+    test_timed_status_required_features();
+    test_lnb_power_client_success_and_failures();
     test_begin_recording_validator_and_two_budgets();
     test_recording_pid_buffers_accept_limits_and_reject_invalid_values();
     test_release_remote_error_is_preserved();
