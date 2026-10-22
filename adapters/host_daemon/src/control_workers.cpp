@@ -1365,7 +1365,8 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
             job.key.client_id != job_client ||
             job.key.request_id > std::numeric_limits<std::uint32_t>::max() ||
             task.client_id != job.key.client_id ||
-            task.request_id != job.key.request_id || task.lease_id != job_lease ||
+            task.request_id != static_cast<std::uint32_t>(job.key.request_id) ||
+            task.lease_id != job_lease ||
             (job.kind != dtv::userland::detail::AuthorityJobKind::disconnect &&
              task.receiver != job_receiver)) {
             return Result<void>::failure(Error::INVALID_ARGUMENT);

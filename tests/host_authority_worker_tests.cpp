@@ -351,6 +351,75 @@ int main()
         return fail("Authority RELEASE omitted its receiver route");
     const auto release_task = task_for(release_job,
                                        ControlWorkerTaskKind::authority_request);
+
+    auto submit_rejected_without_effect = [&](ControlWorkerLane lane,
+                                              const ControlWorkerTask& task,
+                                              const char* label) {
+        const auto before = tuner.engine_status();
+        const unsigned hz_calls = backend.hz_calls;
+        if (!before || before.value().states[2U] == ReceiverState::free ||
+            before.value().states[4U] == ReceiverState::free) {
+            std::cerr << label << " fixture leases are missing\n";
+            return false;
+        }
+        if (workers.submit(lane, task).error() != Error::INVALID_ARGUMENT) {
+            std::cerr << label << " was not rejected at submit\n";
+            return false;
+        }
+        ControlWorkerCompletion unexpected{};
+        if (workers.try_pop(lane, unexpected)) {
+            std::cerr << label << " reached the worker completion queue\n";
+            return false;
+        }
+        const auto after = tuner.engine_status();
+        if (!after || after.value().states[2U] != before.value().states[2U] ||
+            after.value().states[4U] != before.value().states[4U] ||
+            backend.hz_calls != hz_calls || backend.closed[2U] || backend.closed[4U]) {
+            std::cerr << label << " changed Engine/backend state\n";
+            return false;
+        }
+        return true;
+    };
+
+    ControlWorkerTask bad_client_task = release_task;
+    bad_client_task.authority_job.key.client_id = 1U;
+    bad_client_task.authority_job.client_id = 1U;
+    bad_client_task.client_id = 1U;
+    if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev2,
+                                        bad_client_task,
+                                        "out-of-range Authority client ID"))
+        return fail("out-of-range Authority client ID submit guard failed");
+
+    AuthorityJob oversized_request_job = release_job;
+    oversized_request_job.key.request_id =
+        static_cast<std::uint64_t>(UINT32_MAX) + 1U;
+    const auto oversized_request_task = task_for(
+        oversized_request_job, ControlWorkerTaskKind::authority_request);
+    if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev2,
+                                        oversized_request_task,
+                                        "u32-overflow Authority request ID"))
+        return fail("u32-overflow Authority request ID submit guard failed");
+
+    AuthorityJob receiver_lane_disconnect{};
+    receiver_lane_disconnect.kind = AuthorityJobKind::disconnect;
+    const std::uint64_t disconnected_client = kAuthorityClientIdFirst + 100U;
+    receiver_lane_disconnect.key = SessionKey{disconnected_client, 6U};
+    receiver_lane_disconnect.client_id = disconnected_client;
+    receiver_lane_disconnect.receiver = 4U;
+    const auto receiver_lane_disconnect_task = task_for(
+        receiver_lane_disconnect, ControlWorkerTaskKind::authority_request);
+    if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev2,
+                                        receiver_lane_disconnect_task,
+                                        "DISCONNECT on receiver lane"))
+        return fail("DISCONNECT receiver-lane submit guard failed");
+
+    ControlWorkerTask mismatched_request_task = release_task;
+    ++mismatched_request_task.request_id;
+    if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev2,
+                                        mismatched_request_task,
+                                        "task/job request ID mismatch"))
+        return fail("task/job request ID submit guard failed");
+
     if (workers.submit(ControlWorkerLane::tuner_dev1, release_task).error() !=
             Error::INVALID_ARGUMENT ||
         !workers.submit(ControlWorkerLane::tuner_dev2, release_task))

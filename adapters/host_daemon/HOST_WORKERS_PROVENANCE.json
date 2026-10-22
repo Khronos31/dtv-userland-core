@@ -6,8 +6,8 @@
   "source_files": [
     {
       "path": "adapters/host_daemon/src/control_workers.cpp",
-      "lines": 1507,
-      "sha256": "cffd9db570b391ef03bde3ccba8a0080f7133d48b39213f7cd4fba50f389e053"
+      "lines": 1508,
+      "sha256": "0652a2a9358573745142b3f1fb5f09dd71819d2909b9c07c491d5f9929422d0c"
     },
     {
       "path": "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h",
