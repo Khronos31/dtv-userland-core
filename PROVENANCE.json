@@ -304,6 +304,7 @@
         "excluded_scope": "No timeout clock, retry, state-mutating recording operation, receive socket, engine, ATTACH/TS_DATA, or product adapter."
       }
     ],
-    "scope": "Read-only client within the existing opt-in dtv::control component. ClientTransport is borrowed and injected; it owns no OS resource. Successful fetch leaves it open, while a failure closes it and publishes no partial snapshot."
+    "scope": "Read-only client within the existing opt-in dtv::control component. ClientTransport is borrowed and injected; it owns no OS resource. Successful fetch leaves it open, while a failure closes it and publishes no partial snapshot.",
+    "new_files": "tests/control_client_tests.cpp, tests/consumer/control_client/, and docs/control-client.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
   }
 }
