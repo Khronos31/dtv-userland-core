@@ -980,6 +980,18 @@ bool codec(Ar& ar, StatusResponse& value) noexcept
 }
 
 template <typename Ar>
+bool codec(Ar& ar, LnbPowerRequest& value) noexcept
+{
+    return uuid_field(ar, value.epoch) && codec(ar, value.enabled);
+}
+
+template <typename Ar>
+bool codec(Ar& ar, LnbPowerResponse& value) noexcept
+{
+    return uuid_field(ar, value.epoch) && codec(ar, value.enabled);
+}
+
+template <typename Ar>
 bool codec(Ar& ar, TuneRequest& value) noexcept
 {
     if (!uuid_field(ar, value.epoch)) {
@@ -1388,6 +1400,8 @@ DTV_USERLAND_DEFINE_RECORD(ListRequest, list_request)
 DTV_USERLAND_DEFINE_RECORD(ListResponse, list_response)
 DTV_USERLAND_DEFINE_RECORD(StatusRequest, status_request)
 DTV_USERLAND_DEFINE_RECORD(StatusResponse, status_response)
+DTV_USERLAND_DEFINE_RECORD(LnbPowerRequest, lnb_power_request)
+DTV_USERLAND_DEFINE_RECORD(LnbPowerResponse, lnb_power_response)
 DTV_USERLAND_DEFINE_RECORD(TuneRequest, tune_request)
 DTV_USERLAND_DEFINE_RECORD(TuneResult, tune_result)
 DTV_USERLAND_DEFINE_RECORD(StartRequest, start_request)
