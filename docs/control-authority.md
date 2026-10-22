@@ -35,10 +35,12 @@ outside the poll loop and posts the typed `AuthorityCompletion` back to that
 same loop. ACQUIRE dispatch only queues a value job; the worker performs
 `ReceiverEngine::acquire()` and returns the lease ID and receiver. The authority
 checks key and job kind before producing a wire reply. If a successful acquire
-cannot be recorded or encoded, completion returns one rollback-release value
-job; the poll loop does not call Engine release. A rejected cleanup submit
-remains owned by the caller, and a repeated or stale completion cannot produce
-the cleanup value again.
+with a valid lease ID cannot be recorded or encoded, completion returns one
+rollback-release value job; the poll loop does not call Engine release. A
+success completion without a lease ID closes the client through disconnect
+cleanup because there is no scalar lease identity to release. A rejected
+cleanup submit remains owned by the caller, and a repeated or stale completion
+cannot produce the cleanup value again.
 
 Closing while ACQUIRE or rollback is pending marks the session closed but keeps
 its storage in the authority table. `close()` returns a deferred disconnect
