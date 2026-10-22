@@ -786,6 +786,166 @@ CardStatusResult card_status(TimedClientTransport& transport,
     return result;
 }
 
+CardResetResult card_reset(TimedClientTransport& transport,
+                           CardClientSession& session,
+                           Timeout timeout) noexcept
+{
+    CardResetResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U ||
+        session.card_handle == 0U || session.bound_generation == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    CardResetRequest request{};
+    request.key.epoch = session.epoch;
+    request.key.reader_id = session.reader_id;
+    request.key.bound_generation = session.bound_generation;
+    request.key.card_handle = session.card_handle;
+    const auto size = encode_body(request,
+                                  MutableByteView{workspace->payload.data(),
+                                                  workspace->payload.size()},
+                                  encode_card_reset_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto exchanged = roundtrip(adapter, kOpcodeCardReset, session.next_request_id,
+                                     ByteView{workspace->payload.data(), size.value()},
+                                     remote_code, *workspace, reply, &session.epoch);
+    ++session.next_request_id;
+    if (!exchanged) {
+        result.error = exchanged.error();
+        result.remote_error_code = remote_code;
+        transport.close();
+        return result;
+    }
+    const auto decoded = decode_card_session_result(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!decoded) {
+        result.error = decoded.error();
+        transport.close();
+        return result;
+    }
+    if (decoded.value().epoch != session.epoch ||
+        decoded.value().reader_id != session.reader_id ||
+        decoded.value().card_handle != session.card_handle ||
+        validate_card_session_result(decoded.value()) != Error::OK) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    session.bound_generation = decoded.value().bound_generation;
+    session.protocol = decoded.value().protocol;
+    result.response = decoded.value();
+    result.error = Error::OK;
+    return result;
+}
+
+CardTransmitResult card_transmit(TimedClientTransport& transport,
+                                 CardClientSession& session,
+                                 CardProtocol protocol, ByteView command,
+                                 Timeout timeout) noexcept
+{
+    CardTransmitResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U ||
+        session.card_handle == 0U || session.bound_generation == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    if (!session.protocol.present) {
+        result.error = Error::NOT_READY;
+        transport.close();
+        return result;
+    }
+    if (protocol != CardProtocol::t1 || protocol != session.protocol.value ||
+        command.data == nullptr || command.size == 0U || command.size > kMaxApduBytes) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    std::unique_ptr<CardTransmitRequest> request(new (std::nothrow) CardTransmitRequest{});
+    if (!request) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    request->key.epoch = session.epoch;
+    request->key.reader_id = session.reader_id;
+    request->key.bound_generation = session.bound_generation;
+    request->key.card_handle = session.card_handle;
+    request->protocol = protocol;
+    request->command.length = static_cast<std::uint32_t>(command.size);
+    std::memcpy(request->command.bytes.data(), command.data, command.size);
+    const auto size = encode_body(*request,
+                                  MutableByteView{workspace->payload.data(),
+                                                  workspace->payload.size()},
+                                  encode_card_transmit_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto exchanged = roundtrip(adapter, kOpcodeCardTransmit, session.next_request_id,
+                                     ByteView{workspace->payload.data(), size.value()},
+                                     remote_code, *workspace, reply, &session.epoch);
+    ++session.next_request_id;
+    if (!exchanged) {
+        result.error = exchanged.error();
+        result.remote_error_code = remote_code;
+        transport.close();
+        return result;
+    }
+    const auto decoded = decode_card_transmit_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!decoded) {
+        result.error = decoded.error();
+        transport.close();
+        return result;
+    }
+    if (decoded.value().key.epoch != session.epoch ||
+        decoded.value().key.reader_id != session.reader_id ||
+        decoded.value().key.card_handle != session.card_handle ||
+        decoded.value().key.bound_generation != session.bound_generation) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = decoded.value();
+    result.error = Error::OK;
+    return result;
+}
+
 CardDisconnectResult card_disconnect(TimedClientTransport& transport,
                                      CardClientSession& session,
                                      Disposition disposition,
