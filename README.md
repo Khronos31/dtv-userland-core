@@ -4,7 +4,7 @@
 
 ## 提供ライブラリと構成
 
-静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部互換エンジンとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）および `dtv::card`（CMake オプション `DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
+静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
 
 ### 依存関係
 
@@ -13,9 +13,10 @@
 - `dtv::tuning`: `dtv::wire` にリンク
 - `dtv::json`: `dtv::wire` にリンク
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
+- `dtv::capture`: `dtv::core` および `Threads` にリンク。receiver エンジンには依存しない
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
-実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。コア側の各ターゲットは OS や USB への依存を持たない（オプショナルな `dtv::receiver` のみスレッド（Threads）にリンクする）。
+実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` / `dtv::capture` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。これらは OS や USB に依存しない。スレッド（Threads）を使うのはオプショナルな `dtv::receiver` と `dtv::capture` だけである。
 
 外部向けの公開契約は ctl CLI および JSON であり、ワイヤプロトコルは同一リリース内の内部通信に限定される。
 
@@ -31,6 +32,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `discovery_json_tests`、`discovery_json_consumer`（`dtv::json`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
 - `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
+- `packet_stream_session_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
 
 ### ビルド・テスト手順
 
@@ -45,6 +47,7 @@ ctest --test-dir build --output-on-failure
 ```sh
 cmake -B build -S . -DCMAKE_BUILD_TYPE=Release -DBUILD_TESTING=ON \
   -DDTV_USERLAND_BUILD_RECEIVER=ON \
+  -DDTV_USERLAND_BUILD_CAPTURE=ON \
   -DDTV_USERLAND_BUILD_CARD=ON
 cmake --build build
 ctest --test-dir build --output-on-failure
@@ -89,6 +92,10 @@ target_link_libraries(my_consumer PRIVATE dtv::receiver)
 # card エンジンを利用する場合
 find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS card)
 target_link_libraries(my_consumer PRIVATE dtv::card)
+
+# capture store を利用する場合（Threads が自動検出される）
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS capture)
+target_link_libraries(my_consumer PRIVATE dtv::capture)
 ```
 
 ### 利用側のビルド手順
@@ -132,6 +139,10 @@ HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベン
 ### カード排他制御互換エンジン (`dtv::card`)
 
 `card_ownership_engine.h` およびテンプレート実装 `card_ownership_engine.tpp` において、内部の `detail::CardOwnershipEngine<AtrSnapshot>` を公開する（CMake オプション `DTV_USERLAND_BUILD_CARD`、既定値 OFF）。既存のシリアライズされた排他制御、共有、存在／世代管理、トランザクション、解放処理を、中立なバイト／セッション／バックエンド境界の背後で提供する。ATR スナップショットは不透明な値として扱い、製品固有の `CardAtr`、ネイティブプロトコルセッション、ATR パース、T=1、IPC 列挙型、ハードウェアコードは別ライセンスの製品ファサード側に保持する。本エンジンはスレッド、USB、OS への依存を持たず、公開された v1 カード／デッドライン／複数リーダー契約ではない。
+
+### TS packet store (`dtv::capture`)
+
+`DTV_USERLAND_BUILD_CAPTURE`（既定値 OFF）で有効にする独立した内部コンポーネントで、188-byte 完全packetのbounded保持、read、detach後のdrain/final観測、およびincarnation付きread ticketを提供する。legacy policyは満杯時に到着packetを拒否してslow-consumerを記録し、v1 policyは最古の未読packetをevictして継続する。これはproducer、socket、USB、producer quiescence、製品接続を提供せず、receiver-only構成から独立してbuild/installできる。共有session型は `detail/stream_session_types.h` に分離され、receiverとcaptureの有効時だけinstallされる。
 
 ## ライセンス範囲
 
