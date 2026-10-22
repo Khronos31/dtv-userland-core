@@ -21,6 +21,11 @@ is not connected to any product client, daemon, or IPC endpoint.
 `Model` is encoded as `str[128] name`. There is no wire `id` field. In the STATUS
 enclosure and LIST/STATUS function records, the optional Model tag still precedes this value.
 
+The independent LNB power operation uses opcode `0x0039`. Its request and response bodies each
+contain the 16-byte epoch followed by `bool enabled` as one byte (`0` off, `1` on). This is the
+same-release internal control record; it does not add connection dispatch, a client helper, a
+daemon permission check, or product LNB support.
+
 Every record is stored in explicit fixed-size storage (`WString`, `BBytes`, `BArray`,
 `Optional`); nothing allocates and no host struct is copied to or from the wire. The one
 exception is `TsData`, which aliases the packet bytes in the input view instead of storing a

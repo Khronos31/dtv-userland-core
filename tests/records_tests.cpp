@@ -137,6 +137,7 @@ void test_constants()
     CHECK(w::kOpcodeTune == 0x0022U);
     CHECK(w::kOpcodeAttachStream == 0x0040U);
     CHECK(w::kOpcodeCardStatus == 0x0030U);
+    CHECK(w::kOpcodeLnbPower == 0x0039U);
     CHECK(w::kOpcodeStateEvent == 0x80f0U);
     CHECK(w::is_event_opcode(w::kOpcodeStreamEndEvent));
     CHECK(!w::is_event_opcode(w::kOpcodeStatus));
@@ -438,6 +439,62 @@ void test_stream_lifecycle_golden()
     CHECK(w::encode_release_response(release, mutable_view(out)).has_value());
     release.quiesced = false;
     CHECK(w::encode_release_response(release, mutable_view(out)).error() == Error::INVALID_ARGUMENT);
+}
+
+void test_lnb_power_golden()
+{
+    const std::array<std::uint8_t, 17> request_expected = {
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+        0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0x01};
+    const std::array<std::uint8_t, 17> response_expected = {
+        0xa0, 0xa1, 0xa2, 0xa3, 0xa4, 0xa5, 0xa6, 0xa7,
+        0xa8, 0xa9, 0xaa, 0xab, 0xac, 0xad, 0xae, 0xaf, 0x00};
+
+    w::LnbPowerRequest request;
+    request.epoch = make_uuid(0xa0U);
+    request.enabled = true;
+    std::array<std::uint8_t, 18> out{};
+    const auto request_written = w::encode_lnb_power_request(request, mutable_view(out));
+    CHECK(request_written.has_value() && request_written.value() == request_expected.size());
+    CHECK(equals(out.data(), request_expected.size(), request_expected));
+    const auto request_decoded = w::decode_lnb_power_request(view(request_expected));
+    CHECK(request_decoded.has_value());
+    CHECK(request_decoded.value().epoch == request.epoch && request_decoded.value().enabled);
+
+    w::LnbPowerResponse response;
+    response.epoch = make_uuid(0xa0U);
+    response.enabled = false;
+    const auto response_written = w::encode_lnb_power_response(response, mutable_view(out));
+    CHECK(response_written.has_value() && response_written.value() == response_expected.size());
+    CHECK(equals(out.data(), response_expected.size(), response_expected));
+    const auto response_decoded = w::decode_lnb_power_response(view(response_expected));
+    CHECK(response_decoded.has_value());
+    CHECK(response_decoded.value().epoch == response.epoch && !response_decoded.value().enabled);
+
+    std::array<std::uint8_t, 16> short_buffer{};
+    short_buffer.fill(0xaaU);
+    CHECK(w::encode_lnb_power_request(request, mutable_view(short_buffer)).error() ==
+          Error::BUFFER_TOO_SMALL);
+    bool untouched = true;
+    for (std::uint8_t byte : short_buffer) {
+        if (byte != 0xaaU) {
+            untouched = false;
+        }
+    }
+    CHECK(untouched);
+
+    CHECK(w::decode_lnb_power_request(ByteView{request_expected.data(), 16U}).error() ==
+          Error::PROTOCOL_ERROR);
+    std::array<std::uint8_t, 18> trailing{};
+    for (std::size_t i = 0U; i < request_expected.size(); ++i) {
+        trailing[i] = request_expected[i];
+    }
+    CHECK(w::decode_lnb_power_request(view(trailing)).error() == Error::PROTOCOL_ERROR);
+
+    auto invalid_bool = request_expected;
+    invalid_bool.back() = 0x02U;
+    CHECK(w::decode_lnb_power_request(view(invalid_bool)).error() == Error::INVALID_ARGUMENT);
+    CHECK(w::decode_lnb_power_response(view(invalid_bool)).error() == Error::INVALID_ARGUMENT);
 }
 
 void test_tune()
@@ -2241,6 +2298,7 @@ int main()
     test_state_event_golden();
     test_card_session_golden();
     test_stream_lifecycle_golden();
+    test_lnb_power_golden();
     test_tune();
     test_measurements_and_counters();
     test_capabilities();

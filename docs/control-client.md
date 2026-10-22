@@ -1,6 +1,6 @@
 # control client
 
-`dtv::control` はsocketなしgate componentとして、read-only status APIと、期限付きrecording APIを提供する。呼び出し側が `ClientTransport` または `TimedClientTransport` を実装して注入する。このCore libraryはsocketやfile descriptor adapterを提供しない。`fetch_status` はHELLO/LIST/STATUSだけを要求し、ACQUIRE/TUNE/START/STOP/RELEASEは行わない。recording APIの `begin_recording`、`stop_recording`、`release_recording` はそれぞれ明示的にこれらの制御要求を行う。
+`dtv::control` はsocketなしgate componentとして、status API、期限付きrecording API、独立LNB power clientを提供する。呼び出し側が `ClientTransport` または `TimedClientTransport` を実装して注入する。このCore libraryはsocketやfile descriptor adapterを提供しない。`fetch_status` はHELLO/LIST/STATUSだけを要求し、ACQUIRE/TUNE/START/STOP/RELEASEは行わない。recording APIの `begin_recording`、`stop_recording`、`release_recording` はそれぞれ明示的にこれらの制御要求を行う。
 
 `fetch_status` は同じtransportでHELLO、筐体scopeのLIST、STATUSを順に要求し、request ID 1、2、3を使う。optional featureなしでUDTV 1.0を要求する。HELLOで選択されたversion、系列内のepochとproducer product/version、canonical LIST、および `validate_status_response` によるLIST基準のSTATUSを検証する。LISTとSTATUSが公開する筐体/functionのidentity fieldも照合する。Modelは現行のname-only fieldで比較する。呼び出し前に未使用の新しいconnectionを渡すこと。
 
@@ -20,6 +20,8 @@ read-onlyの `fetch_status` はACQUIRE/TUNE/START/STOP/RELEASEを行わない。
 
 `fetch_status(TimedClientTransport&, Timeout)` は呼び出し開始時に単調時計のabsolute deadlineを1つ作り、HELLO/LIST/STATUSとfragment readを通じて同じ残時間を渡す。部分進捗でdeadlineは延びない。期限値0は `INVALID_ARGUMENT`、deadline算出が時計のuint64範囲を越える場合は `TIMEOUT` とし、どちらもtransportを閉じてdefault snapshotを返す。I/O timeout、EOF、decode/validation失敗もtransportを閉じ、snapshotを公開しない。成功時はsnapshotを返し、接続はcallerへ開いたまま返す。
 
+`fetch_status(TimedClientTransport&, Timeout, required_features)` は同じHELLO/LIST/STATUS sequenceを一つの期限内で実行し、HELLOのrequired feature maskを送る。required bitを提供しないserverはHELLOで拒否する。応答が要求maskを満たさない場合も `UNSUPPORTED`、要求していないfeatureを返すなど応答maskが一致しない場合は `PROTOCOL_ERROR` とし、default snapshotでtransportを閉じる。`required_features == 0` は既存の期限付きoverloadと同じstatus-only negotiationである。非期限付き `ClientTransport` と既存virtualの形は変わらない。
+
 `begin_recording` はその `fetch_status` を最初に使い、必要なら `RecordingStatusValidator` をACQUIREより前に呼ぶ。validatorの拒否はdefault sessionで返り、transportを閉じる。status段のdeadlineが終わった後、ACQUIRE/TUNE/START段には同じ長さの新しいdeadlineを作る。この2 budgetの動作は旧recording helperとの互換実装であり、begin全体を単一budgetにはしない。optionの数値default/range、`TuneRequest.timeout_ms` への製品側対応、OS socket timeoutとの換算は定義しない。
 
 この2 budgetの分割は旧recording helperとの互換を保つための現実装上の選択で、将来の製品向けtimeout契約や永久のユーザー仕様を定めるものではない。新しいtimeout数値、default、製品optionとの換算は定義しない。
@@ -27,5 +29,17 @@ read-onlyの `fetch_status` はACQUIRE/TUNE/START/STOP/RELEASEを行わない。
 beginは1つの上限付きworkspaceを例外なしのheap確保で使い、既存status実装のreply decoder/validationを呼び出す。ACQUIRE/TUNE/STARTの失敗はdefault sessionとremote raw error codeを返し、transportを閉じる。開始成功後にのみepoch、lease、tune result/revision、stream ID、attach token、expiry、次request IDを含むcaller-owned sessionを返す。attach tokenは別data connectionのATTACHにだけ使い、clientはdata socketやATTACHを行わない。START成功はarmed受理を示すだけで、TS activeを示さない。
 
 `stop_recording` はsessionのstreamへ1回のtyped STOPを送り、leaseを解放しない。`release_recording` はsessionのleaseへ別のtyped RELEASEを1回送る。両APIは失敗・応答不明のrequestを再送せず、成功時はtransportを開いたまま返す。応答が届く前にdaemonがSTART/STOP/RELEASEを適用した可能性はclientから判定できないため、timeout後に物理cleanup完了や `quiesced=true` を推定しない。disconnect後の回収はdaemon owner契約の責任である。
+
+## CARD session client
+
+`begin_card(TimedClientTransport&, CardClientOptions, Timeout)` はCARD_SERVICEをrequired featureとしてHELLOし、同じ接続でLIST/STATUS、readerの存在確認、CARD_STATUS、CARD_CONNECTを行う。HELLO/LIST/STATUSには一つの期限、CARD_STATUS/CARD_CONNECTにはその後に始める同じ長さの期限を使い、各区間内でdeadlineを延長しない。request IDは1–5を使う。readerがsnapshotにない場合やidentity constraintが一致しない場合は `NOT_FOUND` で接続を閉じ、readerやCARD capabilityを推定しない。成功時はdaemon epoch、reader、handle、generation、CARD_CONNECTが選択したprotocol、次request ID 6を `CardClientSession` に保持し、接続を開いたまま返す。
+
+`card_status` はsessionのepoch/readerを使って現在generationと挿入・初期化状態を取得する。`card_reset` はsessionのepoch/reader/handle/bound generationを送る。応答が同じepoch/reader/handleを示し、typed session resultの検証に成功した場合だけgenerationとprotocolを更新し、ATRを含む応答を返す。`card_transmit` はusable sessionに保存されたprotocolと一致するT=1 protocol、および1..4096 byteのAPDUを受け付け、同じepoch/reader/handle/generationを持つ応答だけを公開する。TRANSMIT応答も最大4096 byteで、response key不一致やdecode失敗ではdefault responseを返す。`card_disconnect` はsessionのepoch/reader/handle/bound generationを使う。responseが同じreader/handleを示して `consumed=true` なら、`quiesced` やcleanup errorの有無にかかわらずsessionのhandle/generation/protocolを消費し、typed responseをresultに保持する。cleanup errorがあればremote error codeを保持して対応するErrorを返し、errorがなく `quiesced=false` ならprotocol errorを返す。`consumed=false` とerrorなしもprotocol errorで、sessionは消費しない。status/reset/transmit/disconnectは各呼び出し内で単一deadlineを使い、失敗時は接続を閉じてrequestを再送しない。remote errorのwire codeを保持する。CARD操作は再実行しない。
+
+## 独立LNB power client
+
+`set_lnb_power(TimedClientTransport&, enabled, Timeout)` は同じ接続でHELLO/LIST/STATUSを行い、STATUSのepochを使ってopcode `0x0039` の `LnbPowerRequest` をrequest ID 4で一度送る。HELLOからLNB応答まで一つの単調時計deadlineを共有し、timeout後にdeadlineを更新しない。wire versionやfeature bitは追加しない。LNB能力・daemonの `--allow-lnb-power`・物理操作はserver owner側の責任で、このclientはそれらを代行しない。
+
+成功時はresponseのepochと `enabled` が要求に一致した `LnbPowerResponse` を返し、接続を開いたままにする。このresponseは制御要求に対するserverの応答であり、15V端子の実測・実機給電成功を意味しない。remote errorのraw codeを保持し、timeout、EOF、malformed response、epoch/state不一致ではdefault responseを返して接続を閉じる。requestは再送しない。timeout 0は `INVALID_ARGUMENT`、期限算出が単調時計のuint64範囲を越える場合は `TIMEOUT` となり、どちらも接続を閉じる。
 
 期限付きrecording呼び出しでも、結果・decode record・client frameはcaller threadのstackを使い、bounded exchange workspaceはheap確保する。Linux x86_64のfocused probeはfake transportと記録応答をprobe thread外のheapに置き、GCC 14.2 ReleaseとClang 19.1.7 Debug ASan+UBSanの各512 KiB stackで正常なbegin→stop→releaseとtimed status EOFを確認する。これはそのcompiler/build構成での実測に限り、小stackを一般に保証しない。呼び出し側は実際のthread stack budget、結果の置き場所、decoder、transport実装の使用量を含めて余裕を確保する。PID request scratchはbounded heap workspaceを再利用し、最大合法PID listを扱う。read-only request scratchの小さな上限とは別である。

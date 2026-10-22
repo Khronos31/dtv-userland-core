@@ -52,7 +52,7 @@ void set_text(w::WString<N>& out, const char* text)
     }
 }
 
-w::ServerHello make_server()
+w::ServerHello make_server(std::uint64_t features = 0U)
 {
     w::ServerHello server;
     for (std::size_t i = 0U; i < server.epoch.size(); ++i) {
@@ -60,6 +60,7 @@ w::ServerHello make_server()
     }
     set_text(server.producer.product, "test-product");
     set_text(server.producer.version, "1.2.3");
+    server.features = features;
     return server;
 }
 
@@ -114,15 +115,55 @@ enum class Fault : std::uint8_t {
     release_wire_error,
     release_without_error,
     bad_release_epoch,
+    lnb_remote_error,
+    lnb_eof,
+    timeout_lnb,
+    bad_lnb_epoch,
+    bad_lnb_enabled,
+    truncated_lnb,
+    card_status_remote_error,
+    card_connect_remote_error,
+    card_disconnect_remote_error,
+    card_eof,
+    card_disconnect_eof,
+    timeout_card,
+    bad_card_status_epoch,
+    bad_card_connect_epoch,
+    bad_card_connect_generation,
+    bad_disconnect_key,
+    bad_disconnect_handle,
+    card_not_consumed,
+    card_disconnect_unquiesced_error,
+    card_disconnect_unquiesced_without_error,
+    card_reset_remote_error,
+    card_reset_bad_handle,
+    card_reset_bad_generation,
+    card_reset_eof,
+    truncated_card_reset,
+    card_reset_unusable,
+    timeout_card_reset,
+    card_transmit_remote_error,
+    card_transmit_bad_key,
+    card_transmit_eof,
+    truncated_card_transmit,
+    timeout_card_transmit,
+    card_transmit_maximum,
+    truncated_card_connect,
 };
 
 class FakeTransport final : public w::ClientTransport, public w::TimedClientTransport {
 public:
-    explicit FakeTransport(Fault fault = Fault::none, bool accept_pid_requests = false)
-        : server_(make_server()), connection_(server_), fault_(fault),
+    explicit FakeTransport(Fault fault = Fault::none, bool accept_pid_requests = false,
+                           std::uint64_t server_features = 0U,
+                           bool card_reader_available = false)
+        : server_(make_server(server_features)), connection_(server_), fault_(fault),
           accept_pid_requests_(accept_pid_requests)
     {
         sparse_list(list_, server_.epoch);
+        if (card_reader_available) {
+            list_.readers.value.count = 1U;
+            list_.readers.value.items[0U].id = 23U;
+        }
         context_.epoch = server_.epoch;
         context_.state = w::ContextState::ready;
         snapshot_ = w::Snapshot{3U, 5000U};
@@ -154,6 +195,8 @@ public:
             tune_pid_first_ = request.tune.pids.value.items[0U];
             tune_pid_last_ = request.tune.pids.value.items[tune_pid_count_ - 1U];
         }
+        if (request.kind == w::ControlRequestKind::lnb_power)
+            last_lnb_enabled_ = request.lnb_power.enabled;
         // PID fixtures isolate client request sizing from feature negotiation.
         if (inbound.action == w::InboundAction::respond &&
             !(accept_pid_requests_ && request.kind == w::ControlRequestKind::tune &&
@@ -206,7 +249,13 @@ public:
         if ((fault_ == Fault::timeout_list && request_count_ == 2U) ||
             (fault_ == Fault::timeout_start && request_count_ == 6U) ||
             (fault_ == Fault::timeout_stop && request_count_ == 7U) ||
-            (fault_ == Fault::timeout_release && request_count_ == 8U)) {
+            (fault_ == Fault::timeout_release && request_count_ == 8U) ||
+            (fault_ == Fault::timeout_lnb && request_count_ == 4U) ||
+            (fault_ == Fault::timeout_card && request_count_ == 5U) ||
+            (fault_ == Fault::timeout_card_reset && request_count_ > 5U &&
+             request_opcodes_[request_count_ - 1U] == w::kOpcodeCardReset) ||
+            (fault_ == Fault::timeout_card_transmit && request_count_ > 5U &&
+             request_opcodes_[request_count_ - 1U] == w::kOpcodeCardTransmit)) {
             now_ms_ += timeout.milliseconds;
             return Result<std::size_t>::failure(Error::TIMEOUT);
         }
@@ -230,6 +279,7 @@ public:
     std::uint32_t read_timeout(std::size_t index) const noexcept { return read_timeouts_[index]; }
     std::size_t write_timeout_count() const noexcept { return write_timeout_count_; }
     std::size_t read_timeout_count() const noexcept { return read_timeout_count_; }
+    bool last_lnb_enabled() const noexcept { return last_lnb_enabled_; }
     void advance_per_read(std::uint32_t milliseconds) noexcept
     {
         advance_per_read_ms_ = milliseconds;
@@ -271,6 +321,9 @@ private:
                                       w::Scope{w::ScopeKind::enclosure, 0U}, response) != Error::OK) {
                 return false;
             }
+            if (response.readers.present && response.readers.value.count != 0U)
+                response.readers.value.items[0U].card.reason =
+                    static_cast<std::uint8_t>(w::UnknownReason::not_sampled);
             if (fault_ == Fault::wrong_status_epoch) response.context.epoch[0] ^= 0x01U;
             if (fault_ == Fault::noncanonical_status && response.receivers.present) {
                 response.receivers.value.items[0].descriptor.systems.mask = 0x03U;
@@ -283,6 +336,197 @@ private:
                                              MutableByteView{reply_.data(), reply_.size()})
                     : w::encode_status_frame(request.request_id, response, list_,
                                              MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::lnb_power) {
+            if (fault_ == Fault::lnb_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::UNSUPPORTED), "lnb_power",
+                    w::Scope{w::ScopeKind::enclosure, 0U},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            if (fault_ == Fault::lnb_eof) {
+                reply_size_ = 0U;
+                return true;
+            }
+            w::LnbPowerResponse response{};
+            response.epoch = server_.epoch;
+            response.enabled = request.lnb_power.enabled;
+            if (fault_ == Fault::bad_lnb_epoch) response.epoch[0] ^= 0x01U;
+            if (fault_ == Fault::bad_lnb_enabled) response.enabled = !response.enabled;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_lnb_power_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::card_status) {
+            if (fault_ == Fault::card_status_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::UNSUPPORTED), "card_status",
+                    w::Scope{w::ScopeKind::reader, request.card_status.key.reader_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::CardStatusResponse response{};
+            response.key = request.card_status.key;
+            response.current_generation = 9U;
+            response.present = true;
+            response.initialized = true;
+            response.protocol.present = true;
+            response.protocol.value = w::CardProtocol::t1;
+            response.atr.present = true;
+            response.atr.value.length = 2U;
+            response.atr.value.bytes[0U] = 0x3bU;
+            response.atr.value.bytes[1U] = 0x00U;
+            if (fault_ == Fault::bad_card_status_epoch) response.key.epoch[0U] ^= 0x01U;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_card_status_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::card_connect) {
+            if (fault_ == Fault::card_connect_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::NO_CARD), "card_connect",
+                    w::Scope{w::ScopeKind::reader, request.card_connect.key.reader_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::CardSessionResult response{};
+            response.epoch = server_.epoch;
+            response.reader_id = request.card_connect.key.reader_id;
+            response.card_handle = 0x1234U;
+            response.bound_generation = 9U;
+            response.current_generation = 9U;
+            response.present = true;
+            response.initialized = true;
+            response.usable = true;
+            response.protocol.present = true;
+            response.protocol.value = w::CardProtocol::t1;
+            response.atr.present = true;
+            response.atr.value.length = 2U;
+            response.atr.value.bytes[0U] = 0x3bU;
+            response.atr.value.bytes[1U] = 0x00U;
+            if (fault_ == Fault::bad_card_connect_epoch) response.epoch[0U] ^= 0x01U;
+            if (fault_ == Fault::bad_card_connect_generation) response.current_generation++;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_card_session_result, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::card_disconnect) {
+            if (fault_ == Fault::card_disconnect_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    w::kWireErrorStaleHandle, "card_disconnect",
+                    w::Scope{w::ScopeKind::reader, request.card_disconnect.key.reader_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::CardDisconnectResponse response{};
+            response.key.epoch = request.card_disconnect.key.epoch;
+            response.key.reader_id = request.card_disconnect.key.reader_id;
+            response.card_handle = request.card_disconnect.key.card_handle;
+            response.consumed = fault_ != Fault::card_not_consumed;
+            response.quiesced = fault_ != Fault::card_disconnect_unquiesced_error &&
+                                fault_ != Fault::card_disconnect_unquiesced_without_error;
+            if (fault_ == Fault::card_disconnect_unquiesced_error) {
+                response.error.present = true;
+                response.error.value.code = static_cast<std::uint32_t>(Error::USB_IO);
+            }
+            if (fault_ == Fault::bad_disconnect_key) response.key.reader_id++;
+            if (fault_ == Fault::bad_disconnect_handle) response.card_handle++;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_card_disconnect_response,
+                MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::card_reset) {
+            if (fault_ == Fault::card_reset_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::CARD_REMOVED), "card_reset",
+                    w::Scope{w::ScopeKind::reader, request.card_reset.key.reader_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::CardSessionResult response{};
+            response.epoch = request.card_reset.key.epoch;
+            response.reader_id = request.card_reset.key.reader_id;
+            response.card_handle = request.card_reset.key.card_handle;
+            response.bound_generation = 10U;
+            response.current_generation = 10U;
+            response.usable = fault_ != Fault::card_reset_unusable;
+            if (response.usable) {
+                response.present = true;
+                response.initialized = true;
+                response.protocol.present = true;
+                response.protocol.value = w::CardProtocol::t1;
+                response.atr.present = true;
+                response.atr.value.length = 3U;
+                response.atr.value.bytes[0U] = 0x3bU;
+                response.atr.value.bytes[1U] = 0x01U;
+                response.atr.value.bytes[2U] = 0x02U;
+            }
+            if (fault_ == Fault::card_reset_bad_handle) response.card_handle++;
+            if (fault_ == Fault::card_reset_bad_generation)
+                response.current_generation++;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_card_session_result,
+                MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::card_transmit) {
+            if (fault_ == Fault::card_transmit_remote_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch,
+                    static_cast<std::uint32_t>(Error::CARD_REMOVED), "card_transmit",
+                    w::Scope{w::ScopeKind::reader, request.card_transmit.key.reader_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::CardTransmitResponse response{};
+            response.key = request.card_transmit.key;
+            if (fault_ == Fault::card_transmit_bad_key) response.key.bound_generation++;
+            response.response.length = fault_ == Fault::card_transmit_maximum
+                                           ? static_cast<std::uint32_t>(w::kMaxApduBytes)
+                                           : 2U;
+            response.response.bytes[0U] = 0x90U;
+            response.response.bytes[1U] = 0x00U;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_card_transmit_response,
+                MutableByteView{reply_.data(), reply_.size()});
             if (!encoded) return false;
             reply_size_ = encoded.value();
             return true;
@@ -391,6 +635,27 @@ private:
         } else if (fault_ == Fault::truncated_status && opcode == w::kOpcodeStatus &&
                    reply_size_ != 0U) {
             --reply_size_;
+        } else if (fault_ == Fault::truncated_lnb && opcode == w::kOpcodeLnbPower &&
+                   reply_size_ != 0U) {
+            --reply_size_;
+        } else if (fault_ == Fault::card_eof && opcode == w::kOpcodeCardConnect) {
+            reply_size_ = 0U;
+        } else if (fault_ == Fault::card_disconnect_eof &&
+                   opcode == w::kOpcodeCardDisconnect) {
+            reply_size_ = 0U;
+        } else if (fault_ == Fault::card_reset_eof && opcode == w::kOpcodeCardReset) {
+            reply_size_ = 0U;
+        } else if (fault_ == Fault::card_transmit_eof &&
+                   opcode == w::kOpcodeCardTransmit) {
+            reply_size_ = 0U;
+        } else if ((fault_ == Fault::truncated_card_reset &&
+                    opcode == w::kOpcodeCardReset) ||
+                   (fault_ == Fault::truncated_card_transmit &&
+                    opcode == w::kOpcodeCardTransmit)) {
+            if (reply_size_ != 0U) --reply_size_;
+        } else if (fault_ == Fault::truncated_card_connect &&
+                   opcode == w::kOpcodeCardConnect && reply_size_ != 0U) {
+            --reply_size_;
         }
     }
 
@@ -438,6 +703,7 @@ private:
     std::uint64_t now_ms_ = 0U;
     bool closed_ = false;
     bool accept_pid_requests_ = false;
+    bool last_lnb_enabled_ = false;
 };
 
 void test_successful_read_only_exchange()
@@ -515,6 +781,430 @@ void test_timed_status_uses_one_deadline_and_preserves_old_transport()
         w::fetch_status(zero_timeout, dtv::userland::Timeout{0U});
     CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
     CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+}
+
+void test_timed_status_required_features()
+{
+    const std::uint64_t supported_features =
+        w::kFeatureCardService | w::kFeatureStateEvent;
+    FakeTransport supported(Fault::none, false, supported_features);
+    const auto result = w::fetch_status(
+        supported, dtv::userland::Timeout{1000U}, w::kFeatureCardService);
+    CHECK(result);
+    CHECK(!supported.closed() && supported.request_count() == 3U);
+    CHECK(supported.request_id(0U) == 1U && supported.request_opcode(0U) == w::kOpcodeHello);
+    CHECK(supported.request_id(1U) == 2U && supported.request_opcode(1U) == w::kOpcodeList);
+    CHECK(supported.request_id(2U) == 3U && supported.request_opcode(2U) == w::kOpcodeStatus);
+
+    FakeTransport missing;
+    const auto missing_result = w::fetch_status(
+        missing, dtv::userland::Timeout{1000U}, w::kFeatureCardService);
+    CHECK(!missing_result && missing_result.error == Error::UNSUPPORTED);
+    CHECK(missing_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(missing.closed() && missing.request_count() == 1U);
+    CHECK(missing.request_opcode(0U) == w::kOpcodeHello);
+
+    FakeTransport unknown;
+    const std::uint64_t unknown_feature = std::uint64_t{1U} << 63U;
+    const auto unknown_result = w::fetch_status(
+        unknown, dtv::userland::Timeout{1000U}, unknown_feature);
+    CHECK(!unknown_result && unknown_result.error == Error::UNSUPPORTED);
+    CHECK(unknown_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(unknown.closed() && unknown.request_count() == 1U);
+
+    FakeTransport zero_timeout;
+    const auto invalid = w::fetch_status(
+        zero_timeout, dtv::userland::Timeout{0U}, w::kFeatureCardService);
+    CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
+    CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+}
+
+void test_lnb_power_client_success_and_failures()
+{
+    FakeTransport on;
+    on.advance_per_read(1U);
+    const auto enabled = w::set_lnb_power(on, true, dtv::userland::Timeout{1000U});
+    CHECK(enabled && enabled.response.enabled);
+    CHECK(enabled.response.epoch == make_server().epoch);
+    CHECK(!on.closed() && on.last_lnb_enabled() && on.request_count() == 4U);
+    CHECK(on.request_id(3U) == 4U && on.request_opcode(3U) == w::kOpcodeLnbPower);
+    CHECK(on.write_timeout(3U) < 1000U);
+
+    FakeTransport off;
+    const auto disabled = w::set_lnb_power(off, false, dtv::userland::Timeout{1000U});
+    CHECK(disabled && !disabled.response.enabled);
+    CHECK(!off.closed() && !off.last_lnb_enabled() && off.request_count() == 4U);
+    CHECK(off.request_id(3U) == 4U && off.request_opcode(3U) == w::kOpcodeLnbPower);
+
+    FakeTransport zero_timeout;
+    const auto invalid = w::set_lnb_power(
+        zero_timeout, true, dtv::userland::Timeout{0U});
+    CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
+    CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+
+    FakeTransport remote(Fault::lnb_remote_error);
+    const auto remote_result = w::set_lnb_power(
+        remote, true, dtv::userland::Timeout{1000U});
+    CHECK(!remote_result && remote_result.error == Error::UNSUPPORTED);
+    CHECK(remote_result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(remote.closed() && remote.request_count() == 4U);
+
+    const Fault faults[] = {Fault::lnb_eof, Fault::timeout_lnb, Fault::bad_lnb_epoch,
+                            Fault::bad_lnb_enabled, Fault::truncated_lnb};
+    const Error errors[] = {Error::DISCONNECTED, Error::TIMEOUT, Error::PROTOCOL_ERROR,
+                            Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR};
+    for (std::size_t index = 0U; index < sizeof(faults) / sizeof(faults[0]); ++index) {
+        FakeTransport failed(faults[index]);
+        const auto failed_result = w::set_lnb_power(
+            failed, false, dtv::userland::Timeout{1000U});
+        CHECK(!failed_result && failed_result.error == errors[index]);
+        CHECK(failed.closed() && failed.request_count() == 4U);
+    }
+}
+
+void test_card_session_status_and_disconnect()
+{
+    FakeTransport missing_feature;
+    w::CardClientOptions options{};
+    options.reader_id = 23U;
+    const auto unsupported = w::begin_card(
+        missing_feature, options, dtv::userland::Timeout{1000U});
+    CHECK(!unsupported && unsupported.error == Error::UNSUPPORTED);
+    CHECK(unsupported.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(missing_feature.closed() && missing_feature.request_count() == 1U);
+
+    FakeTransport no_reader(Fault::none, false, w::kFeatureCardService, false);
+    const auto absent = w::begin_card(no_reader, options, dtv::userland::Timeout{1000U});
+    CHECK(!absent && absent.error == Error::NOT_FOUND);
+    CHECK(no_reader.closed() && no_reader.request_count() == 3U);
+
+    FakeTransport transport(Fault::none, false, w::kFeatureCardService, true);
+    transport.advance_per_read(1U);
+    options.expected_product = ByteView{
+        reinterpret_cast<const std::uint8_t*>("test-product"), 12U};
+    const auto opened = w::begin_card(
+        transport, options, dtv::userland::Timeout{5000U});
+    CHECK(opened && opened.error == Error::OK);
+    CHECK(opened.session.epoch == make_server(w::kFeatureCardService).epoch);
+    CHECK(opened.session.reader_id == 23U && opened.session.card_handle == 0x1234U);
+    CHECK(opened.session.bound_generation == 9U && opened.session.next_request_id == 6U);
+    CHECK(opened.session.protocol.present &&
+          opened.session.protocol.value == w::CardProtocol::t1);
+    CHECK(opened.reader_status.key.reader_id == 23U && opened.connection.usable);
+    CHECK(!transport.closed() && transport.request_count() == 5U);
+    CHECK(transport.request_id(0U) == 1U && transport.request_id(1U) == 2U &&
+          transport.request_id(2U) == 3U && transport.request_id(3U) == 4U &&
+          transport.request_id(4U) == 5U);
+    CHECK(transport.request_opcode(3U) == w::kOpcodeCardStatus &&
+          transport.request_opcode(4U) == w::kOpcodeCardConnect);
+    CHECK(transport.write_timeout(3U) == 5000U &&
+          transport.write_timeout(4U) < transport.write_timeout(3U));
+
+    auto session = opened.session;
+    const auto status = w::card_status(
+        transport, session, dtv::userland::Timeout{1000U});
+    CHECK(status && status.response.key.epoch == session.epoch);
+    CHECK(transport.request_id(5U) == 6U &&
+          transport.request_opcode(5U) == w::kOpcodeCardStatus);
+
+    const auto disconnected = w::card_disconnect(
+        transport, session, w::Disposition::leave, dtv::userland::Timeout{1000U});
+    CHECK(disconnected && disconnected.response.consumed);
+    CHECK(transport.request_id(6U) == 7U &&
+          transport.request_opcode(6U) == w::kOpcodeCardDisconnect);
+    CHECK(session.card_handle == 0U && session.bound_generation == 0U);
+    CHECK(!session.protocol.present);
+    CHECK(!transport.closed());
+}
+
+void test_card_reset_and_transmit()
+{
+    FakeTransport transport(Fault::none, false, w::kFeatureCardService, true);
+    w::CardClientOptions options{};
+    options.reader_id = 23U;
+    const auto opened = w::begin_card(
+        transport, options, dtv::userland::Timeout{1000U});
+    CHECK(opened);
+    auto session = opened.session;
+    const auto reset = w::card_reset(transport, session, dtv::userland::Timeout{1000U});
+    CHECK(reset && reset.response.card_handle == opened.session.card_handle);
+    CHECK(reset.response.bound_generation == 10U && reset.response.current_generation == 10U);
+    CHECK(reset.response.usable && reset.response.protocol.present &&
+          reset.response.protocol.value == w::CardProtocol::t1);
+    CHECK(reset.response.atr.present && reset.response.atr.value.length == 3U &&
+          reset.response.atr.value.bytes[0U] == 0x3bU &&
+          reset.response.atr.value.bytes[2U] == 0x02U);
+    CHECK(session.card_handle == opened.session.card_handle &&
+          session.bound_generation == 10U && session.protocol.present &&
+          session.protocol.value == w::CardProtocol::t1);
+    CHECK(transport.request_count() == 6U && transport.request_id(5U) == 6U &&
+          transport.request_opcode(5U) == w::kOpcodeCardReset && !transport.closed());
+
+    const std::uint8_t command[] = {0x00U, 0xa4U, 0x04U};
+    const auto transmitted = w::card_transmit(
+        transport, session, w::CardProtocol::t1, ByteView{command, sizeof(command)},
+        dtv::userland::Timeout{1000U});
+    CHECK(transmitted && transmitted.response.response.length == 2U &&
+          transmitted.response.response.bytes[0U] == 0x90U &&
+          transmitted.response.response.bytes[1U] == 0x00U);
+    CHECK(transmitted.response.key.epoch == session.epoch &&
+          transmitted.response.key.reader_id == session.reader_id &&
+          transmitted.response.key.card_handle == session.card_handle &&
+          transmitted.response.key.bound_generation == session.bound_generation);
+    CHECK(transport.request_count() == 7U && transport.request_id(6U) == 7U &&
+          transport.request_opcode(6U) == w::kOpcodeCardTransmit && !transport.closed());
+    CHECK(session.card_handle == opened.session.card_handle &&
+          session.bound_generation == 10U && session.protocol.present);
+
+    FakeTransport unusable(Fault::card_reset_unusable, false,
+                           w::kFeatureCardService, true);
+    const auto unusable_open = w::begin_card(
+        unusable, options, dtv::userland::Timeout{1000U});
+    CHECK(unusable_open);
+    auto unusable_session = unusable_open.session;
+    const auto unusable_reset = w::card_reset(
+        unusable, unusable_session, dtv::userland::Timeout{1000U});
+    CHECK(unusable_reset && !unusable_reset.response.usable &&
+          !unusable_reset.response.protocol.present && !unusable_reset.response.atr.present);
+    CHECK(unusable_session.bound_generation == 10U &&
+          !unusable_session.protocol.present && !unusable.closed() &&
+          unusable.request_count() == 6U &&
+          unusable.request_opcode(5U) == w::kOpcodeCardReset);
+    const auto unusable_transmit = w::card_transmit(
+        unusable, unusable_session, w::CardProtocol::t1,
+        ByteView{command, sizeof(command)}, dtv::userland::Timeout{1000U});
+    CHECK(!unusable_transmit && unusable_transmit.error == Error::NOT_READY &&
+          unusable.request_count() == 6U && unusable.closed());
+
+    FakeTransport maximum(Fault::card_transmit_maximum, false,
+                          w::kFeatureCardService, true);
+    const auto maximum_open = w::begin_card(
+        maximum, options, dtv::userland::Timeout{1000U});
+    CHECK(maximum_open);
+    std::array<std::uint8_t, w::kMaxApduBytes> maximum_command{};
+    maximum_command[0U] = 0x00U;
+    auto maximum_session = maximum_open.session;
+    const auto maximum_result = w::card_transmit(
+        maximum, maximum_session, w::CardProtocol::t1,
+        ByteView{maximum_command.data(), maximum_command.size()},
+        dtv::userland::Timeout{1000U});
+    CHECK(maximum_result &&
+          maximum_result.response.response.length == w::kMaxApduBytes);
+    CHECK(maximum.request_count() == 6U && maximum.request_id(5U) == 6U &&
+          maximum.request_opcode(5U) == w::kOpcodeCardTransmit && !maximum.closed());
+
+    const Fault reset_faults[] = {Fault::card_reset_remote_error,
+                                  Fault::card_reset_bad_handle,
+                                  Fault::card_reset_bad_generation,
+                                  Fault::card_reset_eof, Fault::truncated_card_reset,
+                                  Fault::timeout_card_reset};
+    const Error reset_errors[] = {Error::CARD_REMOVED, Error::PROTOCOL_ERROR,
+                                  Error::PROTOCOL_ERROR, Error::DISCONNECTED,
+                                  Error::PROTOCOL_ERROR, Error::TIMEOUT};
+    for (std::size_t index = 0U;
+         index < sizeof(reset_faults) / sizeof(reset_faults[0]); ++index) {
+        FakeTransport failed(reset_faults[index], false, w::kFeatureCardService, true);
+        const auto card = w::begin_card(
+            failed, options, dtv::userland::Timeout{1000U});
+        CHECK(card);
+        auto failed_session = card.session;
+        const auto result = w::card_reset(
+            failed, failed_session, dtv::userland::Timeout{1000U});
+        CHECK(!result && result.error == reset_errors[index]);
+        CHECK(failed_session.card_handle == card.session.card_handle &&
+              failed_session.bound_generation == card.session.bound_generation &&
+              failed_session.protocol.present == card.session.protocol.present &&
+              failed_session.protocol.value == card.session.protocol.value &&
+              failed_session.next_request_id == 7U);
+        CHECK(result.response.epoch == w::Uuid{} && result.response.card_handle == 0U);
+        CHECK(failed.closed() && failed.request_count() == 6U &&
+              failed.request_id(5U) == 6U &&
+              failed.request_opcode(5U) == w::kOpcodeCardReset);
+        CHECK(reset_faults[index] != Fault::card_reset_remote_error ||
+              result.remote_error_code == static_cast<std::uint32_t>(Error::CARD_REMOVED));
+    }
+
+    const Fault transmit_faults[] = {Fault::card_transmit_remote_error,
+                                     Fault::card_transmit_bad_key,
+                                     Fault::card_transmit_eof,
+                                     Fault::truncated_card_transmit,
+                                     Fault::timeout_card_transmit};
+    const Error transmit_errors[] = {Error::CARD_REMOVED, Error::PROTOCOL_ERROR,
+                                     Error::DISCONNECTED, Error::PROTOCOL_ERROR,
+                                     Error::TIMEOUT};
+    for (std::size_t index = 0U;
+         index < sizeof(transmit_faults) / sizeof(transmit_faults[0]); ++index) {
+        FakeTransport failed(transmit_faults[index], false,
+                             w::kFeatureCardService, true);
+        const auto card = w::begin_card(
+            failed, options, dtv::userland::Timeout{1000U});
+        CHECK(card);
+        auto failed_session = card.session;
+        const auto result = w::card_transmit(
+            failed, failed_session, w::CardProtocol::t1,
+            ByteView{command, sizeof(command)}, dtv::userland::Timeout{1000U});
+        CHECK(!result && result.error == transmit_errors[index]);
+        CHECK(result.response.response.length == 0U);
+        CHECK(result.response.key.epoch == w::Uuid{});
+        CHECK(failed_session.card_handle == card.session.card_handle &&
+              failed_session.bound_generation == card.session.bound_generation &&
+              failed_session.protocol.present == card.session.protocol.present &&
+              failed_session.protocol.value == card.session.protocol.value &&
+              failed_session.next_request_id == 7U);
+        CHECK(failed.closed() && failed.request_count() == 6U &&
+              failed.request_id(5U) == 6U &&
+              failed.request_opcode(5U) == w::kOpcodeCardTransmit);
+        CHECK(transmit_faults[index] != Fault::card_transmit_remote_error ||
+              result.remote_error_code == static_cast<std::uint32_t>(Error::CARD_REMOVED));
+    }
+
+    FakeTransport invalid_protocol(Fault::none, false, w::kFeatureCardService, true);
+    const auto invalid_open = w::begin_card(
+        invalid_protocol, options, dtv::userland::Timeout{1000U});
+    CHECK(invalid_open);
+    auto invalid_session = invalid_open.session;
+    const auto protocol_result = w::card_transmit(
+        invalid_protocol, invalid_session, static_cast<w::CardProtocol>(2U),
+        ByteView{command, sizeof(command)}, dtv::userland::Timeout{1000U});
+    CHECK(!protocol_result && protocol_result.error == Error::INVALID_ARGUMENT);
+    CHECK(invalid_protocol.closed() && invalid_protocol.request_count() == 5U);
+
+    FakeTransport missing_protocol(Fault::none, false, w::kFeatureCardService, true);
+    const auto protocol_open = w::begin_card(
+        missing_protocol, options, dtv::userland::Timeout{1000U});
+    CHECK(protocol_open);
+    auto no_protocol_session = protocol_open.session;
+    no_protocol_session.protocol.present = false;
+    const auto not_ready = w::card_transmit(
+        missing_protocol, no_protocol_session, w::CardProtocol::t1,
+        ByteView{command, sizeof(command)}, dtv::userland::Timeout{1000U});
+    CHECK(!not_ready && not_ready.error == Error::NOT_READY);
+    CHECK(missing_protocol.closed() && missing_protocol.request_count() == 5U);
+
+    FakeTransport empty_command(Fault::none, false, w::kFeatureCardService, true);
+    const auto empty_open = w::begin_card(
+        empty_command, options, dtv::userland::Timeout{1000U});
+    CHECK(empty_open);
+    auto empty_session = empty_open.session;
+    const auto empty_result = w::card_transmit(
+        empty_command, empty_session, w::CardProtocol::t1, ByteView{},
+        dtv::userland::Timeout{1000U});
+    CHECK(!empty_result && empty_result.error == Error::INVALID_ARGUMENT);
+    CHECK(empty_command.closed() && empty_command.request_count() == 5U);
+
+    FakeTransport invalid_length(Fault::none, false, w::kFeatureCardService, true);
+    const auto length_open = w::begin_card(
+        invalid_length, options, dtv::userland::Timeout{1000U});
+    CHECK(length_open);
+    auto length_session = length_open.session;
+    std::array<std::uint8_t, w::kMaxApduBytes + 1U> oversized{};
+    const auto length_result = w::card_transmit(
+        invalid_length, length_session, w::CardProtocol::t1,
+        ByteView{oversized.data(), oversized.size()}, dtv::userland::Timeout{1000U});
+    CHECK(!length_result && length_result.error == Error::INVALID_ARGUMENT);
+    CHECK(invalid_length.closed() && invalid_length.request_count() == 5U);
+}
+
+void test_card_session_failures_close_without_retry()
+{
+    const Fault faults[] = {Fault::card_status_remote_error, Fault::card_connect_remote_error,
+                            Fault::card_eof,
+                            Fault::timeout_card, Fault::bad_card_status_epoch,
+                            Fault::bad_card_connect_epoch, Fault::bad_card_connect_generation,
+                            Fault::truncated_card_connect};
+    const Error errors[] = {Error::UNSUPPORTED, Error::NO_CARD, Error::DISCONNECTED,
+                            Error::TIMEOUT, Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR,
+                            Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR};
+    for (std::size_t index = 0U; index < sizeof(faults) / sizeof(faults[0]); ++index) {
+        FakeTransport transport(faults[index], false, w::kFeatureCardService, true);
+        w::CardClientOptions options{};
+        options.reader_id = 23U;
+        const auto result = w::begin_card(
+            transport, options, dtv::userland::Timeout{1000U});
+        CHECK(!result && result.error == errors[index]);
+        CHECK(transport.closed());
+        CHECK(result.session.epoch == w::Uuid{} && result.session.card_handle == 0U);
+        CHECK(result.reader_status.key.epoch == w::Uuid{} &&
+              result.connection.card_handle == 0U);
+        CHECK(transport.request_count() ==
+              ((faults[index] == Fault::bad_card_status_epoch ||
+                faults[index] == Fault::card_status_remote_error) ? 4U : 5U));
+        CHECK(faults[index] != Fault::card_status_remote_error ||
+              result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+        CHECK(faults[index] != Fault::card_connect_remote_error ||
+              result.remote_error_code == static_cast<std::uint32_t>(Error::NO_CARD));
+    }
+
+    FakeTransport wrong_identity(Fault::none, false, w::kFeatureCardService, true);
+    w::CardClientOptions options{};
+    options.reader_id = 23U;
+    options.expected_product = ByteView{reinterpret_cast<const std::uint8_t*>("other"), 5U};
+    const auto not_found = w::begin_card(
+        wrong_identity, options, dtv::userland::Timeout{1000U});
+    CHECK(!not_found && not_found.error == Error::NOT_FOUND);
+    CHECK(wrong_identity.closed() && wrong_identity.request_count() == 3U);
+
+    FakeTransport stale(Fault::card_disconnect_remote_error, false,
+                        w::kFeatureCardService, true);
+    options.expected_product = ByteView{};
+    const auto opened = w::begin_card(stale, options, dtv::userland::Timeout{1000U});
+    CHECK(opened);
+    auto session = opened.session;
+    const auto rejected = w::card_disconnect(
+        stale, session, w::Disposition::leave, dtv::userland::Timeout{1000U});
+    CHECK(!rejected && rejected.error == Error::PROTOCOL_ERROR);
+    CHECK(rejected.remote_error_code == w::kWireErrorStaleHandle);
+    CHECK(session.card_handle == opened.session.card_handle && stale.closed());
+    CHECK(stale.request_count() == 6U);
+
+    const Fault disconnect_faults[] = {Fault::bad_disconnect_key, Fault::bad_disconnect_handle,
+                                       Fault::card_not_consumed,
+                                       Fault::card_disconnect_unquiesced_without_error,
+                                       Fault::card_disconnect_eof};
+    const Error disconnect_errors[] = {Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR,
+                                       Error::PROTOCOL_ERROR, Error::PROTOCOL_ERROR,
+                                       Error::DISCONNECTED};
+    for (std::size_t index = 0U;
+         index < sizeof(disconnect_faults) / sizeof(disconnect_faults[0]); ++index) {
+        FakeTransport transport(disconnect_faults[index], false,
+                                w::kFeatureCardService, true);
+        const auto card = w::begin_card(
+            transport, options, dtv::userland::Timeout{1000U});
+        CHECK(card);
+        auto card_session = card.session;
+        const auto result = w::card_disconnect(
+            transport, card_session, w::Disposition::leave,
+            dtv::userland::Timeout{1000U});
+        CHECK(!result && result.error == disconnect_errors[index]);
+        if (disconnect_faults[index] == Fault::card_disconnect_unquiesced_without_error) {
+            CHECK(result.response.consumed && !result.response.quiesced &&
+                  !result.response.error.present);
+            CHECK(card_session.card_handle == 0U && card_session.bound_generation == 0U &&
+                  !card_session.protocol.present);
+        } else {
+            CHECK(card_session.card_handle == card.session.card_handle);
+        }
+        CHECK(transport.closed() && transport.request_count() == 6U);
+    }
+
+    FakeTransport unquiesced(Fault::card_disconnect_unquiesced_error, false,
+                             w::kFeatureCardService, true);
+    const auto card = w::begin_card(
+        unquiesced, options, dtv::userland::Timeout{1000U});
+    CHECK(card);
+    auto card_session = card.session;
+    const auto cleanup_failed = w::card_disconnect(
+        unquiesced, card_session, w::Disposition::leave,
+        dtv::userland::Timeout{1000U});
+    CHECK(!cleanup_failed && cleanup_failed.error == Error::USB_IO);
+    CHECK(cleanup_failed.remote_error_code == static_cast<std::uint32_t>(Error::USB_IO));
+    CHECK(cleanup_failed.response.consumed && !cleanup_failed.response.quiesced &&
+          cleanup_failed.response.error.present &&
+          cleanup_failed.response.error.value.code == cleanup_failed.remote_error_code);
+    CHECK(card_session.card_handle == 0U && card_session.bound_generation == 0U &&
+          !card_session.protocol.present);
+    CHECK(unquiesced.closed() && unquiesced.request_count() == 6U &&
+          unquiesced.request_id(5U) == 6U);
 }
 
 void test_begin_recording_validator_and_two_budgets()
@@ -834,6 +1524,26 @@ struct TimedEofStackProbe final {
     Error result = Error::INTERNAL;
 };
 
+struct LnbStackProbe final {
+    w::TimedClientTransport* transport;
+    Error result = Error::INTERNAL;
+    bool enabled = false;
+};
+
+struct CardOpenStackProbe final {
+    w::TimedClientTransport* transport;
+    Error result = Error::INTERNAL;
+    bool opened = false;
+};
+
+struct CardTransmitStackProbe final {
+    w::TimedClientTransport* transport;
+    w::CardClientSession session;
+    std::array<std::uint8_t, w::kMaxApduBytes> command{};
+    Error result = Error::INTERNAL;
+    std::size_t response_length = 0U;
+};
+
 void* fetch_on_thread(void* value) noexcept
 {
     auto& probe = *static_cast<StackProbe*>(value);
@@ -893,6 +1603,40 @@ void* timed_eof_on_thread(void* value) noexcept
     return nullptr;
 }
 
+void* lnb_power_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<LnbStackProbe*>(value);
+    const auto result = w::set_lnb_power(*probe.transport, true,
+                                         dtv::userland::Timeout{1000U});
+    probe.result = result.error;
+    probe.enabled = result && result.response.enabled;
+    return nullptr;
+}
+
+void* card_open_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<CardOpenStackProbe*>(value);
+    w::CardClientOptions options{};
+    options.reader_id = 23U;
+    const auto result = w::begin_card(*probe.transport, options,
+                                      dtv::userland::Timeout{1000U});
+    probe.result = result.error;
+    probe.opened = result && result.session.card_handle != 0U;
+    return nullptr;
+}
+
+void* card_transmit_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<CardTransmitStackProbe*>(value);
+    const auto result = w::card_transmit(
+        *probe.transport, probe.session, w::CardProtocol::t1,
+        ByteView{probe.command.data(), probe.command.size()},
+        dtv::userland::Timeout{1000U});
+    probe.result = result.error;
+    probe.response_length = result.response.response.length;
+    return nullptr;
+}
+
 bool run_timed_eof_stack_probe(TimedEofStackProbe& probe, std::size_t stack_size)
 {
     pthread_attr_t attributes;
@@ -902,6 +1646,52 @@ bool run_timed_eof_stack_probe(TimedEofStackProbe& probe, std::size_t stack_size
     const int create_result = set_result == 0
                                   ? pthread_create(&thread, &attributes, timed_eof_on_thread,
                                                    &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
+bool run_lnb_stack_probe(LnbStackProbe& probe, std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, lnb_power_on_thread,
+                                                   &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
+bool run_card_open_stack_probe(CardOpenStackProbe& probe, std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, card_open_on_thread,
+                                                   &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
+bool run_card_transmit_stack_probe(CardTransmitStackProbe& probe,
+                                   std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes,
+                                                   card_transmit_on_thread, &probe)
                                   : set_result;
     pthread_attr_destroy(&attributes);
     if (create_result != 0) return false;
@@ -954,6 +1744,50 @@ void test_small_stack_probes()
         CHECK(eof_probe.result == Error::DISCONNECTED && timed_eof->closed());
     }
 
+    std::unique_ptr<FakeTransport> lnb(new (std::nothrow) FakeTransport{});
+    CHECK(lnb != nullptr);
+    if (lnb) {
+        LnbStackProbe lnb_probe{lnb.get()};
+        CHECK(run_lnb_stack_probe(lnb_probe, 512U * 1024U));
+        CHECK(lnb_probe.result == Error::OK && lnb_probe.enabled);
+        CHECK(!lnb->closed() && lnb->request_count() == 4U);
+    }
+
+    std::unique_ptr<FakeTransport> card(
+        new (std::nothrow) FakeTransport{Fault::none, false, w::kFeatureCardService, true});
+    CHECK(card != nullptr);
+    if (card) {
+        CardOpenStackProbe card_probe{card.get()};
+        CHECK(run_card_open_stack_probe(card_probe, 512U * 1024U));
+        CHECK(card_probe.result == Error::OK && card_probe.opened);
+        CHECK(!card->closed() && card->request_count() == 5U);
+    }
+
+    std::unique_ptr<FakeTransport> card_transmit_transport(
+        new (std::nothrow) FakeTransport{Fault::card_transmit_maximum, false,
+                                         w::kFeatureCardService, true});
+    CHECK(card_transmit_transport != nullptr);
+    if (card_transmit_transport) {
+        w::CardClientOptions options{};
+        options.reader_id = 23U;
+        const auto opened = w::begin_card(
+            *card_transmit_transport, options, dtv::userland::Timeout{1000U});
+        CHECK(opened);
+        if (opened) {
+            std::unique_ptr<CardTransmitStackProbe> transmit_probe(
+                new (std::nothrow) CardTransmitStackProbe{card_transmit_transport.get(),
+                                                          opened.session});
+            CHECK(transmit_probe != nullptr);
+            if (transmit_probe) {
+                CHECK(run_card_transmit_stack_probe(*transmit_probe, 512U * 1024U));
+                CHECK(transmit_probe->result == Error::OK &&
+                      transmit_probe->response_length == w::kMaxApduBytes);
+                CHECK(!card_transmit_transport->closed() &&
+                      card_transmit_transport->request_count() == 6U);
+            }
+        }
+    }
+
     std::unique_ptr<FakeTransport> recording(new (std::nothrow) FakeTransport{});
     CHECK(recording != nullptr);
     if (recording) {
@@ -976,6 +1810,11 @@ int main()
     test_invalid_responses_close_without_publishing_snapshot();
     test_remote_error_code_is_preserved();
     test_timed_status_uses_one_deadline_and_preserves_old_transport();
+    test_timed_status_required_features();
+    test_lnb_power_client_success_and_failures();
+    test_card_session_status_and_disconnect();
+    test_card_reset_and_transmit();
+    test_card_session_failures_close_without_retry();
     test_begin_recording_validator_and_two_budgets();
     test_recording_pid_buffers_accept_limits_and_reject_invalid_values();
     test_release_remote_error_is_preserved();

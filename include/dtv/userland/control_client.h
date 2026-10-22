@@ -50,6 +50,115 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept;
 // success the caller retains the open transport. No request is retried.
 StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout) noexcept;
 
+// Requests the required HELLO feature mask using the same status sequence and
+// deadline. Missing required features fail with UNSUPPORTED and close the
+// transport; the zero-mask overload above keeps its original behavior.
+StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout,
+                               std::uint64_t required_features) noexcept;
+
+struct LnbPowerResult final {
+    LnbPowerResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Fetches status and sends one independent LNB power request on that
+// connection. The response reports the requested control state, not measured
+// voltage; failures close the transport and are never retried.
+LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
+                             Timeout timeout) noexcept;
+
+struct CardClientOptions final {
+    std::uint16_t reader_id = 0U;
+    Share share = Share::shared;
+    // UDTV 1.0 currently accepts only the T=1 bit.
+    std::uint8_t preferred_protocols = 1U;
+    // Optional constraints checked against the fetched status snapshot. Empty
+    // views keep the original behavior; positive-size views must stay valid
+    // for the call.
+    ByteView expected_product{};
+    ByteView expected_instance{};
+};
+
+struct CardClientSession final {
+    Uuid epoch{};
+    std::uint16_t reader_id = 0U;
+    std::uint64_t card_handle = 0U;
+    std::uint64_t bound_generation = 0U;
+    Optional<CardProtocol> protocol;
+    std::uint32_t next_request_id = 6U;
+};
+
+struct CardOpenResult final {
+    CardClientSession session;
+    CardStatusResponse reader_status;
+    CardSessionResult connection;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Requires CARD_SERVICE, verifies the reader in the same connection's status
+// snapshot, then sends CARD_STATUS and CARD_CONNECT. The connection stays open
+// on success; failures close it and are never retried.
+CardOpenResult begin_card(TimedClientTransport& transport,
+                          const CardClientOptions& options,
+                          Timeout timeout) noexcept;
+
+struct CardStatusResult final {
+    CardStatusResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+CardStatusResult card_status(TimedClientTransport& transport,
+                             CardClientSession& session,
+                             Timeout timeout) noexcept;
+
+struct CardResetResult final {
+    CardSessionResult response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Sends one CARD_RESET for this handle. A validated success updates the
+// session generation and protocol; failures close the transport and are not
+// retried.
+CardResetResult card_reset(TimedClientTransport& transport,
+                           CardClientSession& session,
+                           Timeout timeout) noexcept;
+
+struct CardTransmitResult final {
+    CardTransmitResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Sends one APDU for the session's usable handle and selected protocol. The
+// APDU is never retried; failures close the transport and publish no response.
+CardTransmitResult card_transmit(TimedClientTransport& transport,
+                                 CardClientSession& session,
+                                 CardProtocol protocol, ByteView command,
+                                 Timeout timeout) noexcept;
+
+struct CardDisconnectResult final {
+    // A matching consumed completion clears the session even when cleanup fails;
+    // response and remote_error_code preserve the daemon's physical outcome.
+    CardDisconnectResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+CardDisconnectResult card_disconnect(TimedClientTransport& transport,
+                                     CardClientSession& session,
+                                     Disposition disposition,
+                                     Timeout timeout) noexcept;
+
 struct RecordingOptions final {
     std::uint16_t receiver_id = 0U;
     TuneRequest tune{};

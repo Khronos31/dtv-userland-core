@@ -487,6 +487,171 @@ void test_pid_filter_requires_negotiation()
           selected.request->tune.pids.present);
 }
 
+void test_card_lnb_typed_ingress()
+{
+    {
+        Harness h;
+        h.server.features |= w::kFeatureCardService;
+        CHECK(h.hello(1U));
+        w::CardStatusRequest card;
+        CHECK(make_request(*h.frame, w::kOpcodeCardStatus, 2U, card,
+                           &w::encode_card_status_request));
+        const w::Inbound inbound = h.accept();
+        CHECK(h.error_reply(inbound, static_cast<std::uint32_t>(Error::UNSUPPORTED),
+                            w::kOpcodeCardStatus, 2U));
+    }
+
+    Harness h;
+    h.server.features |= w::kFeatureCardService;
+    CHECK(h.hello(1U, w::kFeatureCardService));
+    std::uint32_t request_id = 2U;
+    const auto dispatch = [&h, &request_id](std::uint16_t opcode, w::ControlRequestKind kind,
+                                           const auto& value, auto encode) {
+        CHECK(make_request(*h.frame, opcode, request_id, value, encode));
+        const w::Inbound inbound = h.accept();
+        CHECK(inbound.action == w::InboundAction::dispatch);
+        CHECK(h.connection->outstanding());
+        CHECK(h.request->kind == kind && h.request->opcode == opcode &&
+              h.request->request_id == request_id);
+        ++request_id;
+        h.connection->complete();
+    };
+
+    w::CardStatusRequest status;
+    status.key.epoch = h.server.epoch;
+    status.key.reader_id = 7U;
+    dispatch(w::kOpcodeCardStatus, w::ControlRequestKind::card_status, status,
+             &w::encode_card_status_request);
+    CHECK(h.request->card_status.key.reader_id == 7U);
+
+    w::CardConnectRequest connect;
+    connect.key.epoch = h.server.epoch;
+    connect.key.reader_id = 7U;
+    connect.share = w::Share::exclusive;
+    connect.preferred_protocols = 1U;
+    dispatch(w::kOpcodeCardConnect, w::ControlRequestKind::card_connect, connect,
+             &w::encode_card_connect_request);
+    CHECK(h.request->card_connect.share == w::Share::exclusive &&
+          h.request->card_connect.preferred_protocols == 1U);
+
+    w::CardHandleKey handle;
+    handle.epoch = h.server.epoch;
+    handle.reader_id = 7U;
+    handle.bound_generation = 11U;
+    handle.card_handle = 13U;
+
+    w::CardReconnectRequest reconnect;
+    reconnect.key = handle;
+    reconnect.share = w::Share::shared;
+    reconnect.disposition = w::Disposition::reset;
+    reconnect.preferred_protocols = 1U;
+    dispatch(w::kOpcodeCardReconnect, w::ControlRequestKind::card_reconnect, reconnect,
+             &w::encode_card_reconnect_request);
+    CHECK(h.request->card_reconnect.key.card_handle == 13U &&
+          h.request->card_reconnect.disposition == w::Disposition::reset);
+
+    w::CardDisconnectRequest disconnect;
+    disconnect.key = handle;
+    disconnect.disposition = w::Disposition::reset;
+    dispatch(w::kOpcodeCardDisconnect, w::ControlRequestKind::card_disconnect, disconnect,
+             &w::encode_card_disconnect_request);
+    CHECK(h.request->card_disconnect.key.bound_generation == 11U &&
+          h.request->card_disconnect.disposition == w::Disposition::reset);
+
+    w::CardResetRequest reset;
+    reset.key = handle;
+    dispatch(w::kOpcodeCardReset, w::ControlRequestKind::card_reset, reset,
+             &w::encode_card_reset_request);
+    CHECK(h.request->card_reset.key.card_handle == 13U);
+
+    w::CardTransmitRequest transmit;
+    transmit.key = handle;
+    transmit.protocol = w::CardProtocol::t1;
+    transmit.command.length = 5U;
+    transmit.command.bytes[0] = 0x00U;
+    transmit.command.bytes[1] = 0xa4U;
+    transmit.command.bytes[2] = 0x04U;
+    transmit.command.bytes[3] = 0x00U;
+    transmit.command.bytes[4] = 0x00U;
+    dispatch(w::kOpcodeCardTransmit, w::ControlRequestKind::card_transmit, transmit,
+             &w::encode_card_transmit_request);
+    CHECK(h.request->card_transmit.command.length == 5U &&
+          h.request->card_transmit.command.bytes[1] == 0xa4U);
+
+    w::BeginTransactionRequest begin;
+    begin.key = handle;
+    dispatch(w::kOpcodeBeginTransaction, w::ControlRequestKind::begin_transaction, begin,
+             &w::encode_begin_transaction_request);
+    CHECK(h.request->begin_transaction.key.card_handle == 13U);
+
+    w::EndTransactionRequest end;
+    end.key = handle;
+    end.disposition = w::Disposition::leave;
+    dispatch(w::kOpcodeEndTransaction, w::ControlRequestKind::end_transaction, end,
+             &w::encode_end_transaction_request);
+    CHECK(h.request->end_transaction.key.bound_generation == 11U);
+
+    w::CardHandleStatusRequest handle_status;
+    handle_status.key = handle;
+    dispatch(w::kOpcodeCardHandleStatus, w::ControlRequestKind::card_handle_status,
+             handle_status, &w::encode_card_handle_status_request);
+    CHECK(h.request->card_handle_status.key.card_handle == 13U);
+
+    w::LnbPowerRequest lnb;
+    lnb.epoch = h.server.epoch;
+    lnb.enabled = true;
+    dispatch(w::kOpcodeLnbPower, w::ControlRequestKind::lnb_power, lnb,
+             &w::encode_lnb_power_request);
+    CHECK(h.request->lnb_power.enabled);
+
+    w::CardStatusRequest stale = status;
+    stale.key.epoch[0] ^= 0x01U;
+    CHECK(make_request(*h.frame, w::kOpcodeCardStatus, request_id, stale,
+                       &w::encode_card_status_request));
+    w::Inbound inbound = h.accept();
+    CHECK(h.error_reply(inbound, w::kWireErrorStaleHandle, w::kOpcodeCardStatus, request_id));
+    h.connection->complete();
+    ++request_id;
+
+    lnb.epoch[0] ^= 0x01U;
+    CHECK(make_request(*h.frame, w::kOpcodeLnbPower, request_id, lnb,
+                       &w::encode_lnb_power_request));
+    inbound = h.accept();
+    CHECK(h.error_reply(inbound, w::kWireErrorStaleHandle, w::kOpcodeLnbPower, request_id));
+    h.connection->complete();
+    ++request_id;
+
+    const std::array<std::uint8_t, 1U> short_payload{0U};
+    CHECK(make_raw_request(*h.frame, w::kOpcodeCardStatus, request_id,
+                           ByteView{short_payload.data(), short_payload.size()}));
+    CHECK(h.accept().action == w::InboundAction::close);
+
+    Harness trailing;
+    trailing.server.features |= w::kFeatureCardService;
+    CHECK(trailing.hello(1U, w::kFeatureCardService));
+    std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+    status.key.epoch = trailing.server.epoch;
+    const auto encoded = w::encode_card_status_request(
+        status, MutableByteView{payload.data(), payload.size()});
+    CHECK(encoded);
+    if (encoded) {
+        payload[encoded.value()] = 0U;
+        CHECK(make_raw_request(*trailing.frame, w::kOpcodeCardStatus, 2U,
+                               ByteView{payload.data(), encoded.value() + 1U}));
+        CHECK(trailing.accept().action == w::InboundAction::close);
+    }
+
+    Harness independent_lnb;
+    CHECK(independent_lnb.hello(1U));
+    lnb.epoch = independent_lnb.server.epoch;
+    CHECK(make_request(*independent_lnb.frame, w::kOpcodeLnbPower, 2U, lnb,
+                       &w::encode_lnb_power_request));
+    inbound = independent_lnb.accept();
+    CHECK(inbound.action == w::InboundAction::dispatch &&
+          independent_lnb.request->kind == w::ControlRequestKind::lnb_power &&
+          independent_lnb.request->lnb_power.enabled);
+}
+
 // Synthetic context with sparse public IDs (including 0) and a known-empty
 // reader set: generic dispatcher coverage, not a product topology.
 void sparse_list(w::ListResponse& list, const w::Uuid& epoch)
@@ -613,6 +778,7 @@ int main()
     test_request_rules();
     test_epoch_binding_and_dispatch();
     test_pid_filter_requires_negotiation();
+    test_card_lnb_typed_ingress();
     test_status_shell();
     std::printf("control_connection_tests: %d checks, %d failures\n", g_checks, g_failures);
     return g_failures == 0 ? 0 : 1;
