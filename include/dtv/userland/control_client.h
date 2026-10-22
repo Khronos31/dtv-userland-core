@@ -117,6 +117,34 @@ CardStatusResult card_status(TimedClientTransport& transport,
                              CardClientSession& session,
                              Timeout timeout) noexcept;
 
+struct CardResetResult final {
+    CardSessionResult response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Sends one CARD_RESET for this handle. A validated success updates the
+// session generation and protocol; failures close the transport and are not
+// retried.
+CardResetResult card_reset(TimedClientTransport& transport,
+                           CardClientSession& session,
+                           Timeout timeout) noexcept;
+
+struct CardTransmitResult final {
+    CardTransmitResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Sends one APDU for the session's usable handle and selected protocol. The
+// APDU is never retried; failures close the transport and publish no response.
+CardTransmitResult card_transmit(TimedClientTransport& transport,
+                                 CardClientSession& session,
+                                 CardProtocol protocol, ByteView command,
+                                 Timeout timeout) noexcept;
+
 struct CardDisconnectResult final {
     // A matching consumed completion clears the session even when cleanup fails;
     // response and remote_error_code preserve the daemon's physical outcome.

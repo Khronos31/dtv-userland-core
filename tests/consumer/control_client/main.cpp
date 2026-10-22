@@ -77,10 +77,27 @@ int main()
     card_session.reader_id = 1U;
     card_session.card_handle = 1U;
     card_session.bound_generation = 1U;
+    card_session.protocol.present = true;
+    card_session.protocol.value = dtv::userland::wire::CardProtocol::t1;
     timed.closed = false;
     const auto card_status = dtv::userland::wire::card_status(
         timed, card_session, dtv::userland::Timeout{100U});
     if (card_status || card_status.error != dtv::userland::Error::DISCONNECTED || !timed.closed)
+        return 1;
+
+    timed.closed = false;
+    const auto card_reset = dtv::userland::wire::card_reset(
+        timed, card_session, dtv::userland::Timeout{100U});
+    if (card_reset || card_reset.error != dtv::userland::Error::DISCONNECTED || !timed.closed)
+        return 1;
+
+    timed.closed = false;
+    const std::uint8_t apdu[] = {0x00U};
+    const auto card_transmit = dtv::userland::wire::card_transmit(
+        timed, card_session, dtv::userland::wire::CardProtocol::t1,
+        dtv::userland::ByteView{apdu, sizeof(apdu)}, dtv::userland::Timeout{100U});
+    if (card_transmit || card_transmit.error != dtv::userland::Error::DISCONNECTED ||
+        !timed.closed)
         return 1;
 
     timed.closed = false;
