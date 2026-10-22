@@ -19,6 +19,7 @@ option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF
 option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority service" OFF)
 option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_WORKER_CLOSURE "Build the host worker closure measurement" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -167,6 +168,31 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         target_compile_options(dtv_userland_host_tuner PRIVATE /EHs-c- /GR- /W4)
     else()
         target_compile_options(dtv_userland_host_tuner PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_WORKER_CLOSURE)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_CARD)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_WORKER_CLOSURE requires DTV_USERLAND_BUILD_HOST_TUNER and DTV_USERLAND_BUILD_CARD")
+    endif()
+    find_package(Threads REQUIRED)
+    add_library(dtv_userland_host_worker_closure STATIC
+        adapters/host_daemon/src/card_service.cpp
+        adapters/host_daemon/src/control_workers.cpp)
+    target_compile_features(dtv_userland_host_worker_closure PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_worker_closure
+        PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        PRIVATE ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include)
+    target_link_libraries(dtv_userland_host_worker_closure PUBLIC
+        Threads::Threads dtv::host_tuner dtv::card)
+    target_compile_definitions(dtv_userland_host_worker_closure PRIVATE
+        PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_worker_closure PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_worker_closure PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
@@ -504,6 +530,13 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(host_tuner_tests tests/host_tuner_tests.cpp)
         target_link_libraries(host_tuner_tests PRIVATE dtv::host_tuner)
         add_test(NAME host_tuner_tests COMMAND host_tuner_tests)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_WORKER_CLOSURE)
+        add_executable(host_worker_closure_tests tests/host_worker_closure_tests.cpp)
+        target_link_libraries(host_worker_closure_tests PRIVATE dtv_userland_host_worker_closure)
+        target_compile_definitions(host_worker_closure_tests PRIVATE
+            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+        add_test(NAME host_worker_closure_tests COMMAND host_worker_closure_tests)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)
