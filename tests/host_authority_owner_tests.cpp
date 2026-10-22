@@ -9,10 +9,12 @@ namespace px4::userland {
 
 class HostAuthorityOwnerTestAccess final {
 public:
-    static dtv::userland::Error execute(TunerService& service,
-                                        const dtv::userland::detail::AuthorityJob& job) noexcept
+    static dtv::userland::detail::AuthorityCompletion execute(
+        TunerService& service,
+        const dtv::userland::detail::AuthorityJob& job) noexcept
     {
-        return dtv::userland::detail::ControlAuthority::execute_job(service.engine_, job);
+        return dtv::userland::detail::ControlAuthority::execute_job_value(
+            service.engine_, job);
     }
 };
 
@@ -58,10 +60,12 @@ public:
     }
     Result<void> close_receiver(std::uint8_t) noexcept override
     {
+        ++closes;
         return Result<void>::success();
     }
 
     unsigned opens = 0U;
+    unsigned closes = 0U;
 };
 
 class Nonce final : public TunerNonceSource {
@@ -80,7 +84,22 @@ public:
 
 class Executor final : public ControlAuthorityExecutor {
 public:
-    bool submit(const AuthorityJob&) noexcept override { return true; }
+    bool submit(const AuthorityJob& value) noexcept override
+    {
+        if (reject) return false;
+        if (has_job) return false;
+        job = value;
+        has_job = true;
+        return true;
+    }
+    AuthorityJob take() noexcept
+    {
+        has_job = false;
+        return job;
+    }
+    AuthorityJob job{};
+    bool has_job = false;
+    bool reject = false;
 };
 
 template <std::size_t N>
@@ -159,6 +178,7 @@ bool hello(ControlAuthority& authority, ControlServiceSession& session,
 }
 
 std::uint64_t authority_acquire(ControlAuthority& authority,
+                                TunerService& service,
                                 ControlServiceSession& session,
                                 Executor& executor, std::uint32_t id,
                                 std::uint16_t receiver)
@@ -169,9 +189,12 @@ std::uint64_t authority_acquire(ControlAuthority& authority,
     if (!size) return 0U;
     w::Context context;
     w::Snapshot snapshot;
-    const auto reply = authority.accept(session,
+    auto reply = authority.accept(session,
         request(w::kOpcodeAcquire, id, {payload.data(), size.value()}), context,
         snapshot, 0U, executor);
+    if (!reply.queued || !executor.has_job) return 0U;
+    const AuthorityJob job = executor.take();
+    reply = authority.complete(HostAuthorityOwnerTestAccess::execute(service, job));
     AuthorityJob rejected;
     if (reply.action != w::InboundAction::respond ||
         authority.response_sent(session, true, executor, &rejected) != Error::OK ||
@@ -180,6 +203,36 @@ std::uint64_t authority_acquire(ControlAuthority& authority,
     const auto response = w::decode_acquire_response(
         {reply.frame.data + w::kHeaderSize, w::kAcquireResponseSize});
     return response ? response.value().lease_id : 0U;
+}
+
+bool cleanup_session(ControlAuthority& authority, TunerService& service,
+                     ControlServiceSession& session, Executor& executor)
+{
+    AuthorityJob cleanup = authority.close(session);
+    bool tracked = false;
+    if (cleanup.kind != AuthorityJobKind::disconnect) return true;
+    if (cleanup.deferred) {
+        if (!executor.has_job) return false;
+        const AuthorityCompletion pending = HostAuthorityOwnerTestAccess::execute(
+            service, executor.take());
+        const AuthorityReply late = authority.complete(pending);
+        if (!late.cleanup_required || late.cleanup.kind != AuthorityJobKind::disconnect ||
+            late.cleanup.deferred)
+            return false;
+        cleanup = late.cleanup;
+        tracked = true;
+    }
+    if (!executor.submit(cleanup)) {
+        if (!tracked || authority.cleanup_submitted(cleanup, false) != Error::OK)
+            return false;
+        if (!executor.submit(cleanup)) return false;
+    }
+    if (tracked && authority.cleanup_submitted(cleanup, true) != Error::OK)
+        return false;
+    const AuthorityCompletion completion = HostAuthorityOwnerTestAccess::execute(
+        service, executor.take());
+    return completion.error == Error::OK &&
+           authority.complete(completion).action == w::InboundAction::close;
 }
 
 int fail(const char* message)
@@ -250,26 +303,24 @@ int main()
     HostAuthorityOwner owner(service, server, list);
     auto& authority = owner.authority();
     ControlServiceSession session(authority);
+    Executor executor;
     struct SessionCleanup final {
         TunerService& service;
         ControlAuthority& authority;
         ControlServiceSession& session;
+        Executor& executor;
         ~SessionCleanup()
         {
-            if (session.connected()) {
-                const AuthorityJob cleanup = authority.close(session);
-                if (cleanup.kind == AuthorityJobKind::disconnect)
-                    (void)HostAuthorityOwnerTestAccess::execute(service, cleanup);
-            }
+            if (session.connected())
+                (void)cleanup_session(authority, service, session, executor);
         }
-    } session_cleanup{service, authority, session};
-    Executor executor;
+    } session_cleanup{service, authority, session, executor};
     if (authority.open(session) != Error::OK ||
         session.client_id() != kAuthorityClientIdFirst ||
         !hello(authority, session, executor))
         return fail("high-range Authority session did not open on the host owner");
     const std::uint64_t authority_lease = authority_acquire(
-        authority, session, executor, 2U, 2U);
+        authority, service, session, executor, 2U, 2U);
     if (authority_lease == 0U) return fail("Authority ACQUIRE failed");
 
     auto status = service.engine_status();
@@ -283,22 +334,66 @@ int main()
     status = service.engine_status();
     if (!status || status.value().states[2U] != ReceiverState::leased ||
         status.value().states[3U] != ReceiverState::free) {
-        const AuthorityJob cleanup = authority.close(session);
-        if (cleanup.kind == AuthorityJobKind::disconnect)
-            HostAuthorityOwnerTestAccess::execute(service, cleanup);
+        (void)cleanup_session(authority, service, session, executor);
         return fail("legacy DISCONNECT disturbed the Authority receiver lease");
     }
 
     const auto second_legacy = service.acquire(1U, 3U);
     if (!second_legacy) return fail("legacy low ID reacquire failed");
-    const AuthorityJob authority_cleanup = authority.close(session);
-    if (authority_cleanup.kind != AuthorityJobKind::disconnect ||
-        HostAuthorityOwnerTestAccess::execute(service, authority_cleanup) != Error::OK)
+    if (!cleanup_session(authority, service, session, executor))
         return fail("Authority DISCONNECT cleanup failed");
     status = service.engine_status();
     if (!status || status.value().states[2U] != ReceiverState::free ||
         status.value().states[3U] != ReceiverState::leased)
         return fail("Authority DISCONNECT disturbed the legacy receiver lease");
+
+    ControlServiceSession late_session(authority);
+    if (authority.open(late_session) != Error::OK ||
+        !hello(authority, late_session, executor))
+        return fail("late-completion Authority session did not open");
+    std::array<std::uint8_t, w::kAcquireRequestSize> late_payload{};
+    const auto late_size = w::encode_acquire_request(
+        {authority.server().epoch, 2U}, {late_payload.data(), late_payload.size()});
+    if (!late_size) return fail("late-completion ACQUIRE encoding failed");
+    w::Context late_context;
+    w::Snapshot late_snapshot;
+    auto late_pending = authority.accept(late_session,
+        request(w::kOpcodeAcquire, 2U, {late_payload.data(), late_size.value()}),
+        late_context, late_snapshot, 0U, executor);
+    if (!late_pending.queued || !executor.has_job)
+        return fail("late-completion ACQUIRE was not queued");
+    const AuthorityJob deferred = authority.close(late_session);
+    if (deferred.kind != AuthorityJobKind::disconnect || !deferred.deferred ||
+        backend.closes != 2U)
+        return fail("pending ACQUIRE close did not defer disconnect");
+    const AuthorityCompletion late_completion = HostAuthorityOwnerTestAccess::execute(
+        service, executor.take());
+    const AuthorityReply late_reply = authority.complete(late_completion);
+    if (late_completion.kind != AuthorityJobKind::acquire ||
+        late_completion.error != Error::OK || !late_reply.cleanup_required ||
+        late_reply.cleanup.kind != AuthorityJobKind::disconnect ||
+        late_reply.cleanup.deferred || backend.closes != 2U)
+        return fail("late ACQUIRE completion did not yield runnable disconnect");
+    executor.reject = true;
+    if (executor.submit(late_reply.cleanup) ||
+        authority.cleanup_submitted(late_reply.cleanup, false) != Error::OK)
+        return fail("rejected deferred cleanup was not retained");
+    executor.reject = false;
+    if (!executor.submit(late_reply.cleanup) ||
+        authority.cleanup_submitted(late_reply.cleanup, true) != Error::OK)
+        return fail("deferred cleanup retry was not accepted");
+    const AuthorityCompletion disconnected = HostAuthorityOwnerTestAccess::execute(
+        service, executor.take());
+    if (disconnected.kind != AuthorityJobKind::disconnect ||
+        disconnected.error != Error::OK ||
+        authority.complete(disconnected).action != w::InboundAction::close ||
+        late_session.connected() || backend.closes != 3U)
+        return fail("deferred disconnect completion did not release the late lease");
+    status = service.engine_status();
+    if (!status || status.value().states[2U] != ReceiverState::free ||
+        status.value().states[3U] != ReceiverState::leased)
+        return fail("late deferred cleanup disturbed the legacy receiver lease");
+
     if (!service.disconnect_client(1U))
         return fail("legacy DISCONNECT cleanup failed");
     status = service.engine_status();
