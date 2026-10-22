@@ -303,7 +303,49 @@
       }
     ],
     "scope": "Opt-in internal dtv::control static component, default OFF, with only dtv::wire as a required target dependency. Exported package component does not claim stable public or cross-release wire compatibility.",
-    "new_files": "include/dtv/userland/control_connection.h, src/control_connection.cpp, tests/control_connection_tests.cpp, tests/consumer/control/, tests/consumer/missing_control/, and docs/control-connection.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
+    "new_files": "include/dtv/userland/control_connection.h, src/control_connection.cpp, tests/control_connection_tests.cpp, tests/consumer/control/, tests/consumer/missing_control/, and docs/control-connection.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files.",
+    "card_lnb_typed_ingress": {
+      "method": "Limited adaptation of the old Core socketless protocol gate onto current main's CARD/LNB records and control connection. The existing record codecs and current request-ID, epoch, outstanding-request, error and close rules remain authoritative.",
+      "authority": [
+        "Core base main 45f354a87e102bad829aa8a0432ca3c97763fe98",
+        "Core old pin af82b7a9329bfe2202e07c960f368469612e28f4",
+        "agent-workspace subagent/instructions/20261022-core-card-lnb-ingress-code.md",
+        "agent-workspace RC-INTEGRATION-CHECKPOINT-20261019.md, items 11-13",
+        "agent-workspace design/ctl-subcommand-selection-20261020.md, CARD capability boundary",
+        "agent-workspace DECISIONS-20261021.md, decision 6327113891"
+      ],
+      "source_commit": "af82b7a9329bfe2202e07c960f368469612e28f4",
+      "source_files": [
+        {
+          "path": "include/dtv/userland/control_connection.h",
+          "sha256": "3925eb9df3df915ab020f2ded950b0ca67e3fc263fda26e94436a151393b8c7c",
+          "destination_path": "include/dtv/userland/control_connection.h",
+          "source_spdx": "MIT",
+          "destination_spdx": "MIT",
+          "moved_scope": "CARD/LNB ControlRequestKind names and typed owned request storage, adapted to the current main record types.",
+          "excluded_scope": "No old wire codec, service, client, owner, worker, host or product integration was transferred."
+        },
+        {
+          "path": "src/control_connection.cpp",
+          "sha256": "18b5003a16007524e15d4f796ef6015b1edac93095c0c621ba1655071af543f1",
+          "destination_path": "src/control_connection.cpp",
+          "source_spdx": "MIT",
+          "destination_spdx": "MIT",
+          "moved_scope": "Typed decode and epoch classification for CARD opcodes 0x0030-0x0038 and LNB_POWER 0x0039, plus CARD_SERVICE negotiation gating. Current main record codecs and the current connection response/close path are retained.",
+          "excluded_scope": "No capability, daemon allow, physical ownership, operation execution, response production, client, host or product behavior was added."
+        },
+        {
+          "path": "tests/control_connection_tests.cpp",
+          "sha256": "9cc16d2611f30f1621b76c45a5d32d7eacb04084196c21748c9e2096f06e9e49",
+          "destination_path": "tests/control_connection_tests.cpp",
+          "source_spdx": "MIT",
+          "destination_spdx": "MIT",
+          "moved_scope": "The previous socketless gate's feature-negotiation and typed-dispatch coverage was adapted to current main and expanded for all CARD/LNB request kinds, malformed payload boundaries, epoch checks and LNB feature independence.",
+          "excluded_scope": "No service, client, host, product or hardware tests."
+        }
+      ],
+      "scope": "CARD/LNB typed ingress gate only. A successful dispatch is protocol classification, not proof of execution, capability, permission, or ownership. Frame payload views are borrowed input; the gate stores decoded request values in caller-owned request storage."
+    }
   },
   "control_readonly_client": {
     "method": "Partially adapted only the HELLO/LIST/STATUS read-only fetch path from the old Core #16 ControlClient. Rewrote it against current main records and the socketless dtv::control component. Mutating recording methods and timeout policy were not adopted.",
