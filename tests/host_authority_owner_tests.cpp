@@ -250,8 +250,23 @@ int main()
     HostAuthorityOwner owner(service, server, list);
     auto& authority = owner.authority();
     ControlServiceSession session(authority);
+    struct SessionCleanup final {
+        TunerService& service;
+        ControlAuthority& authority;
+        ControlServiceSession& session;
+        ~SessionCleanup()
+        {
+            if (session.connected()) {
+                const AuthorityJob cleanup = authority.close(session);
+                if (cleanup.kind == AuthorityJobKind::disconnect)
+                    (void)HostAuthorityOwnerTestAccess::execute(service, cleanup);
+            }
+        }
+    } session_cleanup{service, authority, session};
     Executor executor;
-    if (authority.open(session) != Error::OK || !hello(authority, session, executor))
+    if (authority.open(session) != Error::OK ||
+        session.client_id() != kAuthorityClientIdFirst ||
+        !hello(authority, session, executor))
         return fail("high-range Authority session did not open on the host owner");
     const std::uint64_t authority_lease = authority_acquire(
         authority, session, executor, 2U, 2U);
