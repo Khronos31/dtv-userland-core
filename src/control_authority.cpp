@@ -1,0 +1,514 @@
+// SPDX-License-Identifier: MIT
+#include "dtv/userland/detail/control_authority.h"
+
+#include <cassert>
+#include <limits>
+
+namespace dtv::userland::detail {
+namespace {
+
+bool receiver_exists(const wire::ListResponse& list, std::uint64_t id) noexcept
+{
+    if (!list.receivers.present) return false;
+    for (std::size_t i = 0U; i < list.receivers.value.count; ++i) {
+        if (list.receivers.value.items[i].id == id) return true;
+    }
+    return false;
+}
+
+bool same_producer(const wire::Producer& left, const wire::Producer& right) noexcept
+{
+    std::array<std::uint8_t, 128> left_bytes{};
+    std::array<std::uint8_t, 128> right_bytes{};
+    const auto left_size = wire::encode_producer(left,
+        MutableByteView{left_bytes.data(), left_bytes.size()});
+    const auto right_size = wire::encode_producer(right,
+        MutableByteView{right_bytes.data(), right_bytes.size()});
+    if (!left_size || !right_size || left_size.value() != right_size.value()) return false;
+    for (std::size_t i = 0U; i < left_size.value(); ++i)
+        if (left_bytes[i] != right_bytes[i]) return false;
+    return true;
+}
+
+const wire::ReceiverDescriptor* receiver_descriptor(const wire::ListResponse& list,
+                                                      std::uint64_t id) noexcept
+{
+    if (!list.receivers.present) return nullptr;
+    for (std::size_t i = 0U; i < list.receivers.value.count; ++i) {
+        if (list.receivers.value.items[i].id == id) return &list.receivers.value.items[i];
+    }
+    return nullptr;
+}
+
+Error validate_profile(const wire::ReceiverDescriptor& descriptor,
+                       const wire::TuneRequest& request, std::uint64_t features) noexcept
+{
+    const std::uint8_t system_bit = request.system == wire::System::isdb_t ? 1U : 2U;
+    if ((descriptor.systems.mask & system_bit) == 0U) return Error::UNSUPPORTED;
+    if (request.lnb_voltage.present) {
+        if ((descriptor.capabilities.controls & wire::kControlBitLnb) == 0U)
+            return Error::UNSUPPORTED;
+        bool found = false;
+        for (std::size_t i = 0U; i < descriptor.capabilities.lnb.values.count; ++i) {
+            if (descriptor.capabilities.lnb.values.items[i] == request.lnb_voltage.value)
+                found = true;
+        }
+        if (!found) return Error::UNSUPPORTED;
+    }
+    if (request.lna.present || request.pids.present) return Error::UNSUPPORTED;
+    (void)features;
+    if (request.selection == wire::Selection::tsid &&
+        request.system != wire::System::isdb_s)
+        return Error::INVALID_ARGUMENT;
+    if (request.selection == wire::Selection::slot &&
+        request.system != wire::System::isdb_s)
+        return Error::INVALID_ARGUMENT;
+    return Error::OK;
+}
+
+}  // namespace
+
+ControlServiceSession::ControlServiceSession(ControlAuthority& authority) noexcept
+    : authority_(authority), connection_(authority.server())
+{
+}
+
+ControlServiceSession::~ControlServiceSession() noexcept
+{
+    // The owner must call ControlAuthority::close() and drain the returned job
+    // before destroying a live session.
+    assert(!connected());
+}
+
+ControlAuthority::ControlAuthority(const wire::ServerHello& server,
+                                   const wire::ListResponse& canonical,
+                                   ReceiverEngine& engine,
+                                   TuneValidator validate_tune) noexcept
+    : server_(server), canonical_(canonical), engine_(engine), validate_tune_(validate_tune)
+{
+    valid_ = server_.epoch == canonical_.epoch &&
+             wire::validate_list_response(canonical_) == Error::OK &&
+             same_producer(server_.producer, canonical_.producer);
+}
+
+ControlAuthority::~ControlAuthority() noexcept
+{
+    // Sessions and the executor are borrowed owners and outlive this authority.
+    assert(sessions_ == nullptr);
+}
+
+ControlServiceSession* ControlAuthority::find_session(std::uint64_t client_id) const noexcept
+{
+    for (ControlServiceSession* session = sessions_; session != nullptr;
+         session = session->next_) {
+        if (session->client_id_ == client_id) return session;
+    }
+    return nullptr;
+}
+
+Error ControlAuthority::open(ControlServiceSession& session) noexcept
+{
+    if (!valid_ || &session.authority_ != this || session.connected() || session.next_ != nullptr ||
+        session.used_ ||
+        exhausted_ || next_client_id_ == 0U)
+        return Error::INVALID_ARGUMENT;
+    session.client_id_ = next_client_id_;
+    if (next_client_id_ == std::numeric_limits<std::uint64_t>::max()) {
+        exhausted_ = true;
+    } else {
+        ++next_client_id_;
+    }
+    session.closed_ = false;
+    session.used_ = true;
+    session.next_ = sessions_;
+    sessions_ = &session;
+    return Error::OK;
+}
+
+AuthorityReply ControlAuthority::reply(ControlServiceSession& session, std::size_t size,
+                                       bool close_after) noexcept
+{
+    AuthorityReply result;
+    result.action = wire::InboundAction::respond;
+    result.frame = ByteView{session.response_.data(), size};
+    result.close_after_reply = close_after;
+    session.close_after_reply_ = close_after;
+    return result;
+}
+
+AuthorityReply ControlAuthority::error_reply(ControlServiceSession& session,
+                                              std::uint16_t opcode,
+                                              std::uint32_t request_id, Error error,
+                                              const char* operation) noexcept
+{
+    const auto written = wire::encode_error_frame(opcode, request_id, server_.epoch,
+        static_cast<std::uint32_t>(error), operation, wire::Scope{},
+        MutableByteView{session.response_.data(), session.response_.size()});
+    if (!written) return {};
+    return reply(session, written.value());
+}
+
+bool ControlAuthority::remember_lease(ControlServiceSession& session,
+                                      std::uint64_t lease_id, ReceiverId receiver) noexcept
+{
+    if (session.lease_count_ == session.lease_ids_.size()) return false;
+    session.lease_ids_[session.lease_count_] = lease_id;
+    session.lease_receivers_[session.lease_count_] = receiver;
+    ++session.lease_count_;
+    return true;
+}
+
+void ControlAuthority::forget_lease(ControlServiceSession& session,
+                                    std::uint64_t lease_id) noexcept
+{
+    for (std::size_t i = 0U; i < session.lease_count_; ++i) {
+        if (session.lease_ids_[i] != lease_id) continue;
+        --session.lease_count_;
+        session.lease_ids_[i] = session.lease_ids_[session.lease_count_];
+        session.lease_receivers_[i] = session.lease_receivers_[session.lease_count_];
+        session.lease_ids_[session.lease_count_] = 0U;
+        session.lease_receivers_[session.lease_count_] = 0U;
+        return;
+    }
+}
+
+AuthorityReply ControlAuthority::accept(ControlServiceSession& session,
+                                        const wire::Frame& frame,
+                                        const wire::Context& context,
+                                        const wire::Snapshot& snapshot,
+                                        std::uint64_t accepted_at_ms,
+                                        ControlAuthorityExecutor& executor) noexcept
+{
+    if (!session.connected() || find_session(session.client_id_) != &session) return {};
+    wire::Inbound inbound = session.connection_.accept(frame, session.connection_request_,
+        MutableByteView{session.response_.data(), session.response_.size()});
+    if (inbound.action == wire::InboundAction::close) {
+        AuthorityReply result;
+        result.action = wire::InboundAction::close;
+        result.cleanup = close(session);
+        if (!executor.submit(result.cleanup)) result.cleanup_required = true;
+        return result;
+    }
+    if (inbound.action == wire::InboundAction::respond)
+        return reply(session, inbound.reply_size, inbound.close_after_reply);
+    return dispatch(session, session.connection_request_, context, snapshot,
+                    accepted_at_ms, executor);
+}
+
+AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
+                                           const wire::ControlRequest& request,
+                                           const wire::Context& context,
+                                           const wire::Snapshot& snapshot,
+                                           std::uint64_t accepted_at_ms,
+                                           ControlAuthorityExecutor& executor) noexcept
+{
+    const MutableByteView output{session.response_.data(), session.response_.size()};
+    switch (request.kind) {
+    case wire::ControlRequestKind::list: {
+        const auto size = wire::encode_record_frame(wire::Kind::response, request.opcode,
+            request.request_id, canonical_, &wire::encode_list_response, output);
+        return size ? reply(session, size.value())
+                    : error_reply(session, request.opcode, request.request_id,
+                                  size.error(), "list");
+    }
+    case wire::ControlRequestKind::status: {
+        const Error scope = wire::check_status_scope(canonical_, request.status.scope);
+        if (scope != Error::OK)
+            return error_reply(session, request.opcode, request.request_id, scope, "status");
+        wire::StatusResponse& status = session.status_response_;
+        Error projected = wire::build_status_shell(canonical_, context, snapshot,
+                                                    request.status.scope, status);
+        if (projected == Error::OK) {
+            const auto engine_status = engine_.status();
+            if (!engine_status) projected = engine_status.error();
+            else projected = project_receiver_engine_status(canonical_, engine_status.value(),
+                                                              status);
+        }
+        if (projected != Error::OK)
+            return error_reply(session, request.opcode, request.request_id,
+                               projected, "status");
+        const auto size = wire::encode_status_frame(request.request_id, status, canonical_, output);
+        return size ? reply(session, size.value())
+                    : error_reply(session, request.opcode, request.request_id,
+                                  size.error(), "status");
+    }
+    case wire::ControlRequestKind::acquire: {
+        const std::uint64_t receiver = request.acquire.receiver_id;
+        if (!receiver_exists(canonical_, receiver))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "acquire");
+        const auto acquired = engine_.acquire(session.client_id_,
+                                               static_cast<ReceiverId>(receiver));
+        if (!acquired)
+            return error_reply(session, request.opcode, request.request_id,
+                               acquired.error(), "acquire");
+        if (!remember_lease(session, acquired.value().lease_id,
+                             static_cast<ReceiverId>(receiver))) {
+            (void)engine_.release(session.client_id_, acquired.value().lease_id);
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::RESOURCE_LIMIT, "acquire");
+        }
+        wire::AcquireResponse response;
+        response.epoch = server_.epoch;
+        response.lease_id = acquired.value().lease_id;
+        const auto size = wire::encode_acquire_response(response,
+            MutableByteView{output.data + wire::kHeaderSize,
+                            output.size - wire::kHeaderSize});
+        if (!size) {
+            forget_lease(session, response.lease_id);
+            (void)engine_.release(session.client_id_, response.lease_id);
+            return error_reply(session, request.opcode, request.request_id,
+                               size.error(), "acquire");
+        }
+        wire::Header header;
+        header.kind = wire::Kind::response;
+        header.opcode = request.opcode;
+        header.request_id = request.request_id;
+        header.payload_length = static_cast<std::uint32_t>(size.value());
+        const auto frame = wire::encode_header(header, output);
+        if (!frame) return error_reply(session, request.opcode, request.request_id,
+                                       frame.error(), "acquire");
+        return reply(session, wire::kHeaderSize + size.value());
+    }
+    case wire::ControlRequestKind::tune: {
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, "tune");
+        std::size_t lease_slot = 0U;
+        while (lease_slot < session.lease_count_ &&
+               session.lease_ids_[lease_slot] != request.tune.lease_id)
+            ++lease_slot;
+        if (lease_slot == session.lease_count_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "tune");
+        const ReceiverId receiver = session.lease_receivers_[lease_slot];
+        const wire::ReceiverDescriptor* descriptor =
+            receiver_descriptor(canonical_, static_cast<std::uint64_t>(receiver));
+        if (descriptor == nullptr)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "tune");
+        Error validation = validate_profile(*descriptor, request.tune,
+                                             session.connection_.features());
+        if (validation == Error::OK && validate_tune_ != nullptr)
+            validation = validate_tune_(receiver, request.tune);
+        HzTuneRequest engine_request;
+        engine_request.lease_id = request.tune.lease_id;
+        engine_request.system = request.tune.system == wire::System::isdb_s
+                                    ? ReceiverSystem::satellite
+                                    : ReceiverSystem::terrestrial;
+        engine_request.requested_hz = request.tune.frequency_hz;
+        engine_request.timeout_ms = request.tune.timeout_ms;
+        engine_request.validation = validation;
+        if (request.tune.selection == wire::Selection::tsid)
+            engine_request.stream_id = request.tune.selection_value;
+        else if (request.tune.selection == wire::Selection::slot)
+            engine_request.slot = request.tune.selection_value;
+        if (request.tune.lnb_voltage.present)
+            engine_request.lnb_voltage = request.tune.lnb_voltage.value;
+        const auto ticket = engine_.try_admit_tune(session.client_id_, engine_request,
+                                                    accepted_at_ms);
+        if (!ticket)
+            return error_reply(session, request.opcode, request.request_id,
+                               ticket.error(), "tune");
+        AuthorityJob job;
+        job.kind = AuthorityJobKind::tune;
+        job.key = SessionKey{session.client_id_, request.request_id};
+        job.tune = ticket.value();
+        if (!executor.submit(job)) {
+            (void)engine_.abort_unstarted_tune(ticket.value(), Error::RESOURCE_LIMIT);
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::RESOURCE_LIMIT, "tune");
+        }
+        session.pending_ = true;
+        session.pending_request_id_ = request.request_id;
+        session.pending_lease_id_ = request.tune.lease_id;
+        session.pending_tune_revision_ = ticket.value().tune_revision;
+        session.pending_receiver_ = receiver;
+        session.pending_kind_ = AuthorityJobKind::tune;
+        session.pending_requested_hz_ = request.tune.frequency_hz;
+        session.pending_selection_ = request.tune.selection;
+        session.pending_selection_value_ = request.tune.selection_value;
+        AuthorityReply queued;
+        queued.action = wire::InboundAction::dispatch;
+        queued.queued = true;
+        return queued;
+    }
+    case wire::ControlRequestKind::release: {
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, "release");
+        bool owns = false;
+        for (std::size_t i = 0U; i < session.lease_count_; ++i)
+            owns = owns || session.lease_ids_[i] == request.release.lease_id;
+        if (!owns)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "release");
+        AuthorityJob job;
+        job.kind = AuthorityJobKind::release;
+        job.key = SessionKey{session.client_id_, request.request_id};
+        job.client_id = session.client_id_;
+        job.lease_id = request.release.lease_id;
+        if (!executor.submit(job))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::RESOURCE_LIMIT, "release");
+        session.pending_ = true;
+        session.pending_request_id_ = request.request_id;
+        session.pending_lease_id_ = request.release.lease_id;
+        session.pending_kind_ = AuthorityJobKind::release;
+        AuthorityReply queued;
+        queued.action = wire::InboundAction::dispatch;
+        queued.queued = true;
+        return queued;
+    }
+    case wire::ControlRequestKind::start_stream:
+    case wire::ControlRequestKind::stop_stream:
+        return error_reply(session, request.opcode, request.request_id,
+                           Error::UNSUPPORTED, "control");
+    }
+    return error_reply(session, request.opcode, request.request_id,
+                       Error::UNSUPPORTED, "control");
+}
+
+AuthorityJob ControlAuthority::close(ControlServiceSession& session) noexcept
+{
+    AuthorityJob job;
+    if (&session.authority_ != this || !session.connected()) return job;
+    ControlServiceSession** link = &sessions_;
+    while (*link != nullptr && *link != &session) link = &(*link)->next_;
+    if (*link == &session) *link = session.next_;
+    session.next_ = nullptr;
+    session.closed_ = true;
+    for (std::size_t i = 0U; i < session.lease_count_; ++i)
+        (void)engine_.revoke_tune_ticket(session.client_id_, session.lease_ids_[i]);
+    job.kind = AuthorityJobKind::disconnect;
+    job.client_id = session.client_id_;
+    job.key = SessionKey{session.client_id_, session.pending_request_id_};
+    session.client_id_ = 0U;
+    session.pending_ = false;
+    session.lease_count_ = 0U;
+    return job;
+}
+
+AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) noexcept
+{
+    ControlServiceSession* session = find_session(key.client_id);
+    if (session == nullptr || !session->pending_ ||
+        session->pending_request_id_ != key.request_id || session->closed_)
+        return {};
+    session->pending_ = false;
+    if (session->pending_kind_ == AuthorityJobKind::tune) {
+        if (result != Error::OK)
+            return error_reply(*session, wire::kOpcodeTune,
+                               static_cast<std::uint32_t>(key.request_id), result, "tune");
+        wire::TuneResult response;
+        response.epoch = server_.epoch;
+        response.requested_hz = session->pending_requested_hz_;
+        response.verification = wire::Verification::commands;
+        const auto status = engine_.status();
+        if (!status)
+            return error_reply(*session, wire::kOpcodeTune,
+                               static_cast<std::uint32_t>(key.request_id), status.error(), "tune");
+        bool matched = false;
+        for (std::size_t i = 0U; i < status.value().receiver_count; ++i) {
+            const auto& metadata = status.value().tune_metadata[i];
+            if (status.value().receivers[i] == session->pending_receiver_ &&
+                metadata.current_valid && metadata.current.exact_hz &&
+                metadata.current_revision == session->pending_tune_revision_ &&
+                metadata.current.requested_hz == session->pending_requested_hz_) {
+                response.tune_revision = metadata.current_revision;
+                response.programmed_hz.present = metadata.current.programmed_hz.has_value();
+                if (metadata.current.programmed_hz)
+                    response.programmed_hz.value = *metadata.current.programmed_hz;
+                matched = true;
+                break;
+            }
+        }
+        if (!matched)
+            return error_reply(*session, wire::kOpcodeTune,
+                               static_cast<std::uint32_t>(key.request_id),
+                               Error::INTERNAL, "tune");
+        if (session->pending_selection_ == wire::Selection::tsid) {
+            response.selected_tsid.present = true;
+            response.selected_tsid.value = session->pending_selection_value_;
+        } else if (session->pending_selection_ == wire::Selection::slot) {
+            response.selected_slot.present = true;
+            response.selected_slot.value = session->pending_selection_value_;
+        }
+        const auto size = wire::encode_record_frame(wire::Kind::response, wire::kOpcodeTune,
+            static_cast<std::uint32_t>(key.request_id), response, &wire::encode_tune_result,
+            MutableByteView{session->response_.data(), session->response_.size()});
+        return size ? reply(*session, size.value())
+                    : error_reply(*session, wire::kOpcodeTune,
+                                  static_cast<std::uint32_t>(key.request_id), size.error(), "tune");
+    }
+    wire::ReleaseResponse response;
+    response.epoch = server_.epoch;
+    response.lease_id = session->pending_lease_id_;
+    response.released = result == Error::OK;
+    response.quiesced = result == Error::OK;
+    if (result != Error::OK) {
+        response.error.present = true;
+        response.error.value.code = static_cast<std::uint32_t>(result);
+        response.error.value.operation = wire::WString<32>{};
+        const char op[] = "release";
+        response.error.value.operation.length = sizeof(op) - 1U;
+        for (std::size_t i = 0U; i < sizeof(op) - 1U; ++i)
+            response.error.value.operation.bytes[i] = op[i];
+    } else {
+        forget_lease(*session, response.lease_id);
+    }
+    const auto size = wire::encode_record_frame(wire::Kind::response, wire::kOpcodeRelease,
+        static_cast<std::uint32_t>(key.request_id), response, &wire::encode_release_response,
+        MutableByteView{session->response_.data(), session->response_.size()});
+    return size ? reply(*session, size.value())
+                : error_reply(*session, wire::kOpcodeRelease,
+                              static_cast<std::uint32_t>(key.request_id), size.error(), "release");
+}
+
+Error ControlAuthority::response_sent(ControlServiceSession& session, bool complete_frame,
+                                      ControlAuthorityExecutor& executor,
+                                      AuthorityJob* rejected_cleanup) noexcept
+{
+    if (rejected_cleanup == nullptr && (!complete_frame || session.close_after_reply_))
+        return Error::INVALID_ARGUMENT;
+    if (!session.connected() || find_session(session.client_id_) != &session)
+        return Error::NOT_FOUND;
+    if (complete_frame) {
+        if (session.close_after_reply_) {
+            const AuthorityJob job = close(session);
+            if (!executor.submit(job)) {
+                if (rejected_cleanup != nullptr) *rejected_cleanup = job;
+                return Error::RESOURCE_LIMIT;
+            }
+            return Error::OK;
+        }
+        session.connection_.complete();
+        return Error::OK;
+    }
+    const AuthorityJob job = close(session);
+    if (executor.submit(job)) return Error::OK;
+    if (rejected_cleanup != nullptr) *rejected_cleanup = job;
+    return Error::RESOURCE_LIMIT;
+}
+
+Error ControlAuthority::execute_job(ReceiverEngine& engine,
+                                    const AuthorityJob& job) noexcept
+{
+    switch (job.kind) {
+    case AuthorityJobKind::tune: {
+        const auto result = engine.execute_admitted_tune(job.tune);
+        return result ? Error::OK : result.error();
+    }
+    case AuthorityJobKind::release: {
+        const auto result = engine.release(job.client_id, job.lease_id);
+        return result ? Error::OK : result.error();
+    }
+    case AuthorityJobKind::disconnect: {
+        const auto result = engine.disconnect_client(job.client_id);
+        return result ? Error::OK : result.error();
+    }
+    }
+    return Error::INVALID_ARGUMENT;
+}
+
+}  // namespace dtv::userland::detail
