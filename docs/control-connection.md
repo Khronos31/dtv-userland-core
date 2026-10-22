@@ -6,6 +6,8 @@ This increment provides `ControlConnection`, request/response helper values, and
 
 For TUNE, this gate decodes and classifies the request only. The caller checks the receiver's LNB/LNA capabilities and applies the corresponding support policy.
 
+CARD_STATUS, CARD_CONNECT, CARD_RECONNECT, CARD_DISCONNECT, CARD_RESET, CARD_TRANSMIT, BEGIN_TRANSACTION, END_TRANSACTION, CARD_HANDLE_STATUS, and LNB_POWER are decoded into the corresponding typed request members. The request values are copied into caller-owned `ControlRequest` storage; no borrowed view into the input frame is retained. A caller must still treat `Frame.payload` as borrowed input whose lifetime is limited by its frame storage, which may be reused after `accept()` returns. CARD requests require negotiated CARD_SERVICE and otherwise receive UNSUPPORTED. LNB_POWER is independent of CARD_SERVICE. A dispatch result only passes the protocol gate; it does not establish reader, receiver, or physical ownership, check daemon permission or hardware capability, execute an operation, or mean that it succeeded.
+
 The component owns no socket, listener, thread, timer, client, service, receiver, capture store, USB handle, or product adapter. ATTACH and TS_DATA belong to the separate data path and are not handled here. A well-formed opcode outside this gate's control subset receives `UNSUPPORTED` according to the existing wire records.
 
 UDTV between daemon and ctl is an internal contract. Daemon and ctl from different releases are unsupported; exporting this CMake component does not establish a stable public wire or cross-release API. See `docs/wire-records.md` for the current record layout, including the name-only Model and the STATUS `lnb_15v_enabled` / `card_inserted` optional fields before topology.

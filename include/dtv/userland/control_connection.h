@@ -40,6 +40,16 @@ enum class ControlRequestKind : std::uint8_t {
     tune,
     start_stream,
     stop_stream,
+    card_status,
+    card_connect,
+    card_reconnect,
+    card_disconnect,
+    card_reset,
+    card_transmit,
+    begin_transaction,
+    end_transaction,
+    card_handle_status,
+    lnb_power,
 };
 
 // Owned decoded request; only the member selected by kind is meaningful.  It
@@ -56,6 +66,16 @@ struct ControlRequest final {
     TuneRequest tune{};
     StartRequest start_stream{};
     StopRequest stop_stream{};
+    CardStatusRequest card_status{};
+    CardConnectRequest card_connect{};
+    CardReconnectRequest card_reconnect{};
+    CardDisconnectRequest card_disconnect{};
+    CardResetRequest card_reset{};
+    CardTransmitRequest card_transmit{};
+    BeginTransactionRequest begin_transaction{};
+    EndTransactionRequest end_transaction{};
+    CardHandleStatusRequest card_handle_status{};
+    LnbPowerRequest lnb_power{};
 };
 
 enum class InboundAction : std::uint8_t {
@@ -86,9 +106,10 @@ public:
     // dispatch) becomes the single outstanding request, and no further frame
     // is accepted until complete() is called after its whole reply frame has
     // been written.  Request IDs must increase strictly, HELLO must come first
-    // and only once, and LIST/STATUS/ACQUIRE/RELEASE/TUNE must carry the
-    // daemon epoch (otherwise STALE_HANDLE). START and STOP also carry and
-    // check the epoch. Nothing is written to output for dispatch or close.
+    // and only once, and supported requests carry the daemon epoch (otherwise
+    // STALE_HANDLE). CARD requests also require negotiated CARD_SERVICE;
+    // LNB_POWER is independent of that feature. Nothing is written to output
+    // for dispatch or close.
     // output must hold kHeaderSize + kMaxControlPayload bytes so every reply
     // fits. A dispatch result is not service execution or success. request
     // is valid only when this call returns InboundAction::dispatch.
