@@ -69,7 +69,7 @@ target_include_directories(dtv_userland_tuning PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dtv_userland_tuning PUBLIC dtv::wire)
 
-add_library(dtv_userland_json STATIC src/json.cpp)
+add_library(dtv_userland_json STATIC src/json.cpp src/discovery_json.cpp)
 add_library(dtv::json ALIAS dtv_userland_json)
 set_target_properties(dtv_userland_json PROPERTIES
     EXPORT_NAME json
@@ -218,6 +218,13 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_test(NAME status_json_consumer
         COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/status_json_consumer.py
             $<TARGET_FILE:status_json_tests>)
+
+    add_executable(discovery_json_tests tests/discovery_json_tests.cpp)
+    target_link_libraries(discovery_json_tests PRIVATE dtv::json)
+    add_test(NAME discovery_json_tests COMMAND discovery_json_tests)
+    add_test(NAME discovery_json_consumer
+        COMMAND ${Python3_EXECUTABLE} ${CMAKE_CURRENT_SOURCE_DIR}/tests/discovery_json_consumer.py
+            $<TARGET_FILE:discovery_json_tests>)
 
     if(DTV_USERLAND_BUILD_CARD)
         add_executable(card_ownership_engine_tests tests/card_ownership_engine_tests.cpp)
