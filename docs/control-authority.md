@@ -28,22 +28,29 @@ kMaxControlPayload` bytes; bounded tune/PID request storage remains with the
 session instead of being copied into worker closures.
 
 The injected `ControlAuthorityExecutor` is a nonblocking publication seam. A
-`AuthorityJob` owns its `SessionKey` and admitted tune ticket or release and
-disconnect identifiers by value; it contains no session pointer. The host
-worker invokes `ControlAuthority::execute_job()` outside the poll loop and
-posts its `(SessionKey, Error)` completion back to that same loop. The
-authority resolves the key in its live session table while producing a reply.
-Closing removes the session from the table first and revokes each pending tune
-ticket before the disconnect cleanup job is handed off. Queued jobs then fail
-Engine ticket revalidation; running work completes against the live Engine,
-and its later key lookup is discarded. `complete()` returns an empty reply when
-the completion arrives after its session was removed, or when a duplicate or
-mismatched completion finds a still-live session; neither result has a reply
-frame or cleanup job. For a still-live session, `session.connected()` remains
-true and the host keeps the connection despite the empty reply; a genuine close
-sets it false and produces cleanup through `close()`. The host must not retain
-or dereference a removed session to classify a late completion. Engine/backend
-ownership must outlive both outcomes.
+`AuthorityJob` owns its `SessionKey` and admitted tune ticket or acquire,
+release, rollback, and disconnect identifiers by value; it contains no
+session pointer. The host worker invokes `ControlAuthority::execute_job_value()`
+outside the poll loop and posts the typed `AuthorityCompletion` back to that
+same loop. ACQUIRE dispatch only queues a value job; the worker performs
+`ReceiverEngine::acquire()` and returns the lease ID and receiver. The authority
+checks key and job kind before producing a wire reply. If a successful acquire
+cannot be recorded or encoded, completion returns one rollback-release value
+job; the poll loop does not call Engine release. A rejected cleanup submit
+remains owned by the caller, and a repeated or stale completion cannot produce
+the cleanup value again.
+
+Closing while ACQUIRE or rollback is pending marks the session closed but keeps
+its storage in the authority table. `close()` returns a deferred disconnect
+intent that must not be submitted. The matching late completion returns the
+runnable disconnect cleanup value; only its successful completion removes the
+session. Rollback failure transfers cleanup to disconnect in sequence, never
+with both operations runnable for the same lease. For these retained sessions,
+the caller reports disconnect submission with `cleanup_submitted(job, accepted)`:
+a rejected value remains caller-owned, and a retry is marked accepted before
+its completion is delivered. Other close paths retain the existing close
+contract. Engine/backend ownership must outlive all returned jobs and their
+completions.
 
 The host executor must provide parallel progress for cleanup on one receiver
 while another receiver is blocked in TUNE. `ReceiverEngine` already serializes

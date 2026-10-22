@@ -16,10 +16,12 @@ target_link_libraries(app PRIVATE dtv::host_workers)
 ```
 
 The target reuses the existing TunerService owner, CARD ownership engine, and
-ControlAuthority job values. A worker can execute an already-admitted
-Authority TUNE, RELEASE, or DISCONNECT against the same private TunerService
-Engine; it does not expose an Engine accessor. The worker owns submitted task
-values; it does not retain a client, session, socket, or frame-buffer view.
+ControlAuthority job values. A worker can execute Authority ACQUIRE, TUNE,
+RELEASE, rollback RELEASE, or DISCONNECT against the same private TunerService
+Engine and returns the typed authority completion values; it does not expose an
+Engine accessor. A deferred disconnect intent is rejected until its preceding
+ACQUIRE/rollback completion returns runnable cleanup. The worker owns submitted
+task values; it does not retain a client, session, socket, or frame-buffer view.
 There is no control server, socket, session coordinator, runtime dispatch,
 production producer, or product connection in this target.
 

@@ -6,13 +6,13 @@
   "source_files": [
     {
       "path": "adapters/host_daemon/src/control_workers.cpp",
-      "lines": 1508,
-      "sha256": "0652a2a9358573745142b3f1fb5f09dd71819d2909b9c07c491d5f9929422d0c"
+      "lines": 1515,
+      "sha256": "efb846ad4f957819d4f9b7bc68bb9b329772ffbbfde0e150e065c8dd94abaf6e"
     },
     {
       "path": "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h",
-      "lines": 243,
-      "sha256": "95b08133f0ba592b9ba6a775847b26c1d1f6677889304a98f688493a7e20bbf7"
+      "lines": 244,
+      "sha256": "d4e52a645c3c0223fe6365ac1c518d06a652f829e8f9fab3192caa5c22366058"
     },
     {
       "path": "adapters/host_daemon/include/px4/control_execution_layout.h",
@@ -40,5 +40,5 @@
       "sha256": "73e7b79d3ee6b3f2c9d760254f862462f99736d5d33123deb0da9f8f8c62c5f2"
     }
   ],
-  "scope": "Existing ControlWorkerLanes and CardService GPL source/header snapshot, extended to execute owned ControlAuthority job values through the same private TunerService Engine; no session coordinator, server, socket, runtime, facade implementation, or product backend"
+  "scope": "Existing ControlWorkerLanes and CardService GPL source/header snapshot, extended with typed ControlAuthority ACQUIRE/TUNE/RELEASE/rollback/DISCONNECT value execution through the same private TunerService Engine; no session coordinator, server, socket, runtime, facade implementation, or product backend"
 }

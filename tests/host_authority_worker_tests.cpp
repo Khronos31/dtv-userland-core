@@ -183,8 +183,14 @@ bool hello(ControlAuthority& authority, ControlServiceSession& session,
         authority.response_sent(session, true, executor, &rejected) == Error::OK;
 }
 
+ControlWorkerTask task_for(const AuthorityJob& job, ControlWorkerTaskKind kind);
+
+bool wait_completion(ControlWorkerLanes& workers, ControlWorkerLane lane,
+                     ControlWorkerCompletion& completion);
+
 std::uint64_t acquire(ControlAuthority& authority, ControlServiceSession& session,
-                      Executor& executor, std::uint32_t request_id,
+                      Executor& executor, ControlWorkerLanes& workers,
+                      ControlWorkerLane lane, std::uint32_t request_id,
                       std::uint16_t receiver)
 {
     std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
@@ -193,9 +199,18 @@ std::uint64_t acquire(ControlAuthority& authority, ControlServiceSession& sessio
     if (!size) return 0U;
     w::Context context;
     w::Snapshot snapshot;
-    const auto reply = authority.accept(session,
+    auto reply = authority.accept(session,
         request(w::kOpcodeAcquire, request_id, {payload.data(), size.value()}),
         context, snapshot, 0U, executor);
+    if (!reply.queued || !executor.has_job)
+        return 0U;
+    const AuthorityJob job = executor.take();
+    const auto task = task_for(job, ControlWorkerTaskKind::authority_request);
+    if (workers.submit(lane, task).error() != Error::OK) return 0U;
+    ControlWorkerCompletion completion{};
+    if (!wait_completion(workers, lane, completion) || completion.error != Error::OK)
+        return 0U;
+    reply = authority.complete(completion.authority_completion);
     AuthorityJob rejected;
     if (reply.action != w::InboundAction::respond ||
         authority.response_sent(session, true, executor, &rejected) != Error::OK)
@@ -272,8 +287,10 @@ int main()
     Executor executor;
     if (authority.open(session) != Error::OK || !hello(authority, session, executor))
         return fail("authority session setup failed");
-    const std::uint64_t lease2 = acquire(authority, session, executor, 2U, 2U);
-    const std::uint64_t lease3 = acquire(authority, session, executor, 3U, 4U);
+    const std::uint64_t lease2 = acquire(authority, session, executor, workers,
+        ControlWorkerLane::tuner_dev1, 2U, 2U);
+    const std::uint64_t lease3 = acquire(authority, session, executor, workers,
+        ControlWorkerLane::tuner_dev2, 3U, 4U);
     if (lease2 == 0U || lease3 == 0U)
         return fail("authority leases were not acquired");
 
@@ -317,9 +334,12 @@ int main()
             tune_job.key.client_id || completion.authority_key.request_id != 4U ||
         completion.authority_job_kind != AuthorityJobKind::tune ||
         completion.receiver != 2U || completion.lease_id != lease2 ||
+        completion.authority_completion.key.client_id != tune_job.key.client_id ||
+        completion.authority_completion.kind != AuthorityJobKind::tune ||
+        completion.authority_completion.lease_id != lease2 ||
         backend.hz_calls != 1U)
         return fail("worker did not execute the admitted Authority tune exactly once");
-    (void)authority.complete(tune_job.key, completion.error);
+    (void)authority.complete(completion.authority_completion);
     AuthorityJob rejected_cleanup;
     if (authority.response_sent(session, true, executor, &rejected_cleanup) != Error::OK)
         return fail("Authority TUNE response completion failed");
@@ -413,6 +433,15 @@ int main()
                                         "DISCONNECT on receiver lane"))
         return fail("DISCONNECT receiver-lane submit guard failed");
 
+    AuthorityJob deferred_disconnect = receiver_lane_disconnect;
+    deferred_disconnect.deferred = true;
+    const auto deferred_disconnect_task = task_for(
+        deferred_disconnect, ControlWorkerTaskKind::authority_cleanup);
+    if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev1,
+                                        deferred_disconnect_task,
+                                        "deferred DISCONNECT before ACQUIRE completion"))
+        return fail("deferred DISCONNECT submit guard failed");
+
     ControlWorkerTask mismatched_request_task = release_task;
     ++mismatched_request_task.request_id;
     if (!submit_rejected_without_effect(ControlWorkerLane::tuner_dev2,
@@ -429,7 +458,7 @@ int main()
         completion.authority_job_kind != AuthorityJobKind::release ||
         completion.receiver != 4U || completion.lease_id != lease3)
         return fail("Authority RELEASE completion lost routed values");
-    (void)authority.complete(release_job.key, completion.error);
+    (void)authority.complete(completion.authority_completion);
     if (authority.response_sent(session, true, executor, &rejected_cleanup) != Error::OK)
         return fail("Authority RELEASE response completion failed");
 
