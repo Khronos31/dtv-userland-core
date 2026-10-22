@@ -22,7 +22,7 @@ struct RawReply final {
 constexpr std::size_t kRequestPayloadCapacity = 64U;
 
 struct ExchangeWorkspace final {
-    std::array<std::uint8_t, kHeaderSize + kRequestPayloadCapacity> outgoing{};
+    std::array<std::uint8_t, kHeaderSize + kMaxControlPayload> outgoing{};
     std::array<std::uint8_t, kMaxControlPayload> payload{};
     std::array<std::uint8_t, 4096U> input{};
 };
@@ -460,16 +460,12 @@ StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout)
 {
     TimedTransportAdapter adapter(transport);
     if (timeout.milliseconds == 0U) {
-        StatusFetchResult result{};
-        result.error = Error::INVALID_ARGUMENT;
         transport.close();
-        return result;
+        return StatusFetchResult{StatusSnapshot{}, Error::INVALID_ARGUMENT, 0U};
     }
     if (!adapter.set_deadline(timeout)) {
-        StatusFetchResult result{};
-        result.error = Error::TIMEOUT;
         transport.close();
-        return result;
+        return StatusFetchResult{StatusSnapshot{}, Error::TIMEOUT, 0U};
     }
     return fetch_status(adapter);
 }
@@ -720,12 +716,22 @@ ReleaseControlResult release_recording(TimedClientTransport& transport,
         transport.close();
         return result;
     }
-    if (released.value().epoch != session.epoch || !released.value().released) {
+    result.response = released.value();
+    if (released.value().epoch != session.epoch) {
         result.error = Error::PROTOCOL_ERROR;
         transport.close();
         return result;
     }
-    result.response = released.value();
+    if (!released.value().released) {
+        if (!released.value().error.present) {
+            result.error = Error::PROTOCOL_ERROR;
+        } else {
+            result.remote_error_code = released.value().error.value.code;
+            result.error = remote_error(result.remote_error_code);
+        }
+        transport.close();
+        return result;
+    }
     result.error = Error::OK;
     return result;
 }

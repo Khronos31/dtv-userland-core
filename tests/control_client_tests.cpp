@@ -6,6 +6,8 @@
 #include <array>
 #include <cstdio>
 #include <cstring>
+#include <memory>
+#include <new>
 #if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
 #include <pthread.h>
 #endif
@@ -108,12 +110,17 @@ enum class Fault : std::uint8_t {
     timeout_start,
     timeout_stop,
     timeout_release,
+    release_remote_error,
+    release_wire_error,
+    release_without_error,
+    bad_release_epoch,
 };
 
 class FakeTransport final : public w::ClientTransport, public w::TimedClientTransport {
 public:
-    explicit FakeTransport(Fault fault = Fault::none)
-        : server_(make_server()), connection_(server_), fault_(fault)
+    explicit FakeTransport(Fault fault = Fault::none, bool accept_pid_requests = false)
+        : server_(make_server()), connection_(server_), fault_(fault),
+          accept_pid_requests_(accept_pid_requests)
     {
         sparse_list(list_, server_.epoch);
         context_.epoch = server_.epoch;
@@ -142,7 +149,15 @@ public:
         if (inbound.action == w::InboundAction::close) {
             return Result<void>::failure(Error::PROTOCOL_ERROR);
         }
-        if (inbound.action == w::InboundAction::respond) {
+        if (request.kind == w::ControlRequestKind::tune && request.tune.pids.present) {
+            tune_pid_count_ = request.tune.pids.value.count;
+            tune_pid_first_ = request.tune.pids.value.items[0U];
+            tune_pid_last_ = request.tune.pids.value.items[tune_pid_count_ - 1U];
+        }
+        // PID fixtures isolate client request sizing from feature negotiation.
+        if (inbound.action == w::InboundAction::respond &&
+            !(accept_pid_requests_ && request.kind == w::ControlRequestKind::tune &&
+              request.tune.pids.present)) {
             reply_size_ = inbound.reply_size;
         } else if (!queue_dispatch(request)) {
             return Result<void>::failure(Error::PROTOCOL_ERROR);
@@ -206,6 +221,9 @@ public:
 
     bool closed() const noexcept { return closed_; }
     std::size_t request_count() const noexcept { return request_count_; }
+    std::size_t tune_pid_count() const noexcept { return tune_pid_count_; }
+    std::uint16_t tune_pid_first() const noexcept { return tune_pid_first_; }
+    std::uint16_t tune_pid_last() const noexcept { return tune_pid_last_; }
     std::uint32_t request_id(std::size_t index) const noexcept { return request_ids_[index]; }
     std::uint16_t request_opcode(std::size_t index) const noexcept { return request_opcodes_[index]; }
     std::uint32_t write_timeout(std::size_t index) const noexcept { return write_timeouts_[index]; }
@@ -328,11 +346,26 @@ private:
             return true;
         }
         if (request.kind == w::ControlRequestKind::release) {
+            if (fault_ == Fault::release_wire_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch, 999U, "release",
+                    w::Scope{w::ScopeKind::receiver, request.release.lease_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
             w::ReleaseResponse response{};
             response.epoch = server_.epoch;
+            if (fault_ == Fault::bad_release_epoch) response.epoch[0] ^= 0x01U;
             response.lease_id = request.release.lease_id;
-            response.released = true;
-            response.quiesced = true;
+            response.released = fault_ != Fault::release_remote_error &&
+                                fault_ != Fault::release_without_error;
+            response.quiesced = response.released;
+            if (fault_ == Fault::release_remote_error) {
+                response.error.present = true;
+                response.error.value.code = 999U;
+            }
             const auto encoded = w::encode_record_frame(
                 w::Kind::response, request.opcode, request.request_id, response,
                 w::encode_release_response, MutableByteView{reply_.data(), reply_.size()});
@@ -396,11 +429,15 @@ private:
     std::array<std::array<std::uint8_t, kFrameCapacity>, 3U> recorded_replies_{};
     std::array<std::size_t, 3U> recorded_sizes_{};
     std::size_t request_count_ = 0U;
+    std::size_t tune_pid_count_ = 0U;
+    std::uint16_t tune_pid_first_ = 0U;
+    std::uint16_t tune_pid_last_ = 0U;
     std::size_t write_timeout_count_ = 0U;
     std::size_t read_timeout_count_ = 0U;
     std::uint32_t advance_per_read_ms_ = 0U;
     std::uint64_t now_ms_ = 0U;
     bool closed_ = false;
+    bool accept_pid_requests_ = false;
 };
 
 void test_successful_read_only_exchange()
@@ -527,6 +564,97 @@ void test_begin_recording_validator_and_two_budgets()
     CHECK(transport.request_id(6U) == 7U && transport.request_id(7U) == 8U);
     CHECK(transport.request_opcode(6U) == w::kOpcodeStopStream &&
           transport.request_opcode(7U) == w::kOpcodeRelease);
+}
+
+void test_recording_pid_buffers_accept_limits_and_reject_invalid_values()
+{
+    w::RecordingOptions ten_options{};
+    ten_options.tune.frequency_hz = 473142857U;
+    ten_options.tune.timeout_ms = 1000U;
+    ten_options.tune.pids.present = true;
+    ten_options.tune.pids.value.count = 10U;
+    for (std::size_t index = 0U; index < 10U; ++index)
+        ten_options.tune.pids.value.items[index] = static_cast<std::uint16_t>(index);
+    FakeTransport ten(Fault::none, true);
+    const auto ten_result = w::begin_recording(
+        ten, ten_options, dtv::userland::Timeout{100U});
+    CHECK(ten_result && ten.request_count() == 6U);
+    CHECK(ten.tune_pid_count() == 10U && ten.tune_pid_first() == 0U &&
+          ten.tune_pid_last() == 9U);
+
+    w::RecordingOptions max_options{};
+    max_options.tune.frequency_hz = 473142857U;
+    max_options.tune.timeout_ms = 1000U;
+    max_options.tune.pids.present = true;
+    max_options.tune.pids.value.count = w::kMaxPids;
+    for (std::size_t index = 0U; index < w::kMaxPids; ++index)
+        max_options.tune.pids.value.items[index] = static_cast<std::uint16_t>(index);
+    FakeTransport maximum(Fault::none, true);
+    const auto max_result = w::begin_recording(
+        maximum, max_options, dtv::userland::Timeout{100U});
+    CHECK(max_result && maximum.request_count() == 6U);
+    CHECK(maximum.tune_pid_count() == w::kMaxPids && maximum.tune_pid_first() == 0U &&
+          maximum.tune_pid_last() == 8191U);
+
+    max_options.tune.pids.value.items[1U] = max_options.tune.pids.value.items[0U];
+    FakeTransport invalid(Fault::none, true);
+    const auto invalid_result = w::begin_recording(
+        invalid, max_options, dtv::userland::Timeout{100U});
+    CHECK(!invalid_result && invalid_result.error == Error::INVALID_ARGUMENT);
+    CHECK(invalid.closed() && invalid.request_count() == 4U);
+    CHECK(invalid.request_opcode(3U) == w::kOpcodeAcquire);
+}
+
+void test_release_remote_error_is_preserved()
+{
+    w::RecordingOptions options{};
+    options.tune.frequency_hz = 473142857U;
+    options.tune.timeout_ms = 1000U;
+    FakeTransport remote(Fault::release_remote_error);
+    const auto begun = w::begin_recording(
+        remote, options, dtv::userland::Timeout{100U});
+    CHECK(begun);
+    w::RecordingSession session = begun.session;
+    const auto released = w::release_recording(
+        remote, session, dtv::userland::Timeout{100U});
+    CHECK(!released && released.error == Error::PROTOCOL_ERROR);
+    CHECK(released.remote_error_code == 999U);
+    CHECK(!released.response.released && released.response.error.present &&
+          released.response.error.value.code == 999U);
+    CHECK(remote.closed() && remote.request_count() == 7U && session.next_request_id == 8U);
+
+    FakeTransport wire_error(Fault::release_wire_error);
+    const auto wire_begun = w::begin_recording(
+        wire_error, options, dtv::userland::Timeout{100U});
+    CHECK(wire_begun);
+    w::RecordingSession wire_session = wire_begun.session;
+    const auto wire_result = w::release_recording(
+        wire_error, wire_session, dtv::userland::Timeout{100U});
+    CHECK(!wire_result && wire_result.error == Error::PROTOCOL_ERROR);
+    CHECK(wire_result.remote_error_code == 999U &&
+          wire_result.response.epoch == w::Uuid{});
+    CHECK(wire_error.closed() && wire_error.request_count() == 7U);
+
+    FakeTransport malformed(Fault::release_without_error);
+    const auto malformed_begun = w::begin_recording(
+        malformed, options, dtv::userland::Timeout{100U});
+    CHECK(malformed_begun);
+    w::RecordingSession malformed_session = malformed_begun.session;
+    const auto malformed_result = w::release_recording(
+        malformed, malformed_session, dtv::userland::Timeout{100U});
+    CHECK(!malformed_result && malformed_result.error == Error::PROTOCOL_ERROR);
+    CHECK(!malformed_result.response.released && !malformed_result.response.error.present);
+    CHECK(malformed.closed());
+
+    FakeTransport wrong_epoch(Fault::bad_release_epoch);
+    const auto epoch_begun = w::begin_recording(
+        wrong_epoch, options, dtv::userland::Timeout{100U});
+    CHECK(epoch_begun);
+    w::RecordingSession epoch_session = epoch_begun.session;
+    const auto epoch_result = w::release_recording(
+        wrong_epoch, epoch_session, dtv::userland::Timeout{100U});
+    CHECK(!epoch_result && epoch_result.error == Error::PROTOCOL_ERROR);
+    CHECK(epoch_result.response.epoch != epoch_session.epoch && wrong_epoch.closed());
 }
 
 void test_recording_validator_rejection_and_timeout_do_not_publish_session()
@@ -668,10 +796,42 @@ private:
     bool closed_ = false;
 };
 
+class TimedEofTransport final : public w::TimedClientTransport {
+public:
+    Result<void> write_all(ByteView, dtv::userland::Timeout) noexcept override
+    {
+        return Result<void>::success();
+    }
+    Result<std::size_t> read_some(MutableByteView, dtv::userland::Timeout) noexcept override
+    {
+        return Result<std::size_t>::success(0U);
+    }
+    std::uint64_t monotonic_ms() noexcept override { return 0U; }
+    void close() noexcept override { closed_ = true; }
+    bool closed() const noexcept { return closed_; }
+
+private:
+    bool closed_ = false;
+};
+
 struct StackProbe final {
     w::ClientTransport* transport;
     Error result = Error::INTERNAL;
     bool snapshot_present = false;
+};
+
+struct RecordingStackProbe final {
+    w::TimedClientTransport* transport;
+    const w::RecordingOptions* options;
+    Error result = Error::INTERNAL;
+    bool began = false;
+    bool stopped = false;
+    bool released = false;
+};
+
+struct TimedEofStackProbe final {
+    w::TimedClientTransport* transport;
+    Error result = Error::INTERNAL;
 };
 
 void* fetch_on_thread(void* value) noexcept
@@ -700,6 +860,69 @@ bool run_stack_probe(w::ClientTransport& transport, std::size_t stack_size,
     return probe.result == expected_error && probe.snapshot_present == expect_snapshot;
 }
 
+void* recording_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<RecordingStackProbe*>(value);
+    const auto begun = w::begin_recording(*probe.transport, *probe.options,
+                                          dtv::userland::Timeout{1000U});
+    probe.began = static_cast<bool>(begun);
+    if (!begun) {
+        probe.result = begun.error;
+        return nullptr;
+    }
+    w::RecordingSession session = begun.session;
+    const auto stopped = w::stop_recording(*probe.transport, session,
+                                           dtv::userland::Timeout{1000U});
+    probe.stopped = static_cast<bool>(stopped);
+    if (!stopped) {
+        probe.result = stopped.error;
+        return nullptr;
+    }
+    const auto released = w::release_recording(*probe.transport, session,
+                                               dtv::userland::Timeout{1000U});
+    probe.released = static_cast<bool>(released);
+    probe.result = released.error;
+    return nullptr;
+}
+
+void* timed_eof_on_thread(void* value) noexcept
+{
+    auto& probe = *static_cast<TimedEofStackProbe*>(value);
+    const auto result = w::fetch_status(*probe.transport, dtv::userland::Timeout{1000U});
+    probe.result = result.error;
+    return nullptr;
+}
+
+bool run_timed_eof_stack_probe(TimedEofStackProbe& probe, std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, timed_eof_on_thread,
+                                                   &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
+bool run_recording_stack_probe(RecordingStackProbe& probe, std::size_t stack_size)
+{
+    pthread_attr_t attributes;
+    if (pthread_attr_init(&attributes) != 0) return false;
+    const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
+    pthread_t thread{};
+    const int create_result = set_result == 0
+                                  ? pthread_create(&thread, &attributes, recording_on_thread,
+                                                   &probe)
+                                  : set_result;
+    pthread_attr_destroy(&attributes);
+    if (create_result != 0) return false;
+    return pthread_join(thread, nullptr) == 0;
+}
+
 void test_small_stack_probes()
 {
 #if defined(DTV_USERLAND_CONTROL_ADDRESS_SANITIZER)
@@ -722,6 +945,26 @@ void test_small_stack_probes()
         CHECK(!normal.closed());
         CHECK(normal.request_count() == 3U);
     }
+
+    std::unique_ptr<TimedEofTransport> timed_eof(new (std::nothrow) TimedEofTransport{});
+    CHECK(timed_eof != nullptr);
+    if (timed_eof) {
+        TimedEofStackProbe eof_probe{timed_eof.get()};
+        CHECK(run_timed_eof_stack_probe(eof_probe, 512U * 1024U));
+        CHECK(eof_probe.result == Error::DISCONNECTED && timed_eof->closed());
+    }
+
+    std::unique_ptr<FakeTransport> recording(new (std::nothrow) FakeTransport{});
+    CHECK(recording != nullptr);
+    if (recording) {
+        w::RecordingOptions options{};
+        options.tune.frequency_hz = 473142857U;
+        options.tune.timeout_ms = 1000U;
+        RecordingStackProbe probe{recording.get(), &options};
+        CHECK(run_recording_stack_probe(probe, 512U * 1024U));
+        CHECK(probe.result == Error::OK && probe.began && probe.stopped && probe.released);
+        CHECK(!recording->closed() && recording->request_count() == 8U);
+    }
 }
 #endif
 
@@ -734,6 +977,8 @@ int main()
     test_remote_error_code_is_preserved();
     test_timed_status_uses_one_deadline_and_preserves_old_transport();
     test_begin_recording_validator_and_two_budgets();
+    test_recording_pid_buffers_accept_limits_and_reject_invalid_values();
+    test_release_remote_error_is_preserved();
     test_recording_validator_rejection_and_timeout_do_not_publish_session();
     test_recording_remote_error_and_cleanup_timeouts_are_not_retried();
     test_timed_status_timeout_closes_without_retry();
