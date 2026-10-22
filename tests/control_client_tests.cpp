@@ -103,9 +103,14 @@ enum class Fault : std::uint8_t {
     wrong_status_epoch,
     noncanonical_status,
     remote_list_error,
+    remote_tune_error,
+    timeout_list,
+    timeout_start,
+    timeout_stop,
+    timeout_release,
 };
 
-class FakeTransport final : public w::ClientTransport {
+class FakeTransport final : public w::ClientTransport, public w::TimedClientTransport {
 public:
     explicit FakeTransport(Fault fault = Fault::none)
         : server_(make_server()), connection_(server_), fault_(fault)
@@ -171,12 +176,46 @@ public:
         return Result<std::size_t>::success(count);
     }
 
+    Result<void> write_all(ByteView bytes, dtv::userland::Timeout timeout) noexcept override
+    {
+        if (write_timeout_count_ < write_timeouts_.size())
+            write_timeouts_[write_timeout_count_++] = timeout.milliseconds;
+        return write_all(bytes);
+    }
+
+    Result<std::size_t> read_some(MutableByteView bytes,
+                                  dtv::userland::Timeout timeout) noexcept override
+    {
+        if (read_timeout_count_ < read_timeouts_.size())
+            read_timeouts_[read_timeout_count_++] = timeout.milliseconds;
+        if ((fault_ == Fault::timeout_list && request_count_ == 2U) ||
+            (fault_ == Fault::timeout_start && request_count_ == 6U) ||
+            (fault_ == Fault::timeout_stop && request_count_ == 7U) ||
+            (fault_ == Fault::timeout_release && request_count_ == 8U)) {
+            now_ms_ += timeout.milliseconds;
+            return Result<std::size_t>::failure(Error::TIMEOUT);
+        }
+        const auto read = read_some(bytes);
+        if (read && advance_per_read_ms_ != 0U) now_ms_ += advance_per_read_ms_;
+        return read;
+    }
+
+    std::uint64_t monotonic_ms() noexcept override { return now_ms_; }
+
     void close() noexcept override { closed_ = true; }
 
     bool closed() const noexcept { return closed_; }
     std::size_t request_count() const noexcept { return request_count_; }
     std::uint32_t request_id(std::size_t index) const noexcept { return request_ids_[index]; }
     std::uint16_t request_opcode(std::size_t index) const noexcept { return request_opcodes_[index]; }
+    std::uint32_t write_timeout(std::size_t index) const noexcept { return write_timeouts_[index]; }
+    std::uint32_t read_timeout(std::size_t index) const noexcept { return read_timeouts_[index]; }
+    std::size_t write_timeout_count() const noexcept { return write_timeout_count_; }
+    std::size_t read_timeout_count() const noexcept { return read_timeout_count_; }
+    void advance_per_read(std::uint32_t milliseconds) noexcept
+    {
+        advance_per_read_ms_ = milliseconds;
+    }
     const std::uint8_t* recorded_reply(std::size_t index) const noexcept
     {
         return recorded_replies_[index].data();
@@ -230,6 +269,77 @@ private:
             reply_size_ = encoded.value();
             return true;
         }
+        if (request.kind == w::ControlRequestKind::acquire) {
+            w::AcquireResponse response{};
+            response.epoch = server_.epoch;
+            response.lease_id = 77U;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_acquire_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::tune) {
+            if (fault_ == Fault::remote_tune_error) {
+                const auto encoded = w::encode_error_frame(
+                    request.opcode, request.request_id, server_.epoch, 999U, "tune",
+                    w::Scope{w::ScopeKind::receiver, request.tune.lease_id},
+                    MutableByteView{reply_.data(), reply_.size()});
+                if (!encoded) return false;
+                reply_size_ = encoded.value();
+                return true;
+            }
+            w::TuneResult response{};
+            response.epoch = server_.epoch;
+            response.tune_revision = 3U;
+            response.requested_hz = 473142857U;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_tune_result, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::start_stream) {
+            w::StartResponse response{};
+            response.epoch = server_.epoch;
+            response.stream_id = 99U;
+            response.attach_token[0] = 0x33U;
+            response.expires_after_ms = 1000U;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_start_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::stop_stream) {
+            w::StopResponse response{};
+            response.epoch = server_.epoch;
+            response.final.id = request.stop_stream.stream_id;
+            response.final.tune_revision = 3U;
+            response.quiesced = true;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_stop_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
+        if (request.kind == w::ControlRequestKind::release) {
+            w::ReleaseResponse response{};
+            response.epoch = server_.epoch;
+            response.lease_id = request.release.lease_id;
+            response.released = true;
+            response.quiesced = true;
+            const auto encoded = w::encode_record_frame(
+                w::Kind::response, request.opcode, request.request_id, response,
+                w::encode_release_response, MutableByteView{reply_.data(), reply_.size()});
+            if (!encoded) return false;
+            reply_size_ = encoded.value();
+            return true;
+        }
         return false;
     }
 
@@ -279,11 +389,17 @@ private:
     std::array<std::uint8_t, kFrameCapacity> scratch_{};
     std::size_t reply_size_ = 0U;
     std::size_t reply_offset_ = 0U;
-    std::array<std::uint32_t, 3U> request_ids_{};
-    std::array<std::uint16_t, 3U> request_opcodes_{};
+    std::array<std::uint32_t, 8U> request_ids_{};
+    std::array<std::uint16_t, 8U> request_opcodes_{};
+    std::array<std::uint32_t, 64U> write_timeouts_{};
+    std::array<std::uint32_t, 64U> read_timeouts_{};
     std::array<std::array<std::uint8_t, kFrameCapacity>, 3U> recorded_replies_{};
     std::array<std::size_t, 3U> recorded_sizes_{};
     std::size_t request_count_ = 0U;
+    std::size_t write_timeout_count_ = 0U;
+    std::size_t read_timeout_count_ = 0U;
+    std::uint32_t advance_per_read_ms_ = 0U;
+    std::uint64_t now_ms_ = 0U;
     bool closed_ = false;
 };
 
@@ -329,6 +445,163 @@ void test_remote_error_code_is_preserved()
     CHECK(result.remote_error_code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
     CHECK(transport.closed());
     CHECK(result.snapshot.list.epoch == w::Uuid{});
+}
+
+Error accept_status_epoch(const w::StatusSnapshot& snapshot, void* context) noexcept
+{
+    const auto* expected = static_cast<const w::Uuid*>(context);
+    return expected != nullptr && snapshot.status.context.epoch == *expected
+               ? Error::OK
+               : Error::NOT_FOUND;
+}
+
+Error reject_status(const w::StatusSnapshot&, void*) noexcept
+{
+    return Error::NOT_FOUND;
+}
+
+void test_timed_status_uses_one_deadline_and_preserves_old_transport()
+{
+    FakeTransport transport;
+    transport.advance_per_read(1U);
+    const w::StatusFetchResult result = w::fetch_status(transport, dtv::userland::Timeout{1000U});
+    CHECK(result);
+    CHECK(!transport.closed());
+    CHECK(transport.request_count() == 3U);
+    CHECK(transport.write_timeout(0U) == 1000U);
+    CHECK(transport.read_timeout(0U) == 1000U);
+    CHECK(transport.read_timeout(1U) < 1000U);
+    CHECK(transport.write_timeout(1U) < 1000U);
+
+    FakeTransport zero_timeout;
+    const w::StatusFetchResult invalid =
+        w::fetch_status(zero_timeout, dtv::userland::Timeout{0U});
+    CHECK(!invalid && invalid.error == Error::INVALID_ARGUMENT);
+    CHECK(zero_timeout.closed() && zero_timeout.request_count() == 0U);
+}
+
+void test_begin_recording_validator_and_two_budgets()
+{
+    FakeTransport transport;
+    transport.advance_per_read(1U);
+    w::RecordingOptions options{};
+    options.receiver_id = 513U;
+    options.tune.frequency_hz = 473142857U;
+    options.tune.timeout_ms = 1000U;
+    w::Uuid expected_epoch{};
+    for (std::size_t index = 0U; index < expected_epoch.size(); ++index)
+        expected_epoch[index] = static_cast<std::uint8_t>(0xa0U + index);
+    const auto result = w::begin_recording(
+        transport, options, dtv::userland::Timeout{1000U},
+        accept_status_epoch, &expected_epoch);
+    CHECK(result);
+    CHECK(!transport.closed());
+    CHECK(result.session.epoch == expected_epoch);
+    CHECK(result.session.lease_id == 77U && result.session.tune_revision == 3U);
+    CHECK(result.session.tune_result.requested_hz == options.tune.frequency_hz);
+    CHECK(result.session.stream_id == 99U && result.session.attach_token[0] == 0x33U);
+    CHECK(result.session.expires_after_ms == 1000U && result.session.next_request_id == 7U);
+    CHECK(transport.request_count() == 6U);
+    CHECK(transport.request_id(0U) == 1U && transport.request_id(1U) == 2U &&
+          transport.request_id(2U) == 3U && transport.request_id(3U) == 4U &&
+          transport.request_id(4U) == 5U && transport.request_id(5U) == 6U);
+    CHECK(transport.request_opcode(0U) == w::kOpcodeHello &&
+          transport.request_opcode(1U) == w::kOpcodeList &&
+          transport.request_opcode(2U) == w::kOpcodeStatus &&
+          transport.request_opcode(3U) == w::kOpcodeAcquire &&
+          transport.request_opcode(4U) == w::kOpcodeTune &&
+          transport.request_opcode(5U) == w::kOpcodeStartStream);
+    CHECK(transport.write_timeout(0U) == 1000U);
+    CHECK(transport.write_timeout(3U) == 1000U);
+
+    w::RecordingSession session = result.session;
+    const auto stopped = w::stop_recording(
+        transport, session, dtv::userland::Timeout{100U});
+    CHECK(stopped && stopped.response.final.id == result.session.stream_id);
+    CHECK(session.next_request_id == 8U);
+    const auto released = w::release_recording(
+        transport, session, dtv::userland::Timeout{100U});
+    CHECK(released && released.response.released);
+    CHECK(session.next_request_id == 9U && !transport.closed());
+    CHECK(transport.request_count() == 8U);
+    CHECK(transport.request_id(6U) == 7U && transport.request_id(7U) == 8U);
+    CHECK(transport.request_opcode(6U) == w::kOpcodeStopStream &&
+          transport.request_opcode(7U) == w::kOpcodeRelease);
+}
+
+void test_recording_validator_rejection_and_timeout_do_not_publish_session()
+{
+    FakeTransport rejected;
+    w::RecordingOptions options{};
+    const auto rejected_result = w::begin_recording(
+        rejected, options, dtv::userland::Timeout{100U}, reject_status, nullptr);
+    CHECK(!rejected_result && rejected_result.error == Error::NOT_FOUND);
+    CHECK(rejected.closed() && rejected.request_count() == 3U);
+    CHECK(rejected_result.session.epoch == w::Uuid{});
+
+    FakeTransport timed_out(Fault::timeout_start);
+    options.tune.frequency_hz = 473142857U;
+    options.tune.timeout_ms = 1000U;
+    const auto timeout_result = w::begin_recording(
+        timed_out, options, dtv::userland::Timeout{100U});
+    CHECK(!timeout_result && timeout_result.error == Error::TIMEOUT);
+    CHECK(timed_out.closed() && timed_out.request_count() == 6U);
+    CHECK(timeout_result.session.epoch == w::Uuid{});
+}
+
+void test_recording_remote_error_and_cleanup_timeouts_are_not_retried()
+{
+    w::RecordingOptions options{};
+    options.tune.frequency_hz = 473142857U;
+    options.tune.timeout_ms = 1000U;
+    FakeTransport remote(Fault::remote_tune_error);
+    const auto remote_result = w::begin_recording(
+        remote, options, dtv::userland::Timeout{100U});
+    CHECK(!remote_result && remote_result.error == Error::PROTOCOL_ERROR);
+    CHECK(remote_result.remote_error_code == 999U);
+    CHECK(remote.closed() && remote.request_count() == 5U);
+    CHECK(remote.request_id(4U) == 5U && remote.request_opcode(4U) == w::kOpcodeTune);
+    CHECK(remote_result.session.epoch == w::Uuid{});
+
+    FakeTransport stop_timeout(Fault::timeout_stop);
+    const auto begun = w::begin_recording(
+        stop_timeout, options, dtv::userland::Timeout{100U});
+    CHECK(begun);
+    w::RecordingSession stop_session = begun.session;
+    const auto stopped = w::stop_recording(
+        stop_timeout, stop_session, dtv::userland::Timeout{100U});
+    CHECK(!stopped && stopped.error == Error::TIMEOUT);
+    CHECK(stop_timeout.closed() && stop_timeout.request_count() == 7U);
+    CHECK(stop_session.next_request_id == 8U);
+
+    FakeTransport release_timeout(Fault::timeout_release);
+    const auto second_begun = w::begin_recording(
+        release_timeout, options, dtv::userland::Timeout{100U});
+    CHECK(second_begun);
+    w::RecordingSession release_session = second_begun.session;
+    const auto second_stopped = w::stop_recording(
+        release_timeout, release_session, dtv::userland::Timeout{100U});
+    CHECK(second_stopped);
+    const auto released = w::release_recording(
+        release_timeout, release_session, dtv::userland::Timeout{100U});
+    CHECK(!released && released.error == Error::TIMEOUT);
+    CHECK(release_timeout.closed() && release_timeout.request_count() == 8U);
+    CHECK(release_session.next_request_id == 9U);
+}
+
+void test_timed_status_timeout_closes_without_retry()
+{
+    FakeTransport transport(Fault::timeout_list);
+    const auto result = w::fetch_status(transport, dtv::userland::Timeout{100U});
+    CHECK(!result && result.error == Error::TIMEOUT);
+    CHECK(transport.closed() && transport.request_count() == 2U);
+    CHECK(result.snapshot.list.epoch == w::Uuid{});
+
+    FakeTransport trickled;
+    trickled.advance_per_read(50U);
+    const auto expired = w::fetch_status(trickled, dtv::userland::Timeout{100U});
+    CHECK(!expired && expired.error == Error::TIMEOUT);
+    CHECK(trickled.closed() && trickled.request_count() == 1U);
 }
 
 #if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
@@ -459,6 +732,11 @@ int main()
     test_successful_read_only_exchange();
     test_invalid_responses_close_without_publishing_snapshot();
     test_remote_error_code_is_preserved();
+    test_timed_status_uses_one_deadline_and_preserves_old_transport();
+    test_begin_recording_validator_and_two_budgets();
+    test_recording_validator_rejection_and_timeout_do_not_publish_session();
+    test_recording_remote_error_and_cleanup_timeouts_are_not_retried();
+    test_timed_status_timeout_closes_without_retry();
 #if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
     test_small_stack_probes();
 #endif

@@ -5,6 +5,7 @@
 
 #include <array>
 #include <cstring>
+#include <limits>
 #include <memory>
 #include <new>
 #include <utility>
@@ -378,6 +379,353 @@ StatusFetchResult fetch_status(ClientTransport& transport) noexcept
 
     result.snapshot.list = list.value();
     result.snapshot.status = status.value();
+    result.error = Error::OK;
+    return result;
+}
+
+namespace {
+
+class TimedTransportAdapter final : public ClientTransport {
+public:
+    explicit TimedTransportAdapter(TimedClientTransport& transport) noexcept
+        : transport_(transport) {}
+
+    bool set_deadline(Timeout timeout) noexcept
+    {
+        if (timeout.milliseconds == 0U) return false;
+        const std::uint64_t now = transport_.monotonic_ms();
+        if (now > std::numeric_limits<std::uint64_t>::max() - timeout.milliseconds)
+            return false;
+        deadline_ = now + timeout.milliseconds;
+        valid_ = true;
+        return true;
+    }
+
+    Result<void> write_all(ByteView bytes) noexcept override
+    {
+        const std::uint32_t left = remaining_ms();
+        if (left == 0U) return Result<void>::failure(Error::TIMEOUT);
+        const auto sent = transport_.write_all(bytes, Timeout{left});
+        if (sent && remaining_ms() == 0U) return Result<void>::failure(Error::TIMEOUT);
+        return sent;
+    }
+
+    Result<std::size_t> read_some(MutableByteView bytes) noexcept override
+    {
+        const std::uint32_t left = remaining_ms();
+        if (left == 0U) return Result<std::size_t>::failure(Error::TIMEOUT);
+        const auto read = transport_.read_some(bytes, Timeout{left});
+        if (read && remaining_ms() == 0U) return Result<std::size_t>::failure(Error::TIMEOUT);
+        return read;
+    }
+
+    void close() noexcept override { transport_.close(); }
+
+private:
+    std::uint32_t remaining_ms() noexcept
+    {
+        if (!valid_) return 0U;
+        const std::uint64_t now = transport_.monotonic_ms();
+        if (now >= deadline_) return 0U;
+        const std::uint64_t remaining = deadline_ - now;
+        return remaining > std::numeric_limits<std::uint32_t>::max()
+                   ? std::numeric_limits<std::uint32_t>::max()
+                   : static_cast<std::uint32_t>(remaining);
+    }
+
+    TimedClientTransport& transport_;
+    std::uint64_t deadline_ = 0U;
+    bool valid_ = false;
+};
+
+bool nonzero_uuid(const Uuid& value) noexcept
+{
+    for (const std::uint8_t byte : value) {
+        if (byte != 0U) return true;
+    }
+    return false;
+}
+
+template <typename Request>
+Result<std::size_t> encode_body(const Request& value, MutableByteView output,
+                                Result<std::size_t> (*encode)(const Request&,
+                                                               MutableByteView) noexcept) noexcept
+{
+    return encode(value, output);
+}
+
+}  // namespace
+
+StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout) noexcept
+{
+    TimedTransportAdapter adapter(transport);
+    if (timeout.milliseconds == 0U) {
+        StatusFetchResult result{};
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    if (!adapter.set_deadline(timeout)) {
+        StatusFetchResult result{};
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    return fetch_status(adapter);
+}
+
+RecordingControlResult begin_recording(TimedClientTransport& transport,
+                                       const RecordingOptions& options,
+                                       Timeout timeout,
+                                       RecordingStatusValidator validator,
+                                       void* validator_context) noexcept
+{
+    RecordingControlResult result{};
+    if (timeout.milliseconds == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    const StatusFetchResult status = fetch_status(adapter);
+    if (!status) {
+        result.error = status.error;
+        result.remote_error_code = status.remote_error_code;
+        return result;
+    }
+    if (validator != nullptr) {
+        const Error validation = validator(status.snapshot, validator_context);
+        if (validation != Error::OK) {
+            result.error = validation;
+            transport.close();
+            return result;
+        }
+    }
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    RecordingSession session{};
+    session.epoch = status.snapshot.status.context.epoch;
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto fail = [&transport, &result](Error error) noexcept {
+        result.error = error;
+        transport.close();
+        return result;
+    };
+
+    AcquireRequest acquire{};
+    acquire.epoch = session.epoch;
+    acquire.receiver_id = options.receiver_id;
+    auto size = encode_body(acquire,
+                            MutableByteView{workspace->payload.data(),
+                                            workspace->payload.size()},
+                            encode_acquire_request);
+    if (!size) return fail(size.error());
+    auto exchanged = roundtrip(adapter, kOpcodeAcquire, 4U,
+                               ByteView{workspace->payload.data(), size.value()},
+                               remote_code, *workspace, reply, &session.epoch);
+    if (!exchanged) {
+        result.remote_error_code = remote_code;
+        return fail(exchanged.error());
+    }
+    const auto acquired = decode_acquire_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!acquired) return fail(acquired.error());
+    if (acquired.value().epoch != session.epoch || acquired.value().lease_id == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.lease_id = acquired.value().lease_id;
+
+    TuneRequest tune = options.tune;
+    tune.epoch = session.epoch;
+    tune.lease_id = session.lease_id;
+    size = encode_body(tune,
+                       MutableByteView{workspace->payload.data(), workspace->payload.size()},
+                       encode_tune_request);
+    if (!size) return fail(size.error());
+    remote_code = 0U;
+    exchanged = roundtrip(adapter, kOpcodeTune, 5U,
+                          ByteView{workspace->payload.data(), size.value()},
+                          remote_code, *workspace, reply, &session.epoch);
+    if (!exchanged) {
+        result.remote_error_code = remote_code;
+        return fail(exchanged.error());
+    }
+    const auto tuned = decode_tune_result(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!tuned) return fail(tuned.error());
+    if (tuned.value().epoch != session.epoch || tuned.value().tune_revision == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.tune_result = tuned.value();
+    session.tune_revision = tuned.value().tune_revision;
+
+    StartRequest start{};
+    start.epoch = session.epoch;
+    start.lease_id = session.lease_id;
+    start.tune_revision = session.tune_revision;
+    size = encode_body(start,
+                       MutableByteView{workspace->payload.data(), workspace->payload.size()},
+                       encode_start_request);
+    if (!size) return fail(size.error());
+    remote_code = 0U;
+    exchanged = roundtrip(adapter, kOpcodeStartStream, 6U,
+                          ByteView{workspace->payload.data(), size.value()},
+                          remote_code, *workspace, reply, &session.epoch);
+    if (!exchanged) {
+        result.remote_error_code = remote_code;
+        return fail(exchanged.error());
+    }
+    const auto started = decode_start_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!started) return fail(started.error());
+    if (started.value().epoch != session.epoch || started.value().stream_id == 0U ||
+        !nonzero_uuid(started.value().attach_token) || started.value().expires_after_ms == 0U)
+        return fail(Error::PROTOCOL_ERROR);
+    session.stream_id = started.value().stream_id;
+    session.attach_token = started.value().attach_token;
+    session.expires_after_ms = started.value().expires_after_ms;
+    result.session = session;
+    result.error = Error::OK;
+    return result;
+}
+
+StopControlResult stop_recording(TimedClientTransport& transport,
+                                 RecordingSession& session,
+                                 Timeout timeout) noexcept
+{
+    StopControlResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    StopRequest request{};
+    request.epoch = session.epoch;
+    request.lease_id = session.lease_id;
+    request.stream_id = session.stream_id;
+    const auto size = encode_body(request,
+                                  MutableByteView{workspace->payload.data(),
+                                                  workspace->payload.size()},
+                                  encode_stop_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto exchanged = roundtrip(adapter, kOpcodeStopStream, session.next_request_id,
+                                     ByteView{workspace->payload.data(), size.value()},
+                                     remote_code, *workspace, reply, &session.epoch);
+    ++session.next_request_id;
+    if (!exchanged) {
+        result.remote_error_code = remote_code;
+        result.error = exchanged.error();
+        transport.close();
+        return result;
+    }
+    const auto stopped = decode_stop_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!stopped) {
+        result.error = stopped.error();
+        transport.close();
+        return result;
+    }
+    if (stopped.value().epoch != session.epoch) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = stopped.value();
+    result.error = Error::OK;
+    return result;
+}
+
+ReleaseControlResult release_recording(TimedClientTransport& transport,
+                                       RecordingSession& session,
+                                       Timeout timeout) noexcept
+{
+    ReleaseControlResult result{};
+    if (timeout.milliseconds == 0U || session.next_request_id == 0U) {
+        result.error = Error::INVALID_ARGUMENT;
+        transport.close();
+        return result;
+    }
+    TimedTransportAdapter adapter(transport);
+    if (!adapter.set_deadline(timeout)) {
+        result.error = Error::TIMEOUT;
+        transport.close();
+        return result;
+    }
+    std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
+    if (!workspace) {
+        result.error = Error::RESOURCE_LIMIT;
+        transport.close();
+        return result;
+    }
+    ReleaseRequest request{};
+    request.epoch = session.epoch;
+    request.lease_id = session.lease_id;
+    const auto size = encode_body(request,
+                                  MutableByteView{workspace->payload.data(),
+                                                  workspace->payload.size()},
+                                  encode_release_request);
+    if (!size) {
+        result.error = size.error();
+        transport.close();
+        return result;
+    }
+    RawReply reply{};
+    std::uint32_t remote_code = 0U;
+    const auto exchanged = roundtrip(adapter, kOpcodeRelease, session.next_request_id,
+                                     ByteView{workspace->payload.data(), size.value()},
+                                     remote_code, *workspace, reply, &session.epoch);
+    ++session.next_request_id;
+    if (!exchanged) {
+        result.remote_error_code = remote_code;
+        result.error = exchanged.error();
+        transport.close();
+        return result;
+    }
+    const auto released = decode_release_response(
+        ByteView{workspace->payload.data(), reply.length});
+    if (!released) {
+        result.error = released.error();
+        transport.close();
+        return result;
+    }
+    if (released.value().epoch != session.epoch || !released.value().released) {
+        result.error = Error::PROTOCOL_ERROR;
+        transport.close();
+        return result;
+    }
+    result.response = released.value();
     result.error = Error::OK;
     return result;
 }

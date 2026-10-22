@@ -13,3 +13,15 @@ stack使用量は呼び出し側のthreadにも依存する。Linux x86_64のCla
 失敗時はdefault snapshotとlocal errorを返し、remote error responseをdecodeできた場合はraw codeも返す。その際 `close()` を呼ぶ。未知のremote codeはraw codeを保持したまま `PROTOCOL_ERROR` に対応づける。成功時はtransportを開いたまま呼び出し側へ返す。requestの自動再試行はしない。このAPIはtimeout値やtimeout policyを定めず、blockingとcancelの挙動は注入transportの責任とする。
 
 clientはACQUIRE/TUNE/START/STOP/RELEASE、service呼び出し、ATTACH、TS_DATA、receiver操作、capture、USB access、製品接続を行わない。UDTVは同一release内の内部契約であり、releaseをまたぐ安定wire APIではない。
+
+## 期限付きstatus/recording client
+
+期限付き操作には別の `TimedClientTransport` を注入する。これは呼び出し側が所有し、`write_all`、`read_some`、`monotonic_ms`、`close` を実装する。既存の `ClientTransport` の純virtualと `fetch_status(ClientTransport&)` のsignature・blocking挙動は変わらない。Timed clientは同じtransport objectを借り、socketやfile descriptorを生成・所有しない。各read/write実装は渡された有限timeoutを守り、呼び出しがtimeout後もblockし続けないことが前提になる。
+
+`fetch_status(TimedClientTransport&, Timeout)` は呼び出し開始時に単調時計のabsolute deadlineを1つ作り、HELLO/LIST/STATUSとfragment readを通じて同じ残時間を渡す。部分進捗でdeadlineは延びない。期限値0は `INVALID_ARGUMENT`、deadline算出が時計のuint64範囲を越える場合は `TIMEOUT` とし、どちらもtransportを閉じてdefault snapshotを返す。I/O timeout、EOF、decode/validation失敗もtransportを閉じ、snapshotを公開しない。成功時はsnapshotを返し、接続はcallerへ開いたまま返す。
+
+`begin_recording` はその `fetch_status` を最初に使い、必要なら `RecordingStatusValidator` をACQUIREより前に呼ぶ。validatorの拒否はdefault sessionで返り、transportを閉じる。status段のdeadlineが終わった後、ACQUIRE/TUNE/START段には同じ長さの新しいdeadlineを作る。この2 budgetの動作は旧recording helperとの互換実装であり、begin全体を単一budgetにはしない。optionの数値default/range、`TuneRequest.timeout_ms` への製品側対応、OS socket timeoutとの換算は定義しない。
+
+beginは1つの上限付きworkspaceを例外なしのheap確保で使い、既存status実装のreply decoder/validationを呼び出す。ACQUIRE/TUNE/STARTの失敗はdefault sessionとremote raw error codeを返し、transportを閉じる。開始成功後にのみepoch、lease、tune result/revision、stream ID、attach token、expiry、次request IDを含むcaller-owned sessionを返す。attach tokenは別data connectionのATTACHにだけ使い、clientはdata socketやATTACHを行わない。START成功はarmed受理を示すだけで、TS activeを示さない。
+
+`stop_recording` はsessionのstreamへ1回のtyped STOPを送り、leaseを解放しない。`release_recording` はsessionのleaseへ別のtyped RELEASEを1回送る。両APIは失敗・応答不明のrequestを再送せず、成功時はtransportを開いたまま返す。応答が届く前にdaemonがSTART/STOP/RELEASEを適用した可能性はclientから判定できないため、timeout後に物理cleanup完了や `quiesced=true` を推定しない。disconnect後の回収はdaemon owner契約の責任である。
