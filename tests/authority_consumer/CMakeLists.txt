@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(dtv_userland_authority_consumer LANGUAGES CXX)
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS authority)
+add_executable(authority_consumer main.cpp)
+target_compile_features(authority_consumer PRIVATE cxx_std_17)
+target_link_libraries(authority_consumer PRIVATE dtv::authority)
