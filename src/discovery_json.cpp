@@ -281,7 +281,8 @@ void write(const DiscoveryScan& value, Writer& out) noexcept
         if (enclosure.serial.present) out.string(enclosure.serial.value); else out.text("null");
         out.text(",\"serial_unique\":");
         if (!enclosure.serial.present) out.text("null");
-        else if (serial_duplicate(value, i)) out.text("false");
+        else if (enclosure.status == DiscoveryEnclosureStatus::duplicate ||
+                 serial_duplicate(value, i)) out.text("false");
         else out.text(value.complete ? "true" : "null");
         out.text(",\"status\":\""); out.text(enclosure_status_name(enclosure.status)); out.put('"');
         out.text(",\"lnb_15v_supported\":");
