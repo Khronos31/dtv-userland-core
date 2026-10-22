@@ -67,6 +67,31 @@ int main()
         return 1;
 
     timed.closed = false;
+    const auto card = dtv::userland::wire::begin_card(
+        timed, dtv::userland::wire::CardClientOptions{}, dtv::userland::Timeout{100U});
+    if (card || card.error != dtv::userland::Error::DISCONNECTED || !timed.closed)
+        return 1;
+
+    dtv::userland::wire::CardClientSession card_session{};
+    card_session.epoch[0] = 1U;
+    card_session.reader_id = 1U;
+    card_session.card_handle = 1U;
+    card_session.bound_generation = 1U;
+    timed.closed = false;
+    const auto card_status = dtv::userland::wire::card_status(
+        timed, card_session, dtv::userland::Timeout{100U});
+    if (card_status || card_status.error != dtv::userland::Error::DISCONNECTED || !timed.closed)
+        return 1;
+
+    timed.closed = false;
+    const auto card_disconnected = dtv::userland::wire::card_disconnect(
+        timed, card_session, dtv::userland::wire::Disposition::leave,
+        dtv::userland::Timeout{100U});
+    if (card_disconnected || card_disconnected.error != dtv::userland::Error::DISCONNECTED ||
+        !timed.closed)
+        return 1;
+
+    timed.closed = false;
     const auto recording = dtv::userland::wire::begin_recording(
         timed, dtv::userland::wire::RecordingOptions{}, dtv::userland::Timeout{100U});
     if (recording || recording.error != dtv::userland::Error::DISCONNECTED || !timed.closed)

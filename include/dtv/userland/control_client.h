@@ -69,6 +69,66 @@ struct LnbPowerResult final {
 LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
                              Timeout timeout) noexcept;
 
+struct CardClientOptions final {
+    std::uint16_t reader_id = 0U;
+    Share share = Share::shared;
+    // UDTV 1.0 currently accepts only the T=1 bit.
+    std::uint8_t preferred_protocols = 1U;
+    // Optional constraints checked against the fetched status snapshot. Empty
+    // views keep the original behavior; positive-size views must stay valid
+    // for the call.
+    ByteView expected_product{};
+    ByteView expected_instance{};
+};
+
+struct CardClientSession final {
+    Uuid epoch{};
+    std::uint16_t reader_id = 0U;
+    std::uint64_t card_handle = 0U;
+    std::uint64_t bound_generation = 0U;
+    Optional<CardProtocol> protocol;
+    std::uint32_t next_request_id = 6U;
+};
+
+struct CardOpenResult final {
+    CardClientSession session;
+    CardStatusResponse reader_status;
+    CardSessionResult connection;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+// Requires CARD_SERVICE, verifies the reader in the same connection's status
+// snapshot, then sends CARD_STATUS and CARD_CONNECT. The connection stays open
+// on success; failures close it and are never retried.
+CardOpenResult begin_card(TimedClientTransport& transport,
+                          const CardClientOptions& options,
+                          Timeout timeout) noexcept;
+
+struct CardStatusResult final {
+    CardStatusResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+CardStatusResult card_status(TimedClientTransport& transport,
+                             CardClientSession& session,
+                             Timeout timeout) noexcept;
+
+struct CardDisconnectResult final {
+    CardDisconnectResponse response;
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+CardDisconnectResult card_disconnect(TimedClientTransport& transport,
+                                     CardClientSession& session,
+                                     Disposition disposition,
+                                     Timeout timeout) noexcept;
+
 struct RecordingOptions final {
     std::uint16_t receiver_id = 0U;
     TuneRequest tune{};
