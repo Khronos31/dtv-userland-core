@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(dtv_userland_status_projection_consumer LANGUAGES CXX)
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS status_projection)
+add_executable(status_projection_consumer main.cpp)
+target_compile_features(status_projection_consumer PRIVATE cxx_std_17)
+target_link_libraries(status_projection_consumer PRIVATE dtv::status_projection)

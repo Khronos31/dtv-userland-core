@@ -16,6 +16,7 @@ option(DTV_USERLAND_BUILD_RECEIVER "Build the internal receiver lifecycle engine
 option(DTV_USERLAND_BUILD_CARD "Build the internal card ownership engine" OFF)
 option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OFF)
 option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF)
+option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -140,6 +141,41 @@ if(DTV_USERLAND_BUILD_RECEIVER)
         target_compile_options(dtv_userland_receiver PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+endif()
+if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
+    if(NOT DTV_USERLAND_BUILD_CONTROL OR NOT DTV_USERLAND_BUILD_RECEIVER)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_STATUS_PROJECTION requires DTV_USERLAND_BUILD_CONTROL and DTV_USERLAND_BUILD_RECEIVER")
+    endif()
+    add_library(dtv_userland_status_projection STATIC src/status_projection.cpp)
+    add_library(dtv::status_projection ALIAS dtv_userland_status_projection)
+    set_target_properties(dtv_userland_status_projection PROPERTIES
+        EXPORT_NAME status_projection
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_status_projection PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_status_projection PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_status_projection PUBLIC dtv::control dtv::receiver)
+    if(MSVC)
+        target_compile_options(dtv_userland_status_projection PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_status_projection PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
+    install(TARGETS dtv_userland_status_projection
+        EXPORT dtv_userland_status_projectionTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_status_projectionTargets
+        FILE dtv_userland_status_projectionTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES include/dtv/userland/detail/status_projection.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
 endif()
 
 if(DTV_USERLAND_BUILD_CAPTURE)
@@ -352,6 +388,12 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(receiver_hz_tests PRIVATE dtv::receiver)
         add_test(NAME receiver_hz_tests COMMAND receiver_hz_tests)
         set_tests_properties(receiver_hz_tests PROPERTIES TIMEOUT 120)
+    endif()
+
+    if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
+        add_executable(status_projection_tests tests/status_projection_tests.cpp)
+        target_link_libraries(status_projection_tests PRIVATE dtv::status_projection)
+        add_test(NAME status_projection_tests COMMAND status_projection_tests)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)

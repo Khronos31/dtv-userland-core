@@ -145,6 +145,8 @@ struct ReceiverEngineStatus final {
     std::size_t receiver_count = 0U;
     std::array<ReceiverId, kReceiverEngineCapacity> receivers{};
     std::array<ReceiverState, kReceiverEngineCapacity> states{};
+    // Kept separate because ERROR does not imply that the lease was released.
+    std::array<bool, kReceiverEngineCapacity> leased{};
     // Token-free strict operation and tune metadata.  It is internal engine
     // state, not a completed public v1 record.
     std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
