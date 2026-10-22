@@ -23,6 +23,12 @@ public:
     {
         return Result<void>::success();
     }
+    Result<TuneProgramming> program_hz(ReceiverId, ReceiverSystem,
+                                      std::uint64_t requested_hz,
+                                      std::uint32_t) noexcept override
+    {
+        return Result<TuneProgramming>::success(TuneProgramming{requested_hz});
+    }
     Result<bool> is_locked(ReceiverId, ReceiverSystem) noexcept override
     {
         return Result<bool>::success(true);
@@ -83,10 +89,23 @@ int main()
     Clock clock;
     const std::array<ReceiverId, 1> receivers{513U};
     ReceiverEngine engine(backend, receivers.data(), receivers.size(), tokens, clock);
+    const std::array<ReceiverCapability, 1> capabilities{{
+        ReceiverCapability{513U, true, false, true}}};
+    if (!engine.configure_strict_capabilities(capabilities.data(), capabilities.size()))
+        return 1;
     const auto lease = engine.acquire(1U, 513U);
     TuneRequest request{};
     request.lease_id = lease ? lease.value().lease_id : 0U;
     request.frequency_khz = 557000U;
     request.timeout_ms = 1000U;
-    return lease && engine.tune(1U, request) && engine.release(1U, request.lease_id) ? 0 : 1;
+    if (!lease || !engine.tune(1U, request)) return 1;
+    HzTuneRequest hz_request{};
+    hz_request.lease_id = request.lease_id;
+    hz_request.requested_hz = 557000123U;
+    hz_request.timeout_ms = 1000U;
+    const auto ticket = engine.try_admit_tune(1U, hz_request, clock.monotonic_ms());
+    return ticket && engine.execute_admitted_tune(ticket.value()) &&
+                   engine.release(1U, request.lease_id)
+        ? 0
+        : 1;
 }

@@ -30,7 +30,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `status_json_tests`、`status_json_consumer`（`dtv::json`）
 - `discovery_json_tests`、`discovery_json_consumer`（`dtv::json`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
-- `receiver_engine_tests`、`receiver_r2_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
+- `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
 
 ### ビルド・テスト手順
 
@@ -127,8 +127,7 @@ HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベン
 
 ### 受信機ライフサイクル互換エンジン (`dtv::receiver`)
 
-受信機のリース、選局、ストリーム接続を扱う内部互換エンジンを `dtv/userland/detail/receiver_engine.h` で提供する（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）。各製品ファサードが単一の実装を共有できるよう、PX4 TunerService のライフサイクルを中立な型へ移行したものであり、採択された v1 受信機契約ではなく、安定した公開 API でもない。
-従来の直接選局パスは受信機と電源の準備完了後から計時を開始し、エンドツーエンドのデッドラインを持たない。一方、厳格モード（`configure_strict_capabilities`）では受付時からのエンドツーエンドの予算を強制する。周波数単位は kHz、受信機 ID は 8 スロットテーブルから独立した u16 識別子である。受信機セットはエンジン構築時に固定される。サポート対象のコンシューマ（PX4 Q3U4、W3U4、MLT、単一受信機バックエンド、およびプロファイル選択後の ASICEN）はサービスの存続期間中に固定の受信機数を持つ。後から出現または消失する動的受信機は本インクリメントではサポートしない。本ターゲットのみスレッド（Threads）にリンクする。
+従来の直接選局パスは受信機と電源の準備完了後から計時を開始し、エンドツーエンドのデッドラインを持たない。一方、厳格モード（`configure_strict_capabilities`）では受付時からのエンドツーエンドの予算を強制する。従来の選局入口はkHz callbackを維持し、厳格Hz入口はnative Hzを宣言したbackend callbackだけを使い、kHzへの共通fallbackを行わない。Hz入口とbackendのprogrammed値は製品には接続されていない。受信機 ID は8スロットテーブルから独立したu16識別子である。受信機セットはエンジン構築時に固定される。サポート対象のコンシューマ（PX4 Q3U4、W3U4、MLT、単一受信機バックエンド、およびプロファイル選択後の ASICEN）はサービスの存続期間中に固定の受信機数を持つ。後から出現または消失する動的受信機は本インクリメントではサポートしない。本ターゲットのみスレッド（Threads）にリンクする。
 
 ### カード排他制御互換エンジン (`dtv::card`)
 
