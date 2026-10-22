@@ -139,10 +139,13 @@ enum class Fault : std::uint8_t {
     card_reset_bad_handle,
     card_reset_bad_generation,
     card_reset_eof,
+    truncated_card_reset,
+    card_reset_unusable,
     timeout_card_reset,
     card_transmit_remote_error,
     card_transmit_bad_key,
     card_transmit_eof,
+    truncated_card_transmit,
     timeout_card_transmit,
     card_transmit_maximum,
     truncated_card_connect,
@@ -478,16 +481,18 @@ private:
             response.card_handle = request.card_reset.key.card_handle;
             response.bound_generation = 10U;
             response.current_generation = 10U;
-            response.present = true;
-            response.initialized = true;
-            response.usable = true;
-            response.protocol.present = true;
-            response.protocol.value = w::CardProtocol::t1;
-            response.atr.present = true;
-            response.atr.value.length = 3U;
-            response.atr.value.bytes[0U] = 0x3bU;
-            response.atr.value.bytes[1U] = 0x01U;
-            response.atr.value.bytes[2U] = 0x02U;
+            response.usable = fault_ != Fault::card_reset_unusable;
+            if (response.usable) {
+                response.present = true;
+                response.initialized = true;
+                response.protocol.present = true;
+                response.protocol.value = w::CardProtocol::t1;
+                response.atr.present = true;
+                response.atr.value.length = 3U;
+                response.atr.value.bytes[0U] = 0x3bU;
+                response.atr.value.bytes[1U] = 0x01U;
+                response.atr.value.bytes[2U] = 0x02U;
+            }
             if (fault_ == Fault::card_reset_bad_handle) response.card_handle++;
             if (fault_ == Fault::card_reset_bad_generation)
                 response.current_generation++;
@@ -643,6 +648,11 @@ private:
         } else if (fault_ == Fault::card_transmit_eof &&
                    opcode == w::kOpcodeCardTransmit) {
             reply_size_ = 0U;
+        } else if ((fault_ == Fault::truncated_card_reset &&
+                    opcode == w::kOpcodeCardReset) ||
+                   (fault_ == Fault::truncated_card_transmit &&
+                    opcode == w::kOpcodeCardTransmit)) {
+            if (reply_size_ != 0U) --reply_size_;
         } else if (fault_ == Fault::truncated_card_connect &&
                    opcode == w::kOpcodeCardConnect && reply_size_ != 0U) {
             --reply_size_;
@@ -946,6 +956,26 @@ void test_card_reset_and_transmit()
     CHECK(session.card_handle == opened.session.card_handle &&
           session.bound_generation == 10U && session.protocol.present);
 
+    FakeTransport unusable(Fault::card_reset_unusable, false,
+                           w::kFeatureCardService, true);
+    const auto unusable_open = w::begin_card(
+        unusable, options, dtv::userland::Timeout{1000U});
+    CHECK(unusable_open);
+    auto unusable_session = unusable_open.session;
+    const auto unusable_reset = w::card_reset(
+        unusable, unusable_session, dtv::userland::Timeout{1000U});
+    CHECK(unusable_reset && !unusable_reset.response.usable &&
+          !unusable_reset.response.protocol.present && !unusable_reset.response.atr.present);
+    CHECK(unusable_session.bound_generation == 10U &&
+          !unusable_session.protocol.present && !unusable.closed() &&
+          unusable.request_count() == 6U &&
+          unusable.request_opcode(5U) == w::kOpcodeCardReset);
+    const auto unusable_transmit = w::card_transmit(
+        unusable, unusable_session, w::CardProtocol::t1,
+        ByteView{command, sizeof(command)}, dtv::userland::Timeout{1000U});
+    CHECK(!unusable_transmit && unusable_transmit.error == Error::NOT_READY &&
+          unusable.request_count() == 6U && unusable.closed());
+
     FakeTransport maximum(Fault::card_transmit_maximum, false,
                           w::kFeatureCardService, true);
     const auto maximum_open = w::begin_card(
@@ -966,10 +996,11 @@ void test_card_reset_and_transmit()
     const Fault reset_faults[] = {Fault::card_reset_remote_error,
                                   Fault::card_reset_bad_handle,
                                   Fault::card_reset_bad_generation,
-                                  Fault::card_reset_eof, Fault::timeout_card_reset};
+                                  Fault::card_reset_eof, Fault::truncated_card_reset,
+                                  Fault::timeout_card_reset};
     const Error reset_errors[] = {Error::CARD_REMOVED, Error::PROTOCOL_ERROR,
                                   Error::PROTOCOL_ERROR, Error::DISCONNECTED,
-                                  Error::TIMEOUT};
+                                  Error::PROTOCOL_ERROR, Error::TIMEOUT};
     for (std::size_t index = 0U;
          index < sizeof(reset_faults) / sizeof(reset_faults[0]); ++index) {
         FakeTransport failed(reset_faults[index], false, w::kFeatureCardService, true);
@@ -996,9 +1027,11 @@ void test_card_reset_and_transmit()
     const Fault transmit_faults[] = {Fault::card_transmit_remote_error,
                                      Fault::card_transmit_bad_key,
                                      Fault::card_transmit_eof,
+                                     Fault::truncated_card_transmit,
                                      Fault::timeout_card_transmit};
     const Error transmit_errors[] = {Error::CARD_REMOVED, Error::PROTOCOL_ERROR,
-                                     Error::DISCONNECTED, Error::TIMEOUT};
+                                     Error::DISCONNECTED, Error::PROTOCOL_ERROR,
+                                     Error::TIMEOUT};
     for (std::size_t index = 0U;
          index < sizeof(transmit_faults) / sizeof(transmit_faults[0]); ++index) {
         FakeTransport failed(transmit_faults[index], false,

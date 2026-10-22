@@ -77,6 +77,8 @@ int main()
     card_session.reader_id = 1U;
     card_session.card_handle = 1U;
     card_session.bound_generation = 1U;
+    card_session.protocol.present = true;
+    card_session.protocol.value = dtv::userland::wire::CardProtocol::t1;
     timed.closed = false;
     const auto card_status = dtv::userland::wire::card_status(
         timed, card_session, dtv::userland::Timeout{100U});
