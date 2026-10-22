@@ -71,7 +71,7 @@ wire::Tune project_tune(const TuneRecord& source, std::uint64_t revision) noexce
         tune.selection = wire::Selection::slot;
         tune.selection_value = source.slot;
     }
-    tune.verification = wire::Verification::commands;
+    tune.verification = source.verification;
     return tune;
 }
 

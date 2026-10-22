@@ -29,8 +29,12 @@ The engine lease bit is copied separately from `ReceiverState` so an engine
 Tune frequency remains exact for native-Hz engine records. Legacy engine
 kHz records are represented in the STATUS `frequency_hz` field by the exact
 unit conversion from kHz to Hz. `programmed_hz` remains the backend-reported
-command value and is not an RF measurement. Verification remains `commands`;
-lock measurement is unknown unless the caller supplies an observation. Stream
+command value and is not an RF measurement. Tune verification is copied from
+the engine tune record: successful lock readiness is `lock`, command-only
+readiness is `commands`, and transport-stream synchronization readiness is
+`ts_sync`. The projection does not convert per-tune lock evidence into a STATUS
+measurement; the lock measurement remains unknown unless the caller supplies
+an observation. Stream
 IDs, reader/card state, LNB state, and `last_error` are never synthesized from
 engine state. Engine receiver IDs not present in canonical LIST are ignored;
 each receiver present in the requested canonical STATUS scope must have a

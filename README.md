@@ -34,8 +34,8 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `status_json_tests`、`status_json_consumer`（`dtv::json`）
 - `discovery_json_tests`、`discovery_json_consumer`（`dtv::json`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
-- `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
-- `packet_stream_session_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
+- `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`、`stream_v1_authority_tests`、`stream_v1_owner_cleanup_tests`、`stream_v1_late_prepare_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
+- `packet_stream_session_tests`、`stream_v1_store_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
 - `control_connection_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
 - `control_client_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
 - `status_projection_tests`（`DTV_USERLAND_BUILD_STATUS_PROJECTION` 有効時、`dtv::status_projection`）

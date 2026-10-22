@@ -403,7 +403,6 @@ AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) n
         wire::TuneResult response;
         response.epoch = server_.epoch;
         response.requested_hz = session->pending_requested_hz_;
-        response.verification = wire::Verification::commands;
         const auto status = engine_.status();
         if (!status)
             return error_reply(*session, wire::kOpcodeTune,
@@ -419,6 +418,8 @@ AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) n
                 response.programmed_hz.present = metadata.current.programmed_hz.has_value();
                 if (metadata.current.programmed_hz)
                     response.programmed_hz.value = *metadata.current.programmed_hz;
+                response.verification = metadata.current.verification;
+                response.lock = metadata.current.lock;
                 matched = true;
                 break;
             }

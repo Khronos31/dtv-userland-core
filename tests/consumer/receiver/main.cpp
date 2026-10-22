@@ -93,6 +93,7 @@ int main()
         ReceiverCapability{513U, true, false, true}}};
     if (!engine.configure_strict_capabilities(capabilities.data(), capabilities.size()))
         return 1;
+    if (!engine.configure_stream_contract(StreamContract::v1, 1U)) return 1;
     const auto lease = engine.acquire(1U, 513U);
     TuneRequest request{};
     request.lease_id = lease ? lease.value().lease_id : 0U;
@@ -104,7 +105,18 @@ int main()
     hz_request.requested_hz = 557000123U;
     hz_request.timeout_ms = 1000U;
     const auto ticket = engine.try_admit_tune(1U, hz_request, clock.monotonic_ms());
-    return ticket && engine.execute_admitted_tune(ticket.value()) &&
+    if (!ticket || !engine.execute_admitted_tune(ticket.value())) return 1;
+    const auto started = engine.start_stream_v1(1U, request.lease_id,
+                                                ticket.value().tune_revision, 0U, 1000U);
+    if (!started) return 1;
+    const auto reserved = engine.reserve_attach_v1(1U, request.lease_id, 1U,
+                                                    started.value().stream_id,
+                                                    started.value().token, 0U);
+    if (!reserved || !engine.prepare_attach_v1(reserved.value()) ||
+        !engine.commit_attach_v1(reserved.value())) return 1;
+    const auto stopped = engine.stop_stream_v1(1U, request.lease_id,
+                                                started.value().stream_id);
+    return stopped && engine.run_stream_cleanup_v1(reserved.value()) &&
                    engine.release(1U, request.lease_id)
         ? 0
         : 1;

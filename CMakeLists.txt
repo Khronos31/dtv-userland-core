@@ -625,6 +625,21 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(receiver_hz_tests PRIVATE dtv::receiver)
         add_test(NAME receiver_hz_tests COMMAND receiver_hz_tests)
         set_tests_properties(receiver_hz_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(stream_v1_authority_tests tests/stream_v1_authority_tests.cpp)
+        target_link_libraries(stream_v1_authority_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_authority_tests COMMAND stream_v1_authority_tests)
+        set_tests_properties(stream_v1_authority_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(stream_v1_owner_cleanup_tests tests/stream_v1_owner_cleanup_tests.cpp)
+        target_link_libraries(stream_v1_owner_cleanup_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_owner_cleanup_tests COMMAND stream_v1_owner_cleanup_tests)
+        set_tests_properties(stream_v1_owner_cleanup_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(stream_v1_late_prepare_tests tests/stream_v1_late_prepare_tests.cpp)
+        target_link_libraries(stream_v1_late_prepare_tests PRIVATE dtv::receiver)
+        add_test(NAME stream_v1_late_prepare_tests COMMAND stream_v1_late_prepare_tests)
+        set_tests_properties(stream_v1_late_prepare_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
@@ -645,6 +660,11 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(packet_stream_session_tests PRIVATE dtv::capture)
         add_test(NAME packet_stream_session_tests COMMAND packet_stream_session_tests)
         set_tests_properties(packet_stream_session_tests PROPERTIES TIMEOUT 120)
+
+        add_executable(stream_v1_store_tests tests/stream_v1_store_tests.cpp)
+        target_link_libraries(stream_v1_store_tests PRIVATE dtv::capture)
+        add_test(NAME stream_v1_store_tests COMMAND stream_v1_store_tests)
+        set_tests_properties(stream_v1_store_tests PROPERTIES TIMEOUT 120)
     endif()
 
     set(DTV_LEGACY_SOURCE "" CACHE PATH "Fixed PX4 userland source tree for equivalence check")

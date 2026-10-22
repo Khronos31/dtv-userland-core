@@ -4,6 +4,7 @@
 
 #include "dtv/userland/error.h"
 #include "dtv/userland/detail/stream_session_types.h"
+#include "dtv/userland/records.h"
 
 #include <array>
 #include <cstddef>
@@ -64,20 +65,34 @@ struct HzTuneRequest final {
     Error validation = Error::OK;
 };
 
-// Optional backend-reported command value in the same domain as requested_hz.
-// It is a programmed value, not an RF measurement.
-struct TuneProgramming final {
-    std::optional<std::uint64_t> programmed_hz{};
+enum class TuneReadiness : std::uint8_t {
+    lock_poll = 0U,
+    terminal_lock = 1U,
+    commands = 2U,
+    ts_sync = 3U,
 };
 
-// Immutable per-receiver capability descriptor for strict admission.  The
-// product supplies the audited model/count metadata once before its workers
-// start; strict admission then never calls the virtual supports predicate.
+// Optional backend-reported command value in the same domain as requested_hz.
+// It is a programmed value, not an RF measurement. Terminal lock readiness
+// requires a valid positive lock measurement; ts_sync requires the backend's
+// synchronization result and preserves any separately supplied lock sample.
+struct TuneProgramming final {
+    std::optional<std::uint64_t> programmed_hz{};
+    wire::Measurement<bool> lock{};
+    bool ts_synchronized = false;
+};
+
+// Immutable per-receiver capability descriptor for strict admission. The
+// product supplies the audited model/count/readiness metadata once before its
+// workers start; strict admission then never calls the virtual supports
+// predicate. Legacy kHz tuning retains lock polling regardless of readiness.
 struct ReceiverCapability final {
     ReceiverId receiver = 0U;
     bool supports_terrestrial = false;
     bool supports_satellite = false;
     bool native_hz = false;
+    TuneReadiness readiness = TuneReadiness::lock_poll;
+    bool lock_measurement = true;
 };
 
 // Conservative per-receiver strict operation marker.  It is independent of
@@ -102,6 +117,8 @@ struct TuneRecord final {
     bool exact_hz = false;
     std::uint64_t requested_hz = 0U;
     std::optional<std::uint64_t> programmed_hz{};
+    wire::Verification verification = wire::Verification::lock;
+    wire::Measurement<bool> lock{};
 };
 
 // Internal tune metadata.  It is not the adopted public v1 record and is
@@ -151,6 +168,70 @@ struct ReceiverEngineStatus final {
     // state, not a completed public v1 record.
     std::array<ReceiverTuneOperation, kReceiverEngineCapacity> operations{};
     std::array<TuneMetadata, kReceiverEngineCapacity> tune_metadata{};
+    // Token-free current stream phase per slot.  It never carries a stream ID
+    // or attach token.
+    std::array<std::uint8_t, kReceiverEngineCapacity> stream_phases{};
+};
+
+// Immutable stream contract selected once per engine before the first ACQUIRE.
+// The legacy entrance keeps its accepted lease-only semantics; the v1 entrance
+// adds the adopted revision-bound, ACK-after-active lifecycle.  The choice is
+// a separate axis from strict tune admission and never changes the existing
+// R3/C1/D2 behavior.
+enum class StreamContract : std::uint8_t {
+    legacy = 0U,
+    v1 = 1U,
+};
+
+// Public, token-free stream phase projection.
+enum class StreamPhase : std::uint8_t {
+    none = 0U,
+    armed = 1U,
+    attaching = 2U,
+    active = 3U,
+    closing = 4U,
+    ended = 5U,
+};
+
+// One v1 START issuance.  stream_id and token are new for this stream only and
+// are never reused within the context epoch.
+struct StreamStartResult final {
+    std::uint64_t epoch = 0U;
+    std::uint64_t stream_id = 0U;
+    ReceiverToken token{};
+    std::uint64_t expires_at_ms = 0U;
+};
+
+// Owned v1 attachment reservation.  It is an immutable value the worker and
+// data endpoint carry; the engine revalidates it against the registry at every
+// step and never exposes its token in status output.
+struct StreamAttachTicket final {
+    std::uint64_t epoch = 0U;
+    std::uint64_t client_id = 0U;
+    std::uint64_t lease_instance = 0U;
+    std::size_t slot = 0U;
+    std::uint64_t stream_id = 0U;
+    std::uint64_t revision = 0U;
+    std::uint64_t reservation = 0U;
+    ReceiverToken token{};
+    std::uint64_t deadline_ms = 0U;
+};
+
+// Typed v1 STOP outcome.  quiesced is false until the physical cleanup has
+// been recorded complete; a visible final is not proof of quiescence.
+// cleanup_owner is true only for the caller that issued this cleanup; the
+// exact-ticket cleanup is the one physical worker responsibility.
+struct StreamStopResult final {
+    std::uint8_t terminal = 0U;
+    bool final_valid = false;
+    bool quiesced = false;
+    Error cleanup_error = Error::OK;
+    // True for the metadata call that first issued this stream's cleanup.
+    bool cleanup_owner = false;
+    // Token-free identity of the retained final.  It never carries a token.
+    std::uint64_t stream_id = 0U;
+    // Successful tune revision bound to the stream, when known.
+    std::uint64_t revision = 0U;
 };
 
 // Physical receiver seam.  Methods receive the stable receiver ID.
@@ -322,10 +403,87 @@ public:
     Result<void> revoke_tune_ticket(std::uint64_t client_id,
                                     std::uint64_t lease_id) noexcept;
 
+    // --- Immutable stream contract and the v1 typed lifecycle ---
+    //
+    // The contract mode is selected once, before the first ACQUIRE; a later
+    // call returns BUSY without changing mode.  It is a separate axis from
+    // strict tune admission.  In v1 mode the legacy lease-only stream
+    // entrances return UNSUPPORTED before any state change, and in legacy mode
+    // the v1 entrances do the same.
+    Result<void> configure_stream_contract(StreamContract contract,
+                                           std::uint64_t context_epoch) noexcept;
+    StreamContract stream_contract() const noexcept;
+
+    // START: bound to the owner, lease and the latest successful admitted
+    // revision.  It issues a new non-reused stream ID, a fresh attach token,
+    // and a finite armed deadline on the same lease.  A revision/owner/lease
+    // mismatch or ID/token-source exhaustion is rejected before any mutation.
+    Result<StreamStartResult> start_stream_v1(std::uint64_t client_id,
+                                              std::uint64_t lease_id,
+                                              std::uint64_t revision,
+                                              std::uint64_t now_ms,
+                                              std::uint64_t arm_budget_ms) noexcept;
+    // reserve: consumes the armed token once and moves armed -> attaching,
+    // returning the owned ticket.  An expired arm closes only the stream and
+    // keeps the lease.
+    Result<StreamAttachTicket> reserve_attach_v1(std::uint64_t client_id,
+                                                 std::uint64_t lease_id,
+                                                 std::uint64_t epoch,
+                                                 std::uint64_t stream_id,
+                                                 const ReceiverToken& token,
+                                                 std::uint64_t now_ms) noexcept;
+    // prepare: worker-only finite backend entrance.  On success the stream
+    // stays attaching; it never publishes active.  On failure the stream is
+    // closed and its cleanup is pending.
+    Result<void> prepare_attach_v1(const StreamAttachTicket& ticket) noexcept;
+    // commit: poll-side publication point, called only after the whole ACK was
+    // sent.  It revalidates the exact ticket and is the only path to active.
+    Result<void> commit_attach_v1(const StreamAttachTicket& ticket) noexcept;
+    // abort: one cleanup for a ticket that will not commit (ACK failure, STOP,
+    // control death).  A late prepare success is folded into the same cleanup.
+    Result<void> abort_attach_v1(const StreamAttachTicket& ticket,
+                                 Error cause) noexcept;
+    // STOP: short metadata entrance.  It acts only on the exact stream, keeps
+    // the lease, moves the stream to closing and issues the cleanup once.  It
+    // performs no backend I/O or receiver-lock wait and returns an unquiesced
+    // typed final.  An older/foreign stream ID is rejected without touching a
+    // replacement.
+    Result<StreamStopResult> stop_stream_v1(std::uint64_t client_id,
+                                            std::uint64_t lease_id,
+                                            std::uint64_t stream_id) noexcept;
+    // Short metadata armed-expiry entrance.  A caller-owned finite deadline can
+    // expire an armed stream without any subsequent ATTACH: only the exact
+    // stream is cancelled, its terminal is retained and the lease is kept.  No
+    // backend I/O or receiver-lock wait is performed.
+    Result<StreamStopResult> expire_armed_v1(std::uint64_t client_id,
+                                             std::uint64_t lease_id,
+                                             std::uint64_t stream_id,
+                                             std::uint64_t now_ms) noexcept;
+    // The exact-ticket worker cleanup: it claims the single physical cleanup
+    // responsibility, performs backend stop and the D2 detach with the START
+    // ticket token exactly once, and records the retained outcome.  The
+    // metadata entrances never perform this I/O.
+    Result<void> run_stream_cleanup_v1(const StreamAttachTicket& ticket) noexcept;
+    // Metadata-only recorder for a caller that already performed the physical
+    // cleanup.  The first completion sets the retained primary error; a later
+    // completion may only update the quiescence observation and never clears a
+    // recorded error.  A successful cleanup returns the lease to tuned; a
+    // failed or unquiesced one keeps the scope excluded.
+    Result<void> complete_stream_cleanup_v1(const StreamAttachTicket& ticket,
+                                            Error result, bool quiesced) noexcept;
+    // Token-free lease-lifetime observation of the most recent terminal
+    // (current or previous stream).  It never exposes a token or handle.
+    Result<StreamStopResult> stream_last_terminal_v1(std::uint64_t client_id,
+                                                     std::uint64_t lease_id) const noexcept;
+
     // Bounded deterministic seam for the nonwrapping revision-exhaustion path.
     // It is an internal detail helper used only by the R2 core test; production
     // code never calls it.
     void set_tune_revision_for_test(std::size_t slot, std::uint64_t value) noexcept;
+    // Bounded deterministic seam for the nonwrapping v1 stream-ID/reservation
+    // exhaustion path.  Production code never calls it.
+    void set_stream_issuance_for_test(std::uint64_t next_stream_id,
+                                      std::uint64_t next_reservation) noexcept;
 
 private:
     enum class StreamState : std::uint8_t {
@@ -335,6 +493,9 @@ private:
         active,
         revoked,
         consumed,
+        // v1: the metadata stage of STOP/abort linearized; physical cleanup is
+        // still pending and the same scope stays excluded.
+        closing,
     };
 
     struct PendingTune final {
@@ -360,6 +521,40 @@ private:
         bool capture_maybe_active = false;
         bool stream_maybe_attached = false;
         bool backend_disconnected = false;
+        // --- v1 stream identity (unused in legacy mode) ---
+        std::uint64_t stream_id = 0U;
+        std::uint64_t stream_revision = 0U;
+        std::uint64_t stream_reservation = 0U;
+        std::uint64_t stream_deadline_ms = 0U;
+        ReceiverToken stream_token{};
+        // The START token consumed at reserve.  It is the exact D2 attachment
+        // identity for this stream and never the ACQUIRE token.
+        ReceiverToken stream_consumed_token{};
+        // prepare ownership: a ticket may claim a physical prepare exactly
+        // once, and commit is only valid after a successful prepare.
+        bool stream_prepare_inflight = false;
+        bool stream_prepared = false;
+        // Set when the stream reached closing and its physical cleanup has not
+        // been recorded yet.  The same scope may not start again until it
+        // clears.
+        bool stream_cleanup_pending = false;
+        // The cleanup work was issued exactly once for this stream.
+        bool stream_cleanup_issued = false;
+        // The single physical worker cleanup was claimed and started.
+        bool stream_cleanup_started = false;
+        bool stream_cleanup_completed = false;
+        bool stream_quiesced = false;
+        Error stream_cleanup_error = Error::OK;
+        bool stream_final_valid = false;
+        std::uint8_t stream_final_terminal = 0U;
+        std::uint64_t stream_final_stream_id = 0U;
+        // Lease-lifetime most recent terminal.  It survives the next START and
+        // is exposed only through a token-free observation.
+        bool last_final_valid = false;
+        std::uint64_t last_final_stream_id = 0U;
+        std::uint8_t last_terminal = 0U;
+        Error last_error = Error::OK;
+        bool last_quiesced = false;
     };
 
     static bool valid_client(std::uint64_t client_id) noexcept;
@@ -387,7 +582,8 @@ private:
     // passes admitted=false and keeps its exact old sampling and traces.
     Result<bool> poll_lock(std::size_t slot, ReceiverSystem system, std::uint64_t start_ms,
                            std::uint32_t timeout_ms, bool admitted,
-                           const AdmittedTune& ticket) noexcept;
+                           const AdmittedTune& ticket,
+                           std::uint64_t* sampled_ms = nullptr) noexcept;
     bool capability_supports_locked(std::size_t slot, ReceiverSystem system) const noexcept;
     Result<AdmittedTune> admit_tune(std::uint64_t client_id,
                                     const TuneRequest& request,
@@ -419,6 +615,24 @@ private:
                                   bool exact_hz = false,
                                   std::uint64_t requested_hz = 0U,
                                   std::optional<std::uint64_t> programmed_hz = {}) noexcept;
+    static StreamPhase phase_of(StreamState state) noexcept;
+    // True when the ticket still identifies the lease's current v1 stream in
+    // the expected phase: epoch, owner, lease instance, slot, stream ID and
+    // reservation generation all match.
+    bool stream_ticket_matches_locked(std::size_t slot,
+                                      const StreamAttachTicket& ticket,
+                                      StreamState expected) const noexcept;
+    // Full-stamp match used by physical cleanup: it additionally requires the
+    // consumed START token, revision and finite deadline to match, so a copied
+    // ticket with any changed field is not accepted as the cleanup owner.
+    bool stream_cleanup_ticket_matches_locked(
+        std::size_t slot, const StreamAttachTicket& ticket) const noexcept;
+    // Shared retention policy for a recorded cleanup outcome.  It keeps the
+    // first non-OK primary error, updates the physical quiescence observation
+    // independently, and returns the lease to reusable only for a fully clean
+    // result.
+    void record_stream_cleanup_locked(std::size_t slot, Error result, bool quiesced) noexcept;
+    static StreamStopResult stop_result_of(const Lease& lease) noexcept;
     // Drops the pending ticket but leaves the operation marker alone, so a
     // synchronous logical-teardown invalidation keeps the receiver excluded
     // until the in-flight execution returns.
@@ -452,6 +666,14 @@ private:
     std::array<Lease, kReceiverEngineCapacity> leases_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_lease_ids_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_attachment_ids_{};
+    // Immutable stream contract and its context epoch, chosen before the first
+    // ACQUIRE.
+    StreamContract contract_ = StreamContract::legacy;
+    std::uint64_t context_epoch_ = 0U;
+    bool contract_locked_ = false;
+    // Nonwrapping v1 issuance counters.
+    std::uint64_t next_stream_id_ = 1U;
+    std::uint64_t next_reservation_ = 1U;
     std::array<ReceiverState, kReceiverEngineCapacity> states_{};
     bool strict_enabled_ = false;
     std::array<ReceiverCapability, kReceiverEngineCapacity> strict_capabilities_{};

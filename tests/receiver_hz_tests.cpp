@@ -47,7 +47,11 @@ public:
         last_hz = requested_hz;
         if (program_error != Error::OK)
             return Result<TuneProgramming>::failure(program_error);
-        return Result<TuneProgramming>::success(TuneProgramming{programmed_hz});
+        TuneProgramming programming{};
+        programming.programmed_hz = programmed_hz;
+        programming.lock = lock;
+        programming.ts_synchronized = ts_synchronized;
+        return Result<TuneProgramming>::success(programming);
     }
     Result<bool> is_locked(ReceiverId, ReceiverSystem) noexcept override
     {
@@ -93,6 +97,8 @@ public:
     int khz_calls = 0;
     Error program_error = Error::OK;
     std::optional<std::uint64_t> programmed_hz = 473143000U;
+    wire::Measurement<bool> lock{};
+    bool ts_synchronized = true;
 };
 
 class Tokens final : public ReceiverTokenSource {
@@ -234,6 +240,109 @@ bool test_ticket_keeps_admitted_hz()
     return true;
 }
 
+bool test_terminal_lock_requires_valid_positive_evidence()
+{
+    Backend backend;
+    backend.lock.state = wire::MeasureState::valid;
+    backend.lock.value = true;
+    backend.lock.sampled_at_ns = 123000000U;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 1> receivers{{17U}};
+    ReceiverEngine engine(backend, receivers.data(), receivers.size(), tokens, clock);
+    const std::array<ReceiverCapability, 1> capabilities{{
+        ReceiverCapability{17U, true, false, true, TuneReadiness::terminal_lock, true}}};
+    HZ_CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+    const auto lease = engine.acquire(1U, 17U);
+    HZ_CHECK(lease);
+    HzTuneRequest request{};
+    request.lease_id = lease.value().lease_id;
+    request.requested_hz = 473142857U;
+    request.timeout_ms = 1000U;
+    const auto ticket = engine.try_admit_tune(1U, request, clock.now);
+    HZ_CHECK(ticket && engine.execute_admitted_tune(ticket.value()));
+    auto status = engine.status();
+    HZ_CHECK(status && status.value().tune_metadata[0U].current.verification ==
+                          wire::Verification::lock &&
+             status.value().tune_metadata[0U].current.lock.state ==
+                          wire::MeasureState::valid &&
+             status.value().tune_metadata[0U].current.lock.value);
+
+    backend.lock = wire::Measurement<bool>{};
+    const auto second = engine.try_admit_tune(1U, request, clock.now);
+    HZ_CHECK(second);
+    const auto missing = engine.execute_admitted_tune(second.value());
+    HZ_CHECK(!missing && missing.error() == Error::PROTOCOL_ERROR);
+    return true;
+}
+
+bool test_commands_and_ts_sync_readiness()
+{
+    for (const TuneReadiness readiness : {TuneReadiness::commands, TuneReadiness::ts_sync}) {
+        Backend backend;
+        backend.lock.state = wire::MeasureState::valid;
+        backend.lock.value = false;
+        backend.lock.sampled_at_ns = 456000000U;
+        Tokens tokens;
+        Clock clock;
+        const std::array<ReceiverId, 1> receivers{{17U}};
+        ReceiverEngine engine(backend, receivers.data(), receivers.size(), tokens, clock);
+        const std::array<ReceiverCapability, 1> capabilities{{
+            ReceiverCapability{17U, true, false, true, readiness, false}}};
+        HZ_CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+        const auto lease = engine.acquire(1U, 17U);
+        HZ_CHECK(lease);
+        HzTuneRequest request{};
+        request.lease_id = lease.value().lease_id;
+        request.requested_hz = 473142857U;
+        request.timeout_ms = 1000U;
+        const auto ticket = engine.try_admit_tune(1U, request, clock.now);
+        HZ_CHECK(ticket);
+        const auto tuned = engine.execute_admitted_tune(ticket.value());
+        HZ_CHECK(tuned);
+        if (tuned) {
+            const auto status = engine.status();
+            HZ_CHECK(status && status.value().tune_metadata[0U].current.verification ==
+                                  (readiness == TuneReadiness::commands
+                                       ? wire::Verification::commands
+                                       : wire::Verification::ts_sync));
+            if (readiness == TuneReadiness::commands)
+                HZ_CHECK(status.value().tune_metadata[0U].current.lock.state ==
+                         wire::MeasureState::unsupported);
+            else
+                HZ_CHECK(status.value().tune_metadata[0U].current.lock.state ==
+                             wire::MeasureState::valid &&
+                         !status.value().tune_metadata[0U].current.lock.value);
+        }
+    }
+    return true;
+}
+
+bool test_negative_terminal_lock_is_not_ready()
+{
+    Backend backend;
+    backend.lock.state = wire::MeasureState::valid;
+    backend.lock.value = false;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 1> receivers{{17U}};
+    ReceiverEngine engine(backend, receivers.data(), receivers.size(), tokens, clock);
+    const std::array<ReceiverCapability, 1> capabilities{{
+        ReceiverCapability{17U, true, false, true, TuneReadiness::terminal_lock, true}}};
+    HZ_CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+    const auto lease = engine.acquire(1U, 17U);
+    HZ_CHECK(lease);
+    HzTuneRequest request{};
+    request.lease_id = lease.value().lease_id;
+    request.requested_hz = 473142857U;
+    request.timeout_ms = 1000U;
+    const auto ticket = engine.try_admit_tune(1U, request, clock.now);
+    HZ_CHECK(ticket);
+    const auto tuned = engine.execute_admitted_tune(ticket.value());
+    HZ_CHECK(!tuned && tuned.error() == Error::TIMEOUT);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -241,7 +350,10 @@ int main()
     return test_exact_hz_and_legacy_khz_paths() &&
                    test_unsupported_hz_does_not_advance_revision() &&
                    test_programming_failure_keeps_current_invalid() &&
-                   test_ticket_keeps_admitted_hz()
+                   test_ticket_keeps_admitted_hz() &&
+                   test_terminal_lock_requires_valid_positive_evidence() &&
+                   test_commands_and_ts_sync_readiness() &&
+                   test_negative_terminal_lock_is_not_ready()
         ? 0
         : 1;
 }
