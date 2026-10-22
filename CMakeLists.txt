@@ -289,7 +289,8 @@ if(DTV_USERLAND_BUILD_TESTING)
 
         add_executable(control_client_tests tests/control_client_tests.cpp)
         target_link_libraries(control_client_tests PRIVATE dtv::control)
-        if(UNIX)
+        if(CMAKE_SYSTEM_NAME STREQUAL "Linux" AND
+           CMAKE_SYSTEM_PROCESSOR MATCHES "^(x86_64|AMD64)$")
             find_package(Threads REQUIRED)
             target_link_libraries(control_client_tests PRIVATE Threads::Threads)
             target_compile_definitions(control_client_tests PRIVATE

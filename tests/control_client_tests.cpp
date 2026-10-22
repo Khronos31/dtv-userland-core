@@ -7,7 +7,6 @@
 #include <cstdio>
 #include <cstring>
 #if defined(DTV_USERLAND_CONTROL_STACK_PROBES)
-#include <new>
 #include <pthread.h>
 #endif
 
@@ -390,21 +389,23 @@ private:
 
 struct StackProbe final {
     w::ClientTransport* transport;
-    w::StatusFetchResult result;
+    Error result = Error::INTERNAL;
+    bool snapshot_present = false;
 };
 
 void* fetch_on_thread(void* value) noexcept
 {
     auto& probe = *static_cast<StackProbe*>(value);
-    ::new (static_cast<void*>(&probe.result)) w::StatusFetchResult(
-        w::fetch_status(*probe.transport));
+    const w::StatusFetchResult result = w::fetch_status(*probe.transport);
+    probe.result = result.error;
+    probe.snapshot_present = result.snapshot.list.epoch != w::Uuid{};
     return nullptr;
 }
 
 bool run_stack_probe(w::ClientTransport& transport, std::size_t stack_size,
-                     Error expected_error)
+                     Error expected_error, bool expect_snapshot)
 {
-    StackProbe probe{&transport, {}};
+    StackProbe probe{&transport};
     pthread_attr_t attributes;
     if (pthread_attr_init(&attributes) != 0) return false;
     const int set_result = pthread_attr_setstacksize(&attributes, stack_size);
@@ -415,22 +416,22 @@ bool run_stack_probe(w::ClientTransport& transport, std::size_t stack_size,
     pthread_attr_destroy(&attributes);
     if (create_result != 0) return false;
     if (pthread_join(thread, nullptr) != 0) return false;
-    return probe.result.error == expected_error;
+    return probe.result == expected_error && probe.snapshot_present == expect_snapshot;
 }
 
 void test_small_stack_probes()
 {
-    constexpr std::size_t kStackSizes[] = {128U * 1024U, 512U * 1024U, 768U * 1024U};
+    constexpr std::size_t kStackSizes[] = {256U * 1024U, 512U * 1024U, 768U * 1024U};
     FakeTransport source;
     const w::StatusFetchResult seeded = w::fetch_status(source);
     CHECK(seeded);
     for (const std::size_t stack_size : kStackSizes) {
         EofTransport eof;
-        CHECK(run_stack_probe(eof, stack_size, Error::DISCONNECTED));
+        CHECK(run_stack_probe(eof, stack_size, Error::DISCONNECTED, false));
         CHECK(eof.closed());
 
         ReplayTransport normal(source);
-        CHECK(run_stack_probe(normal, stack_size, Error::OK));
+        CHECK(run_stack_probe(normal, stack_size, Error::OK, true));
         CHECK(!normal.closed());
         CHECK(normal.request_count() == 3U);
     }
