@@ -5,6 +5,19 @@
 #include <cstdint>
 #include <iostream>
 
+namespace px4::userland {
+
+class HostAuthorityOwnerTestAccess final {
+public:
+    static dtv::userland::Error execute(TunerService& service,
+                                        const dtv::userland::detail::AuthorityJob& job) noexcept
+    {
+        return dtv::userland::detail::ControlAuthority::execute_job(service.engine_, job);
+    }
+};
+
+}  // namespace px4::userland
+
 namespace {
 
 namespace w = dtv::userland::wire;
@@ -227,7 +240,7 @@ int main()
         backend.opens != 0U)
         return fail("a legacy client-ID entrance accepted high-bit identity");
 
-    const auto legacy = service.acquire(7U, 3U);
+    const auto legacy = service.acquire(1U, 3U);
     if (!legacy) return fail("legacy low ID ACQUIRE failed");
 
     const auto list = make_list();
@@ -237,6 +250,19 @@ int main()
     HostAuthorityOwner owner(service, server, list);
     auto& authority = owner.authority();
     ControlServiceSession session(authority);
+    struct SessionCleanup final {
+        TunerService& service;
+        ControlAuthority& authority;
+        ControlServiceSession& session;
+        ~SessionCleanup()
+        {
+            if (session.connected()) {
+                const AuthorityJob cleanup = authority.close(session);
+                if (cleanup.kind == AuthorityJobKind::disconnect)
+                    (void)HostAuthorityOwnerTestAccess::execute(service, cleanup);
+            }
+        }
+    } session_cleanup{service, authority, session};
     Executor executor;
     if (authority.open(session) != Error::OK ||
         session.client_id() != kAuthorityClientIdFirst ||
@@ -252,17 +278,33 @@ int main()
         status.value().states[3U] != ReceiverState::leased)
         return fail("legacy and Authority leases did not coexist in one Engine");
 
-    if (!service.release(7U, legacy.value().lease_id))
-        return fail("legacy RELEASE failed");
+    if (!service.disconnect_client(1U))
+        return fail("legacy DISCONNECT failed");
     status = service.engine_status();
     if (!status || status.value().states[2U] != ReceiverState::leased ||
-        status.value().states[3U] != ReceiverState::free)
-        return fail("legacy RELEASE disturbed the Authority receiver lease");
+        status.value().states[3U] != ReceiverState::free) {
+        const AuthorityJob cleanup = authority.close(session);
+        if (cleanup.kind == AuthorityJobKind::disconnect)
+            HostAuthorityOwnerTestAccess::execute(service, cleanup);
+        return fail("legacy DISCONNECT disturbed the Authority receiver lease");
+    }
 
-    const auto rejected_disconnect = service.disconnect_client(session.client_id());
-    if (rejected_disconnect || rejected_disconnect.error() != Error::INVALID_ARGUMENT)
-        return fail("legacy DISCONNECT accepted a high-range Authority ID");
-    authority.close(session);
+    const auto second_legacy = service.acquire(1U, 3U);
+    if (!second_legacy) return fail("legacy low ID reacquire failed");
+    const AuthorityJob authority_cleanup = authority.close(session);
+    if (authority_cleanup.kind != AuthorityJobKind::disconnect ||
+        HostAuthorityOwnerTestAccess::execute(service, authority_cleanup) != Error::OK)
+        return fail("Authority DISCONNECT cleanup failed");
+    status = service.engine_status();
+    if (!status || status.value().states[2U] != ReceiverState::free ||
+        status.value().states[3U] != ReceiverState::leased)
+        return fail("Authority DISCONNECT disturbed the legacy receiver lease");
+    if (!service.disconnect_client(1U))
+        return fail("legacy DISCONNECT cleanup failed");
+    status = service.engine_status();
+    if (!status || status.value().states[2U] != ReceiverState::free ||
+        status.value().states[3U] != ReceiverState::free)
+        return fail("the two disconnect cleanups did not leave both receivers free");
     std::cout << "host authority owner identity tests passed\n";
     return 0;
 }
