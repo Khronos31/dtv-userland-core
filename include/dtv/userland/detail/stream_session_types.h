@@ -28,6 +28,9 @@ struct Attachment final {
     ReceiverId receiver = 0U;
     ReceiverSystem system = ReceiverSystem::terrestrial;
     ReceiverToken token{};
+    // The v1 stream contract requests evict-oldest queue handling; legacy
+    // attachment behavior keeps the full-ring slow-consumer terminal.
+    bool evict_oldest = false;
 };
 
 struct StreamCounters final {
