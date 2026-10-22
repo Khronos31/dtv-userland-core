@@ -26,6 +26,7 @@ struct AuthorityJob final {
     AdmittedTune tune{};
     std::uint64_t client_id = 0U;
     std::uint64_t lease_id = 0U;
+    ReceiverId receiver = 0U;
 };
 
 class ControlAuthorityExecutor {

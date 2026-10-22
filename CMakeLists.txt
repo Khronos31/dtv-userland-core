@@ -173,9 +173,10 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
     endif()
 endif()
 if(DTV_USERLAND_BUILD_HOST_WORKERS)
-    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_CARD)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_CARD OR
+       NOT DTV_USERLAND_BUILD_AUTHORITY)
         message(FATAL_ERROR
-            "DTV_USERLAND_BUILD_HOST_WORKERS requires DTV_USERLAND_BUILD_HOST_TUNER and DTV_USERLAND_BUILD_CARD")
+            "DTV_USERLAND_BUILD_HOST_WORKERS requires DTV_USERLAND_BUILD_HOST_TUNER, DTV_USERLAND_BUILD_CARD, and DTV_USERLAND_BUILD_AUTHORITY")
     endif()
     find_package(Threads REQUIRED)
     add_library(dtv_userland_host_workers STATIC
@@ -193,7 +194,7 @@ if(DTV_USERLAND_BUILD_HOST_WORKERS)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     target_link_libraries(dtv_userland_host_workers PUBLIC
-        Threads::Threads dtv::host_tuner dtv::card)
+        Threads::Threads dtv::host_tuner dtv::card dtv::authority)
     if(MSVC)
         target_compile_options(dtv_userland_host_workers PRIVATE /EHs-c- /GR- /W4)
     else()
@@ -617,6 +618,14 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_compile_definitions(host_worker_closure_tests PRIVATE
             PX4_CONTROL_WORKERS_TEST_ACCESS=1)
         add_test(NAME host_worker_closure_tests COMMAND host_worker_closure_tests)
+        if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
+            add_executable(host_authority_worker_tests
+                tests/host_authority_worker_tests.cpp)
+            target_link_libraries(host_authority_worker_tests PRIVATE
+                dtv::host_workers dtv::host_authority_owner)
+            add_test(NAME host_authority_worker_tests
+                COMMAND host_authority_worker_tests)
+        endif()
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)

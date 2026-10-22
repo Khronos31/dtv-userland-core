@@ -38,6 +38,20 @@ bool operation_lane_valid(ControlWorkerLane lane, const ControlWorkerTask& task,
                           const ControlExecutionLayout& execution) noexcept
 {
     switch (task.operation) {
+    case ControlWorkerOperation::tuner_authority_job:
+        if (task.kind == ControlWorkerTaskKind::authority_cleanup) {
+            return task.authority_job.kind ==
+                       dtv::userland::detail::AuthorityJobKind::disconnect &&
+                   lane == execution.tuner_shutdown_lane;
+        }
+        if (task.kind != ControlWorkerTaskKind::authority_request ||
+            task.authority_job.kind ==
+                dtv::userland::detail::AuthorityJobKind::disconnect)
+            return false;
+        if (task.receiver >= execution.receiver_count ||
+            task.receiver >= execution.receiver_lane.size())
+            return false;
+        return lane == execution.receiver_lane[task.receiver];
     case ControlWorkerOperation::tuner_status:
         return lane == execution.status_lane;
     case ControlWorkerOperation::tuner_acquire:
@@ -875,10 +889,29 @@ struct ControlWorkerLanes::Impl final {
         completion.request_id = task.request_id;
         completion.receiver = task.receiver;
         completion.lease_id = task.lease_id;
+        if (task.operation == ControlWorkerOperation::tuner_authority_job) {
+            completion.authority_key = task.authority_job.key;
+            completion.authority_job_kind = task.authority_job.kind;
+            completion.client_id = task.authority_job.key.client_id;
+            completion.request_id = static_cast<std::uint32_t>(
+                task.authority_job.key.request_id);
+            completion.receiver = task.authority_job.receiver;
+            if (task.authority_job.kind ==
+                dtv::userland::detail::AuthorityJobKind::tune) {
+                completion.receiver = task.authority_job.tune.receiver;
+                completion.lease_id = task.authority_job.tune.lease_id;
+            } else {
+                completion.lease_id = task.authority_job.lease_id;
+            }
+        }
         completion.card_handle = task.card_handle;
         completion.status_scope = task.status_scope;
         Error operation_error = Error::OK;
         switch (task.operation) {
+        case ControlWorkerOperation::tuner_authority_job:
+            operation_error = ControlWorkerLanes::execute_authority_job(
+                tuner_service, task.authority_job);
+            break;
         case ControlWorkerOperation::tuner_acquire: {
             const auto result = tuner_service.acquire(task.client_id, task.receiver);
             if (!result) operation_error = result.error();
@@ -1312,6 +1345,32 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     if (!operation_lane_valid(lane, task, impl_->execution)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
+    if (task.operation == ControlWorkerOperation::tuner_authority_job) {
+        const auto& job = task.authority_job;
+        if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::release &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::disconnect) {
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        }
+        const std::uint64_t job_client =
+            job.kind == dtv::userland::detail::AuthorityJobKind::tune
+                ? job.tune.client_id : job.client_id;
+        const std::uint64_t job_lease =
+            job.kind == dtv::userland::detail::AuthorityJobKind::tune
+                ? job.tune.lease_id : job.lease_id;
+        const std::uint8_t job_receiver =
+            job.kind == dtv::userland::detail::AuthorityJobKind::tune
+                ? job.tune.receiver : job.receiver;
+        if (job.key.client_id < dtv::userland::detail::kAuthorityClientIdFirst ||
+            job.key.client_id != job_client ||
+            job.key.request_id > std::numeric_limits<std::uint32_t>::max() ||
+            task.client_id != job.key.client_id ||
+            task.request_id != job.key.request_id || task.lease_id != job_lease ||
+            (job.kind != dtv::userland::detail::AuthorityJobKind::disconnect &&
+             task.receiver != job_receiver)) {
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        }
+    }
     // A real strict daemon routes TUNE through the bounded admission and
     // publication transaction.  Callers that did not opt into strict mode keep
     // the legacy direct queue submission.
@@ -1320,6 +1379,14 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
         return impl_->lanes[index]->submit_tune(task);
     }
     return impl_->lanes[index]->submit(task);
+}
+
+Error ControlWorkerLanes::execute_authority_job(
+    TunerService& tuner_service,
+    const dtv::userland::detail::AuthorityJob& job) noexcept
+{
+    return dtv::userland::detail::ControlAuthority::execute_job(
+        tuner_service.engine_, job);
 }
 
 bool ControlWorkerLanes::try_pop(ControlWorkerLane lane,

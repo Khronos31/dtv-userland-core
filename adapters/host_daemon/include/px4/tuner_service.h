@@ -13,6 +13,7 @@
 namespace px4::userland {
 
 class HostAuthorityOwner;
+namespace ipc::posix { class ControlWorkerLanes; }
 
 // R3 strict frequency facts, data only.  A backend reports them per receiver
 // and system; TunerService copies them once before workers start and the pure
@@ -505,6 +506,7 @@ public:
 
 private:
     friend class HostAuthorityOwner;
+    friend class ipc::posix::ControlWorkerLanes;
 
     // The lease, tune, and stream lifecycle runs in the common receiver
     // engine.  These adapters only translate the PX4 seams and types; the
