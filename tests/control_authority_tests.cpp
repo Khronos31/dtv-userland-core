@@ -720,6 +720,10 @@ bool test_async_acquire_rollback_and_close_ownership()
     CHECK(acquired.error == Error::OK && acquired.lease_id != 0U &&
           acquired.kind == AuthorityJobKind::acquire && backend.open_calls == 1 &&
           backend.open_thread != poll_thread);
+    const auto scalar_acquire = authority.complete(acquire_job.key, Error::OK);
+    CHECK(scalar_acquire.action == w::InboundAction::ignored &&
+          !scalar_acquire.cleanup_required && !scalar_acquire.queued &&
+          first.connected() && backend.close_calls == 0 && executor.count == 0U);
     AuthorityCompletion wrong_kind = acquired;
     wrong_kind.kind = AuthorityJobKind::tune;
     CHECK(authority.complete(wrong_kind).action == w::InboundAction::close);
@@ -730,6 +734,10 @@ bool test_async_acquire_rollback_and_close_ownership()
           rollback.cleanup.kind == AuthorityJobKind::rollback_release &&
           rollback.cleanup.lease_id == acquired.lease_id &&
           rollback.cleanup.receiver == 17U && backend.close_calls == 0);
+    const auto scalar_rollback = authority.complete(rollback.cleanup.key, Error::OK);
+    CHECK(scalar_rollback.action == w::InboundAction::ignored &&
+          !scalar_rollback.cleanup_required && !scalar_rollback.queued &&
+          first.connected() && backend.close_calls == 0 && executor.count == 0U);
     CHECK(authority.complete(acquired).action == w::InboundAction::close);
 
     executor.reject = true;
@@ -780,33 +788,59 @@ bool test_async_acquire_rollback_and_close_ownership()
           rollback_header.value().kind == w::Kind::error_response && backend.close_calls == 1);
     CHECK(send_full(authority, first, executor) == Error::OK);
 
+    size = w::encode_acquire_request({server.epoch, 17U},
+        {payload.data(), payload.size()});
+    CHECK(size);
+    const auto typed_pending = authority.accept(first,
+        frame(w::kOpcodeAcquire, 4U, {payload.data(), size.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(typed_pending.queued && executor.count == 1U);
+    const AuthorityJob typed_job = executor.pop();
+    const auto typed_reply = authority.complete(execute_on_worker(engine, typed_job));
+    CHECK(typed_reply.action == w::InboundAction::respond &&
+          acquired_lease(typed_reply) != 0U);
+    CHECK(send_full(authority, first, executor) == Error::OK);
+    const AuthorityJob typed_cleanup = authority.close(first);
+    CHECK(typed_cleanup.kind == AuthorityJobKind::disconnect &&
+          !typed_cleanup.deferred);
+    const auto typed_cleanup_completion = ControlAuthority::execute_job_value(
+        engine, typed_cleanup);
+    CHECK(typed_cleanup_completion.error == Error::OK &&
+          authority.complete(typed_cleanup_completion).action == w::InboundAction::close &&
+          backend.close_calls == 2 &&
+          engine.status().value().states[0U] == ReceiverState::free);
+
     size = w::encode_acquire_request({server.epoch, 18U},
         {payload.data(), payload.size()});
     CHECK(size);
     const auto late_pending = authority.accept(second,
         frame(w::kOpcodeAcquire, 4U, {payload.data(), size.value()}), context,
         snapshot, 0U, executor);
-    CHECK(late_pending.queued && backend.open_calls == 1);
+    CHECK(late_pending.queued && backend.open_calls == 2);
     const AuthorityJob late_job = executor.pop();
     const auto late_completion = execute_on_worker(engine, late_job);
-    CHECK(late_completion.error == Error::OK && backend.open_calls == 2 &&
+    CHECK(late_completion.error == Error::OK && backend.open_calls == 3 &&
           backend.open_thread != poll_thread);
     const AuthorityJob deferred = authority.close(second);
     CHECK(deferred.kind == AuthorityJobKind::disconnect && deferred.deferred &&
-          backend.close_calls == 1);
+          backend.close_calls == 2);
     const auto late_reply = authority.complete(late_completion);
     CHECK(late_reply.action == w::InboundAction::close && late_reply.cleanup_required &&
           late_reply.cleanup.kind == AuthorityJobKind::disconnect &&
-          !late_reply.cleanup.deferred && backend.close_calls == 1);
+          !late_reply.cleanup.deferred && backend.close_calls == 2);
     executor.reject = true;
     CHECK(!executor.submit(late_reply.cleanup));
     CHECK(authority.cleanup_submitted(late_reply.cleanup, false) == Error::OK);
+    const AuthorityCompletion premature_disconnect{late_reply.cleanup.key,
+        AuthorityJobKind::disconnect, Error::OK, 0U, late_reply.cleanup.receiver};
+    CHECK(authority.complete(premature_disconnect).action == w::InboundAction::close);
     executor.reject = false;
     CHECK(executor.submit(late_reply.cleanup));
     CHECK(authority.cleanup_submitted(late_reply.cleanup, true) == Error::OK);
+    CHECK(backend.close_calls == 2);
     const AuthorityCompletion disconnected = execute_on_worker(engine, executor.pop());
     CHECK(disconnected.kind == AuthorityJobKind::disconnect &&
-          disconnected.error == Error::OK && backend.close_calls == 2 &&
+          disconnected.error == Error::OK && backend.close_calls == 3 &&
           backend.close_thread != poll_thread);
     CHECK(authority.complete(disconnected).action == w::InboundAction::close);
     (void)authority.close(first);
