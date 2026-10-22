@@ -3,6 +3,7 @@
 #define DTV_USERLAND_DETAIL_CONTROL_AUTHORITY_H
 
 #include <dtv/userland/control_connection.h>
+#include <dtv/userland/detail/client_id_allocator.h>
 #include <dtv/userland/detail/receiver_engine.h>
 #include <dtv/userland/detail/status_projection.h>
 
@@ -128,9 +129,8 @@ private:
     ReceiverEngine& engine_;
     TuneValidator validate_tune_;
     ControlServiceSession* sessions_ = nullptr;
-    std::uint64_t next_client_id_ = 1U;
+    ClientIdAllocator client_ids_{kAuthorityClientIdFirst, UINT64_MAX};
     bool valid_ = false;
-    bool exhausted_ = false;
 };
 
 }  // namespace dtv::userland::detail

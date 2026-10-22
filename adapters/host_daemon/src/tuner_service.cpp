@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "px4/tuner_service.h"
 
+#include <dtv/userland/detail/client_id_allocator.h>
+
 #include <algorithm>
 #include <cstddef>
 #include <limits>
@@ -9,6 +11,11 @@ namespace px4::userland {
 namespace {
 
 namespace engine = dtv::userland::detail;
+
+bool valid_legacy_client_id(std::uint64_t client_id) noexcept
+{
+    return engine::is_legacy_client_id(client_id);
+}
 
 // px4_drv/driver/ptx_chrdev.c:356-359, enabled by
 // px4_drv/driver/px4_device.c:1258 (PTX_CHRDEV_WAIT_AFTER_LOCK_TC_T).
@@ -393,7 +400,7 @@ Result<TunerAcquireResult> TunerService::acquire(std::uint64_t client_id,
                                                  std::uint8_t receiver) noexcept
 {
     // The backend count is read on each ACQUIRE, as before the extraction.
-    if (client_id == 0U || receiver >= ipc::kReceiverCount ||
+    if (!valid_legacy_client_id(client_id) || receiver >= ipc::kReceiverCount ||
         receiver >= backend_.legacy().receiver_count())
         return Result<TunerAcquireResult>::failure(Error::INVALID_ARGUMENT);
     const auto acquired = engine_.acquire(client_id, receiver);
@@ -405,12 +412,15 @@ Result<TunerAcquireResult> TunerService::acquire(std::uint64_t client_id,
 Result<void> TunerService::release(std::uint64_t client_id,
                                    std::uint64_t lease_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.release(client_id, lease_id);
 }
 
 Result<ipc::TuneResponsePayload> TunerService::tune(
     std::uint64_t client_id, const ipc::TuneRequestPayload& request) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<ipc::TuneResponsePayload>::failure(Error::INVALID_ARGUMENT);
     engine::TuneRequest neutral{};
     neutral.lease_id = request.lease_id;
     neutral.system = to_engine(request.system);
@@ -431,6 +441,7 @@ Result<ipc::TuneResponsePayload> TunerService::tune(
 Result<void> TunerService::start_stream(std::uint64_t client_id,
                                         std::uint64_t lease_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.start_stream(client_id, lease_id);
 }
 
@@ -446,6 +457,8 @@ Result<TunerAttachment> TunerService::attach_stream(
 Result<TunerStreamFinalSnapshot> TunerService::stop_stream(
     std::uint64_t client_id, std::uint64_t lease_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamFinalSnapshot>::failure(Error::INVALID_ARGUMENT);
     const auto stopped = engine_.stop_stream(client_id, lease_id);
     if (!stopped) return Result<TunerStreamFinalSnapshot>::failure(stopped.error());
     return Result<TunerStreamFinalSnapshot>::success(TunerStreamFinalSnapshot{
@@ -455,6 +468,8 @@ Result<TunerStreamFinalSnapshot> TunerService::stop_stream(
 Result<TunerStreamCounters> TunerService::stats(
     std::uint64_t client_id, std::uint64_t lease_id) const noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamCounters>::failure(Error::INVALID_ARGUMENT);
     const auto counters = engine_.stats(client_id, lease_id);
     if (!counters) return Result<TunerStreamCounters>::failure(counters.error());
     return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
@@ -463,12 +478,15 @@ Result<TunerStreamCounters> TunerService::stats(
 Result<void> TunerService::detach_stream(
     const TunerAttachment& attachment) noexcept
 {
+    if (!valid_legacy_client_id(attachment.owner_client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.detach_stream(to_engine(attachment));
 }
 
 Result<void> TunerService::revoke_stream(std::uint64_t client_id,
                                          std::uint64_t lease_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.revoke_stream(client_id, lease_id);
 }
 
@@ -476,6 +494,7 @@ Result<void> TunerService::revoke_stream(
     std::uint64_t client_id, std::uint64_t lease_id,
     const std::array<std::uint8_t, ipc::kNonceLength>& nonce) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.revoke_stream(client_id, lease_id, nonce);
 }
 
@@ -495,6 +514,7 @@ Result<TunerStatus> TunerService::status() const noexcept
 
 Result<void> TunerService::disconnect_client(std::uint64_t client_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.disconnect_client(client_id);
 }
 
@@ -658,6 +678,8 @@ Result<TunerService::TunerAdmittedTune> TunerService::try_admit_prepared_tune(
     std::uint64_t client_id, const TunerPreparedTune& prepared,
     std::uint64_t accepted_at_ms) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerAdmittedTune>::failure(Error::INVALID_ARGUMENT);
     return prepared.hz_entrance
         ? engine_.try_admit_tune(client_id, prepared.hz, accepted_at_ms)
         : engine_.try_admit_tune(client_id, prepared.legacy, accepted_at_ms);
@@ -677,6 +699,8 @@ Result<TunerService::TunerAdmittedTune> TunerService::try_admit_tune(
     std::uint64_t client_id, const ipc::TuneRequestPayload& request,
     std::uint64_t accepted_at_ms) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerAdmittedTune>::failure(Error::INVALID_ARGUMENT);
     engine::TuneRequest neutral{};
     neutral.lease_id = request.lease_id;
     neutral.system = to_engine(request.system);
@@ -692,18 +716,23 @@ Result<TunerService::TunerAdmittedTune> TunerService::try_admit_tune(
 Result<void> TunerService::execute_admitted_tune(
     const TunerAdmittedTune& ticket) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.execute_admitted_tune(ticket);
 }
 
 Result<void> TunerService::abort_unstarted_tune(const TunerAdmittedTune& ticket,
                                                Error error) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.abort_unstarted_tune(ticket, error);
 }
 
 Result<void> TunerService::revoke_tune_ticket(std::uint64_t client_id,
                                               std::uint64_t lease_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id)) return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.revoke_tune_ticket(client_id, lease_id);
 }
 
@@ -771,6 +800,8 @@ Result<TunerService::TunerStreamStart> TunerService::start_stream_v1(
     std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t revision,
     std::uint64_t now_ms, std::uint64_t arm_budget_ms) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamStart>::failure(Error::INVALID_ARGUMENT);
     return engine_.start_stream_v1(client_id, lease_id, revision, now_ms,
                                    arm_budget_ms);
 }
@@ -780,6 +811,8 @@ Result<TunerService::TunerStreamTicket> TunerService::reserve_attach_v1(
     std::uint64_t stream_id, const dtv::userland::detail::ReceiverToken& token,
     std::uint64_t now_ms) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamTicket>::failure(Error::INVALID_ARGUMENT);
     return engine_.reserve_attach_v1(client_id, lease_id, epoch, stream_id, token,
                                      now_ms);
 }
@@ -787,18 +820,24 @@ Result<TunerService::TunerStreamTicket> TunerService::reserve_attach_v1(
 Result<void> TunerService::prepare_attach_v1(
     const TunerStreamTicket& ticket) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.prepare_attach_v1(ticket);
 }
 
 Result<void> TunerService::commit_attach_v1(
     const TunerStreamTicket& ticket) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.commit_attach_v1(ticket);
 }
 
 Result<void> TunerService::abort_attach_v1(const TunerStreamTicket& ticket,
                                            Error cause) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.abort_attach_v1(ticket, cause);
 }
 
@@ -806,6 +845,8 @@ Result<TunerService::TunerStreamStop> TunerService::stop_stream_v1(
     std::uint64_t client_id, std::uint64_t lease_id,
     std::uint64_t stream_id) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
     return engine_.stop_stream_v1(client_id, lease_id, stream_id);
 }
 
@@ -813,24 +854,32 @@ Result<TunerService::TunerStreamStop> TunerService::expire_armed_v1(
     std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t stream_id,
     std::uint64_t now_ms) noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
     return engine_.expire_armed_v1(client_id, lease_id, stream_id, now_ms);
 }
 
 Result<void> TunerService::run_stream_cleanup_v1(
     const TunerStreamTicket& ticket) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.run_stream_cleanup_v1(ticket);
 }
 
 Result<void> TunerService::complete_stream_cleanup_v1(
     const TunerStreamTicket& ticket, Error result, bool quiesced) noexcept
 {
+    if (!valid_legacy_client_id(ticket.client_id))
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
     return engine_.complete_stream_cleanup_v1(ticket, result, quiesced);
 }
 
 Result<TunerService::TunerStreamStop> TunerService::stream_last_terminal_v1(
     std::uint64_t client_id, std::uint64_t lease_id) const noexcept
 {
+    if (!valid_legacy_client_id(client_id))
+        return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
     return engine_.stream_last_terminal_v1(client_id, lease_id);
 }
 

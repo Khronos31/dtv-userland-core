@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -386,6 +387,64 @@ bool test_projection_lease_tune_and_gate()
     return true;
 }
 
+bool test_authority_release_preserves_legacy_engine_lease()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 2> ids{{17U, 18U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const auto legacy = engine.acquire(7U, 17U);
+    CHECK(legacy);
+    const auto list = make_list(ids.data(), ids.size());
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession session(authority);
+    Executor executor;
+    CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
+    const auto acquired = acquire(authority, session, executor, 2U, 18U);
+    const std::uint64_t authority_lease = acquired_lease(acquired);
+    CHECK(acquired.action == w::InboundAction::respond && authority_lease != 0U);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+    auto status = engine.status();
+    CHECK(status && status.value().states[0U] == ReceiverState::leased &&
+          status.value().states[1U] == ReceiverState::leased);
+
+    std::array<std::uint8_t, 128> payload{};
+    const auto size = w::encode_release_request({server.epoch, authority_lease},
+        {payload.data(), payload.size()});
+    CHECK(size);
+    w::Context context;
+    w::Snapshot snapshot;
+    const auto reply = authority.accept(session,
+        frame(w::kOpcodeRelease, 3U, {payload.data(), size.value()}), context, snapshot,
+        0U, executor);
+    CHECK(reply.queued && executor.count == 1U);
+    const AuthorityJob release = executor.pop();
+    CHECK(release.kind == AuthorityJobKind::release &&
+          ControlAuthority::execute_job(engine, release) == Error::OK);
+    const auto completed = authority.complete(release.key, Error::OK);
+    const auto header = w::decode_header({completed.frame.data, w::kHeaderSize});
+    CHECK(header && header.value().kind == w::Kind::response);
+    const auto response = w::decode_release_response(
+        {completed.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(response && response.value().released && response.value().quiesced);
+    status = engine.status();
+    CHECK(status && status.value().states[0U] == ReceiverState::leased &&
+          status.value().states[1U] == ReceiverState::free);
+
+    CHECK(engine.release(7U, legacy.value().lease_id));
+    status = engine.status();
+    CHECK(status && status.value().states[0U] == ReceiverState::free &&
+          status.value().states[1U] == ReceiverState::free);
+    const AuthorityJob cleanup = authority.close(session);
+    CHECK(cleanup.kind == AuthorityJobKind::disconnect &&
+          ControlAuthority::execute_job(engine, cleanup) == Error::OK);
+    return true;
+}
+
 bool test_rejected_queue_aborts_and_late_completion_drops()
 {
     Backend backend;
@@ -615,15 +674,36 @@ bool test_other_receiver_cleanup_while_tune_blocks()
     return true;
 }
 
+bool test_client_id_domain_and_authority_exhaustion()
+{
+    CHECK(!is_legacy_client_id(0U));
+    CHECK(is_legacy_client_id(1U));
+    CHECK(is_legacy_client_id(kLegacyClientIdMax));
+    CHECK(!is_legacy_client_id(kAuthorityClientIdFirst));
+
+    ClientIdAllocator legacy_ids(kLegacyClientIdMax - 1U, kLegacyClientIdMax);
+    CHECK(legacy_ids.next().value() == kLegacyClientIdMax - 1U);
+    CHECK(legacy_ids.next().value() == kLegacyClientIdMax);
+    CHECK(!legacy_ids.next());
+    ClientIdAllocator authority_ids(std::numeric_limits<std::uint64_t>::max() - 1U,
+                                    std::numeric_limits<std::uint64_t>::max());
+    CHECK(authority_ids.next().value() == std::numeric_limits<std::uint64_t>::max() - 1U);
+    CHECK(authority_ids.next().value() == std::numeric_limits<std::uint64_t>::max());
+    CHECK(!authority_ids.next());
+    return true;
+}
+
 }  // namespace
 
 int main()
 {
     if (!test_projection_lease_tune_and_gate()) return 1;
+    if (!test_authority_release_preserves_legacy_engine_lease()) return 1;
     if (!test_rejected_queue_aborts_and_late_completion_drops()) return 1;
     if (!test_running_tune_completion_after_close_and_cleanup()) return 1;
     if (!test_failed_release_is_not_quiesced()) return 1;
     if (!test_other_receiver_cleanup_while_tune_blocks()) return 1;
+    if (!test_client_id_domain_and_authority_exhaustion()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }
