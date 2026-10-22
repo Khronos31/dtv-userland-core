@@ -1,10 +1,10 @@
 # DTV userland common core
 
-本リポジトリは、DTV ユーザーランド製品群で共有する C++17 の移植可能な共通基盤（初期インクリメント）を提供する。レビュー済みの error/result、ロギング、モック転送基盤、および境界付き UDTV 1.0 ワイヤサブセットを備える。デーモン、ハードウェア転送、完全なワイヤプロトコル、カードの実装そのものではない。
+本リポジトリは、DTV ユーザーランド製品群で共有する C++17 の移植可能な共通基盤を提供する。レビュー済みの error/result、ロギング、モック転送基盤、および境界付き UDTV 1.0 ワイヤサブセットを備える。デーモン、ハードウェア転送、製品接続、カードの実装そのものではない。
 
 ## 提供ライブラリと構成
 
-静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
+静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）、`dtv::control`（`DTV_USERLAND_BUILD_CONTROL`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
 
 ### 依存関係
 
@@ -12,11 +12,12 @@
 - `dtv::identity`: `dtv::core` にリンク
 - `dtv::tuning`: `dtv::wire` にリンク
 - `dtv::json`: `dtv::wire` にリンク
+- `dtv::control`: `dtv::wire` にリンク。socketやserviceを所有しない内部protocol gate
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
 - `dtv::capture`: `dtv::core` および `Threads` にリンク。receiver エンジンには依存しない
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
-実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` / `dtv::capture` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。これらは OS や USB に依存しない。スレッド（Threads）を使うのはオプショナルな `dtv::receiver` と `dtv::capture` だけである。
+実装ターゲットである `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json`、およびオプショナルな `dtv::receiver` / `dtv::capture` / `dtv::control` は、例外および RTTI を無効にしてコンパイルされる。オプショナルな `dtv::card` はヘッダーのみの INTERFACE ターゲットであり、テンプレートの実体化は利用側のコンパイル設定に従う。これらは OS や USB に依存しない。スレッド（Threads）を使うのはオプショナルな `dtv::receiver` と `dtv::capture` だけである。
 
 外部向けの公開契約は ctl CLI および JSON であり、ワイヤプロトコルは同一リリース内の内部通信に限定される。
 
@@ -33,6 +34,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
 - `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
 - `packet_stream_session_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
+- `control_connection_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
 
 ### ビルド・テスト手順
 
@@ -96,6 +98,10 @@ target_link_libraries(my_consumer PRIVATE dtv::card)
 # capture store を利用する場合（Threads が自動検出される）
 find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS capture)
 target_link_libraries(my_consumer PRIVATE dtv::capture)
+
+# 内部 control protocol gate を利用する場合（dtv::wire のみへ依存）
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS control)
+target_link_libraries(my_consumer PRIVATE dtv::control)
 ```
 
 ### 利用側のビルド手順
@@ -112,7 +118,7 @@ cmake --build build
 ### 型付きワイヤペイロード (`dtv::wire`)
 
 HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベント、カード／トランザクションレコード、ならびに境界付き UDTV 1.0 エンベロープとフレーム処理を提供する。[型付きレコードの仕様](docs/wire-records.md) ではバイト構文と文脈検証を分離しており、呼び出し側はスナップショットを公開する前に検証を行わなければならない。初期のフレーム処理サブセットは [docs/wire-subset.md](docs/wire-subset.md) に記載されている。
-接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は本インクリメントの対象外である。現行の製品クライアントやデーモンは、新しいワイヤ API に直接接続されていない。
+接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は `dtv::wire` の対象外である。オプショナルな `dtv::control` はsocketなしの接続単位protocol gateとtyped request/response helperを提供するが、serviceを呼び出さず、client・実socket・engine・capture data pathは含まない。wireは同一release内の内部契約であり、package component exportは安定した公開wire APIを意味しない。現行の製品クライアントやデーモンは、新しいcontrol gateに接続されていない。詳細は [control connection](docs/control-connection.md) を参照のこと。
 
 ### STATUS JSON 投影 (`dtv::json`)
 

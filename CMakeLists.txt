@@ -15,6 +15,7 @@ option(DTV_USERLAND_BUILD_TESTING "Build DTV userland core tests" ${_dtv_userlan
 option(DTV_USERLAND_BUILD_RECEIVER "Build the internal receiver lifecycle engine" OFF)
 option(DTV_USERLAND_BUILD_CARD "Build the internal card ownership engine" OFF)
 option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OFF)
+option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -83,18 +84,40 @@ target_include_directories(dtv_userland_json PUBLIC
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 target_link_libraries(dtv_userland_json PUBLIC dtv::wire)
 
+if(DTV_USERLAND_BUILD_CONTROL)
+    add_library(dtv_userland_control STATIC src/control_connection.cpp)
+    add_library(dtv::control ALIAS dtv_userland_control)
+    set_target_properties(dtv_userland_control PROPERTIES
+        EXPORT_NAME control
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_control PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_control PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_control PUBLIC dtv::wire)
+endif()
+
 if(MSVC)
     target_compile_options(dtv_userland_core PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_wire PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_identity PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_tuning PRIVATE /EHs-c- /GR- /W4)
     target_compile_options(dtv_userland_json PRIVATE /EHs-c- /GR- /W4)
+    if(DTV_USERLAND_BUILD_CONTROL)
+        target_compile_options(dtv_userland_control PRIVATE /EHs-c- /GR- /W4)
+    endif()
 else()
     target_compile_options(dtv_userland_core PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_wire PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_identity PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_tuning PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     target_compile_options(dtv_userland_json PRIVATE -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    if(DTV_USERLAND_BUILD_CONTROL)
+        target_compile_options(dtv_userland_control PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(DTV_USERLAND_BUILD_RECEIVER)
@@ -160,7 +183,8 @@ if(DTV_USERLAND_BUILD_CARD)
     install(TARGETS dtv_userland_card EXPORT dtv_userland_coreTargets)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
-    PATTERN "detail" EXCLUDE)
+    PATTERN "detail" EXCLUDE
+    PATTERN "control_connection.h" EXCLUDE)
 install(FILES
     include/dtv/userland/detail/text.h
     include/dtv/userland/detail/sha256.h
@@ -176,6 +200,19 @@ endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+endif()
+if(DTV_USERLAND_BUILD_CONTROL)
+    install(TARGETS dtv_userland_control
+        EXPORT dtv_userland_controlTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_controlTargets
+        FILE dtv_userland_controlTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+endif()
+if(DTV_USERLAND_BUILD_CONTROL)
+    install(FILES include/dtv/userland/control_connection.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland)
 endif()
 if(DTV_USERLAND_BUILD_CARD)
     install(FILES
@@ -241,6 +278,12 @@ if(DTV_USERLAND_BUILD_TESTING)
     add_executable(tuning_tests tests/tuning_tests.cpp)
     target_link_libraries(tuning_tests PRIVATE dtv::tuning)
     add_test(NAME tuning_tests COMMAND tuning_tests)
+
+    if(DTV_USERLAND_BUILD_CONTROL)
+        add_executable(control_connection_tests tests/control_connection_tests.cpp)
+        target_link_libraries(control_connection_tests PRIVATE dtv::control)
+        add_test(NAME control_connection_tests COMMAND control_connection_tests)
+    endif()
 
     add_executable(status_json_tests tests/status_json_tests.cpp)
     target_link_libraries(status_json_tests PRIVATE dtv::json)
