@@ -234,5 +234,45 @@
     ],
     "scope": "A scan envelope containing observed enclosures, scan completeness/issues and grouped or ungrouped USB observations with nullable location/serial data. Projects physical enclosure/device/reader/receiver hierarchy, static LNB capability, enclosure grouping status and duplicate candidates, systems, STATUS-aligned enclosure/USB function id keys, VID:PID strings and scan-local serial uniqueness. It validates receiver-number uniqueness across each enclosure and does not adapt one ListResponse into a full scan or add STATUS dynamic state.",
     "new_files": "include/dtv/userland/discovery_json.h, src/discovery_json.cpp, tests/discovery_json_tests.cpp, tests/discovery_json_consumer.py, tests/consumer/discovery_json/, and docs/json-discovery.md are independently written and carry MIT."
+  },
+  "control_connection": {
+    "method": "Partially adapted the socketless ControlConnection protocol gate and focused tests from the old Core #16 head. The current main wire/records remain authoritative; no client, service, transport, or product integration was reused.",
+    "authority": [
+      "Core main 478d7db83f2a607ca9e0fe07334881b9fd3ded4c: include/dtv/userland/wire.h, records.h, src/records.cpp, docs/wire-records.md",
+      "agent-workspace design/core-control-next-increment-plan-20261022.md and user decision 6331096711",
+      "agent-workspace DECISIONS-20261021.md: UDTV wire is an internal same-release contract"
+    ],
+    "source_commit": "Core old PR #16 head 80ccc7b7e9ccad7c9b3656f02a28d12f003c45a0",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_connection.h",
+        "sha256": "d7fe525cda58cf9aad4f36cc2065a3514d0cca7f058449b6a683c226cc82fde3",
+        "destination_path": "include/dtv/userland/control_connection.h",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Per-connection HELLO/request/epoch gate, owned decoded request and inbound result types, bounded response helpers, and canonical STATUS helper declarations, adapted to current main records.",
+        "excluded_scope": "No ControlClient, ClientTransport, socket/listener, timeout, engine/service, capture data plane, ATTACH/TS_DATA, or product integration. The current STATUS record order and name-only Model remain unchanged."
+      },
+      {
+        "path": "src/control_connection.cpp",
+        "sha256": "87905897b61c2be256d09f2af6ddf4a20536b7d6d1f35a1bf636e908f1889c0c",
+        "destination_path": "src/control_connection.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "HELLO negotiation, request ordering, epoch checks, typed control request decoding, error/response frame generation, and canonical STATUS shell/validation helpers.",
+        "excluded_scope": "No request execution or state authority. The stale-handle symbol is resolved locally using the existing wire code 16 and the current foundation error names; no public foundation error API or opcode was added. STATUS shell initialization clears enclosure LNB/card observations to their existing absent/unknown defaults and keeps current record serialization order."
+      },
+      {
+        "path": "tests/control_connection_tests.cpp",
+        "sha256": "48e6e22b6bebb8548e50802a3881e1ef20c222582412defead443f0dd7cc3089",
+        "destination_path": "tests/control_connection_tests.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Focused protocol gate, dispatch classification, epoch, request order, feature negotiation, and canonical STATUS helper tests, adapted to current main records with checks that shell construction resets enclosure observation optionals.",
+        "excluded_scope": "No socket, client, engine, capture, product, or hardware tests."
+      }
+    ],
+    "scope": "Opt-in internal dtv::control static component, default OFF, with only dtv::wire as a required target dependency. Exported package component does not claim stable public or cross-release wire compatibility.",
+    "new_files": "include/dtv/userland/control_connection.h, src/control_connection.cpp, tests/control_connection_tests.cpp, tests/consumer/control/, tests/consumer/missing_control/, and docs/control-connection.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
   }
 }

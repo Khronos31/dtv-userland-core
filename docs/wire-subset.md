@@ -137,3 +137,8 @@ that have the right size but are semantically invalid are `INVALID_ARGUMENT`. En
 - Sockets, timeouts, and daemon or hardware integration.
 - `FrameReceiver` is single-threaded and not reentrant; a handler must not call `feed` on the
   same receiver.
+
+This section describes `dtv::wire` alone. When `DTV_USERLAND_BUILD_CONTROL=ON`, the separate
+internal `dtv::control` component provides the socketless connection gate and response helpers;
+see [`control-connection.md`](control-connection.md). It does not add service execution or
+product integration.
