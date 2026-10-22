@@ -274,5 +274,37 @@
     ],
     "scope": "Opt-in internal dtv::control static component, default OFF, with only dtv::wire as a required target dependency. Exported package component does not claim stable public or cross-release wire compatibility.",
     "new_files": "include/dtv/userland/control_connection.h, src/control_connection.cpp, tests/control_connection_tests.cpp, tests/consumer/control/, tests/consumer/missing_control/, and docs/control-connection.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
+  },
+  "control_readonly_client": {
+    "method": "Partially adapted only the HELLO/LIST/STATUS read-only fetch path from the old Core #16 ControlClient. Rewrote it against current main records and the socketless dtv::control component. Mutating recording methods and timeout policy were not adopted.",
+    "authority": [
+      "Core main 5ad4686538374bb3b29324ab0e74115ff7c38d7c: control_connection.h, wire.h, records.h, src/records.cpp",
+      "agent-workspace design/core-control-next-increment-plan-20261022.md, increment 2",
+      "agent-workspace design/adoption-status.md: same-connection HELLO/LIST/STATUS verification before ACQUIRE",
+      "agent-workspace DECISIONS-20261021.md and user decision 6331663366"
+    ],
+    "source_commit": "Core old PR #16 head 80ccc7b7e9ccad7c9b3656f02a28d12f003c45a0",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/control_client.h",
+        "sha256": "0ea100fa83b1f08e831932d6f5a428d18f68e2b00a2422c0cd6713ff9fe3d809",
+        "destination_path": "include/dtv/userland/control_client.h",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Read-only ClientTransport abstraction, owned StatusSnapshot/result types, and HELLO/LIST/STATUS fetch entry point adapted to the accepted injected transport boundary.",
+        "excluded_scope": "No ACQUIRE/TUNE/START/STOP/RELEASE APIs, recording session types, real socket/FD, timeout value or policy, service, capture/data path, or product integration."
+      },
+      {
+        "path": "src/control_client.cpp",
+        "sha256": "774eedeb896e5e7ecc922974058b89d686e95898aa8c3911b9a0e0c7e2423242",
+        "destination_path": "src/control_client.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Bounded frame exchange, matching reply opcode/request ID, remote error code preservation, same-connection HELLO/LIST/STATUS flow, and canonical STATUS/list identity checks rewritten for current records. Model comparison is name-only.",
+        "excluded_scope": "No timeout clock, retry, state-mutating recording operation, receive socket, engine, ATTACH/TS_DATA, or product adapter."
+      }
+    ],
+    "scope": "Read-only client within the existing opt-in dtv::control component. ClientTransport is borrowed and injected; it owns no OS resource. Successful fetch leaves it open, while a failure closes it and publishes no partial snapshot.",
+    "new_files": "tests/control_client_tests.cpp, tests/consumer/control_client/, and docs/control-client.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
   }
 }

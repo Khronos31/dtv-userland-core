@@ -12,7 +12,7 @@
 - `dtv::identity`: `dtv::core` にリンク
 - `dtv::tuning`: `dtv::wire` にリンク
 - `dtv::json`: `dtv::wire` にリンク
-- `dtv::control`: `dtv::wire` にリンク。socketやserviceを所有しない内部protocol gate
+- `dtv::control`: `dtv::wire` にリンク。socketなしprotocol gateと、transport注入のHELLO/LIST/STATUS read-only clientを提供
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
 - `dtv::capture`: `dtv::core` および `Threads` にリンク。receiver エンジンには依存しない
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
@@ -35,6 +35,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
 - `packet_stream_session_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
 - `control_connection_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
+- `control_client_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
 
 ### ビルド・テスト手順
 
@@ -118,7 +119,7 @@ cmake --build build
 ### 型付きワイヤペイロード (`dtv::wire`)
 
 HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベント、カード／トランザクションレコード、ならびに境界付き UDTV 1.0 エンベロープとフレーム処理を提供する。[型付きレコードの仕様](docs/wire-records.md) ではバイト構文と文脈検証を分離しており、呼び出し側はスナップショットを公開する前に検証を行わなければならない。初期のフレーム処理サブセットは [docs/wire-subset.md](docs/wire-subset.md) に記載されている。
-接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は `dtv::wire` の対象外である。オプショナルな `dtv::control` はsocketなしの接続単位protocol gateとtyped request/response helperを提供するが、serviceを呼び出さず、client・実socket・engine・capture data pathは含まない。wireは同一release内の内部契約であり、package component exportは安定した公開wire APIを意味しない。現行の製品クライアントやデーモンは、新しいcontrol gateに接続されていない。詳細は [control connection](docs/control-connection.md) を参照のこと。
+接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は `dtv::wire` の対象外である。オプショナルな `dtv::control` はsocketなしの接続単位protocol gateと、transportを注入するHELLO/LIST/STATUS read-only clientを提供する。実socket・service・engine・capture data pathは含まない。wireは同一release内の内部契約であり、package component exportは安定した公開wire APIを意味しない。現行の製品クライアントやデーモンは新しいcontrol APIに接続されていない。詳細は [control connection](docs/control-connection.md) と [read-only control client](docs/control-client.md) を参照のこと。
 
 ### STATUS JSON 投影 (`dtv::json`)
 
