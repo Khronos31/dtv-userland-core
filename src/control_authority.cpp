@@ -77,7 +77,7 @@ ControlServiceSession::~ControlServiceSession() noexcept
 {
     // The owner must call ControlAuthority::close() and drain the returned job
     // before destroying a live session.
-    assert(!connected());
+    assert(!connected() && !pending_);
 }
 
 ControlAuthority::ControlAuthority(const wire::ServerHello& server,
@@ -233,38 +233,25 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         if (!receiver_exists(canonical_, receiver))
             return error_reply(session, request.opcode, request.request_id,
                                Error::NOT_FOUND, "acquire");
-        const auto acquired = engine_.acquire(session.client_id_,
-                                               static_cast<ReceiverId>(receiver));
-        if (!acquired)
+        if (session.pending_)
             return error_reply(session, request.opcode, request.request_id,
-                               acquired.error(), "acquire");
-        if (!remember_lease(session, acquired.value().lease_id,
-                             static_cast<ReceiverId>(receiver))) {
-            (void)engine_.release(session.client_id_, acquired.value().lease_id);
+                               Error::BUSY, "acquire");
+        AuthorityJob job;
+        job.kind = AuthorityJobKind::acquire;
+        job.key = SessionKey{session.client_id_, request.request_id};
+        job.client_id = session.client_id_;
+        job.receiver = static_cast<ReceiverId>(receiver);
+        if (!executor.submit(job))
             return error_reply(session, request.opcode, request.request_id,
                                Error::RESOURCE_LIMIT, "acquire");
-        }
-        wire::AcquireResponse response;
-        response.epoch = server_.epoch;
-        response.lease_id = acquired.value().lease_id;
-        const auto size = wire::encode_acquire_response(response,
-            MutableByteView{output.data + wire::kHeaderSize,
-                            output.size - wire::kHeaderSize});
-        if (!size) {
-            forget_lease(session, response.lease_id);
-            (void)engine_.release(session.client_id_, response.lease_id);
-            return error_reply(session, request.opcode, request.request_id,
-                               size.error(), "acquire");
-        }
-        wire::Header header;
-        header.kind = wire::Kind::response;
-        header.opcode = request.opcode;
-        header.request_id = request.request_id;
-        header.payload_length = static_cast<std::uint32_t>(size.value());
-        const auto frame = wire::encode_header(header, output);
-        if (!frame) return error_reply(session, request.opcode, request.request_id,
-                                       frame.error(), "acquire");
-        return reply(session, wire::kHeaderSize + size.value());
+        session.pending_ = true;
+        session.pending_request_id_ = request.request_id;
+        session.pending_receiver_ = static_cast<ReceiverId>(receiver);
+        session.pending_kind_ = AuthorityJobKind::acquire;
+        AuthorityReply queued;
+        queued.action = wire::InboundAction::dispatch;
+        queued.queued = true;
+        return queued;
     }
     case wire::ControlRequestKind::tune: {
         if (session.pending_)
@@ -371,6 +358,16 @@ AuthorityJob ControlAuthority::close(ControlServiceSession& session) noexcept
 {
     AuthorityJob job;
     if (&session.authority_ != this || !session.connected()) return job;
+    if (session.pending_ &&
+        (session.pending_kind_ == AuthorityJobKind::acquire ||
+         session.pending_kind_ == AuthorityJobKind::rollback_release)) {
+        session.closed_ = true;
+        job.kind = AuthorityJobKind::disconnect;
+        job.client_id = session.client_id_;
+        job.key = SessionKey{session.client_id_, session.pending_request_id_};
+        job.deferred = true;
+        return job;
+    }
     ControlServiceSession** link = &sessions_;
     while (*link != nullptr && *link != &session) link = &(*link)->next_;
     if (*link == &session) *link = session.next_;
@@ -391,8 +388,155 @@ AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) n
 {
     ControlServiceSession* session = find_session(key.client_id);
     if (session == nullptr || !session->pending_ ||
-        session->pending_request_id_ != key.request_id || session->closed_)
+        session->pending_request_id_ != key.request_id)
         return {};
+    return complete(AuthorityCompletion{key, session->pending_kind_, result, 0U,
+                                        session->pending_receiver_});
+}
+
+AuthorityJob ControlAuthority::disconnect_job(ControlServiceSession& session) noexcept
+{
+    AuthorityJob job;
+    job.kind = AuthorityJobKind::disconnect;
+    job.key = SessionKey{session.client_id_, session.pending_request_id_};
+    job.client_id = session.client_id_;
+    session.closed_ = true;
+    session.pending_ = true;
+    session.pending_kind_ = AuthorityJobKind::disconnect;
+    return job;
+}
+
+Error ControlAuthority::cleanup_submitted(const AuthorityJob& job, bool accepted) noexcept
+{
+    if (job.kind != AuthorityJobKind::disconnect || job.deferred)
+        return Error::INVALID_ARGUMENT;
+    ControlServiceSession* session = find_session(job.client_id);
+    if (session == nullptr || !session->closed_ ||
+        (session->pending_ && session->pending_kind_ != AuthorityJobKind::disconnect) ||
+        job.key.client_id != session->client_id_ ||
+        job.key.request_id != session->pending_request_id_)
+        return Error::NOT_FOUND;
+    session->pending_ = accepted;
+    session->pending_kind_ = AuthorityJobKind::disconnect;
+    return Error::OK;
+}
+
+AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion) noexcept
+{
+    const SessionKey& key = completion.key;
+    ControlServiceSession* session = find_session(key.client_id);
+    if (session == nullptr || !session->pending_ ||
+        session->pending_request_id_ != key.request_id ||
+        session->pending_kind_ != completion.kind)
+        return {};
+    const Error result = completion.error;
+    if (completion.kind == AuthorityJobKind::acquire) {
+        if (session->closed_) {
+            AuthorityReply reply;
+            reply.action = wire::InboundAction::close;
+            reply.cleanup = disconnect_job(*session);
+            reply.cleanup_required = true;
+            return reply;
+        }
+        if (result != Error::OK) {
+            session->pending_ = false;
+            return error_reply(*session, wire::kOpcodeAcquire,
+                               static_cast<std::uint32_t>(key.request_id), result, "acquire");
+        }
+        Error acquire_error = Error::OK;
+        bool lease_remembered = false;
+        if (completion.lease_id == 0U) {
+            session->closed_ = true;
+            AuthorityReply unresolved;
+            unresolved.action = wire::InboundAction::close;
+            unresolved.cleanup = disconnect_job(*session);
+            unresolved.cleanup_required = true;
+            return unresolved;
+        }
+        if (completion.receiver != session->pending_receiver_)
+            acquire_error = Error::INTERNAL;
+        else if (!remember_lease(*session, completion.lease_id, completion.receiver))
+            acquire_error = Error::RESOURCE_LIMIT;
+        else
+            lease_remembered = true;
+        if (acquire_error == Error::OK) {
+            wire::AcquireResponse response;
+            response.epoch = server_.epoch;
+            response.lease_id = completion.lease_id;
+            const MutableByteView output{session->response_.data(), session->response_.size()};
+            const auto size = wire::encode_acquire_response(response,
+                MutableByteView{output.data + wire::kHeaderSize,
+                                output.size - wire::kHeaderSize});
+            if (!size) acquire_error = size.error();
+            else {
+                wire::Header header;
+                header.kind = wire::Kind::response;
+                header.opcode = wire::kOpcodeAcquire;
+                header.request_id = static_cast<std::uint32_t>(key.request_id);
+                header.payload_length = static_cast<std::uint32_t>(size.value());
+                const auto encoded = wire::encode_header(header, output);
+                if (!encoded) acquire_error = encoded.error();
+                else {
+                    session->pending_ = false;
+                    return reply(*session, wire::kHeaderSize + size.value());
+                }
+            }
+        }
+        if (lease_remembered)
+            forget_lease(*session, completion.lease_id);
+        session->pending_kind_ = AuthorityJobKind::rollback_release;
+        session->pending_error_ = acquire_error;
+        session->pending_lease_id_ = completion.lease_id;
+        AuthorityReply rollback;
+        rollback.action = wire::InboundAction::dispatch;
+        rollback.queued = true;
+        rollback.cleanup_required = true;
+        rollback.cleanup.kind = AuthorityJobKind::rollback_release;
+        rollback.cleanup.key = key;
+        rollback.cleanup.client_id = key.client_id;
+        rollback.cleanup.lease_id = completion.lease_id;
+        rollback.cleanup.receiver = session->pending_receiver_;
+        rollback.cleanup.rollback_error = acquire_error;
+        return rollback;
+    }
+    if (completion.kind == AuthorityJobKind::rollback_release) {
+        if (completion.lease_id != session->pending_lease_id_ ||
+            completion.receiver != session->pending_receiver_)
+            return {};
+        if (result != Error::OK || session->closed_) {
+            session->closed_ = true;
+            AuthorityReply cleanup;
+            cleanup.action = wire::InboundAction::close;
+            cleanup.cleanup = disconnect_job(*session);
+            cleanup.cleanup_required = true;
+            return cleanup;
+        }
+        session->pending_ = false;
+        return error_reply(*session, wire::kOpcodeAcquire,
+                           static_cast<std::uint32_t>(key.request_id),
+                           session->pending_error_,
+                           "acquire");
+    }
+    if (completion.kind == AuthorityJobKind::disconnect) {
+        if (result != Error::OK) {
+            session->pending_ = false;
+            AuthorityReply retained;
+            retained.action = wire::InboundAction::close;
+            retained.cleanup_required = true;
+            retained.cleanup.kind = AuthorityJobKind::disconnect;
+            retained.cleanup.key = key;
+            retained.cleanup.client_id = key.client_id;
+            return retained;
+        }
+        ControlServiceSession** link = &sessions_;
+        while (*link != nullptr && *link != session) link = &(*link)->next_;
+        if (*link == session) *link = session->next_;
+        session->next_ = nullptr;
+        session->pending_ = false;
+        session->client_id_ = 0U;
+        session->lease_count_ = 0U;
+        return {};
+    }
     session->pending_ = false;
     if (session->pending_kind_ == AuthorityJobKind::tune) {
         if (result != Error::OK)
@@ -493,21 +637,48 @@ Error ControlAuthority::response_sent(ControlServiceSession& session, bool compl
 Error ControlAuthority::execute_job(ReceiverEngine& engine,
                                     const AuthorityJob& job) noexcept
 {
+    if (job.kind == AuthorityJobKind::acquire) return Error::INVALID_ARGUMENT;
+    return execute_job_value(engine, job).error;
+}
+
+AuthorityCompletion ControlAuthority::execute_job_value(ReceiverEngine& engine,
+                                                         const AuthorityJob& job) noexcept
+{
+    AuthorityCompletion completion;
+    completion.key = job.key;
+    completion.kind = job.kind;
+    completion.receiver = job.receiver;
+    completion.lease_id = job.lease_id;
+    if (job.kind == AuthorityJobKind::tune) {
+        completion.lease_id = job.tune.lease_id;
+        completion.receiver = job.tune.receiver;
+    }
     switch (job.kind) {
+    case AuthorityJobKind::acquire: {
+        const auto result = engine.acquire(job.client_id, job.receiver);
+        completion.error = result ? Error::OK : result.error();
+        if (result) completion.lease_id = result.value().lease_id;
+        return completion;
+    }
     case AuthorityJobKind::tune: {
         const auto result = engine.execute_admitted_tune(job.tune);
-        return result ? Error::OK : result.error();
+        completion.error = result ? Error::OK : result.error();
+        return completion;
     }
-    case AuthorityJobKind::release: {
+    case AuthorityJobKind::release:
+    case AuthorityJobKind::rollback_release: {
         const auto result = engine.release(job.client_id, job.lease_id);
-        return result ? Error::OK : result.error();
+        completion.error = result ? Error::OK : result.error();
+        return completion;
     }
     case AuthorityJobKind::disconnect: {
         const auto result = engine.disconnect_client(job.client_id);
-        return result ? Error::OK : result.error();
+        completion.error = result ? Error::OK : result.error();
+        return completion;
     }
     }
-    return Error::INVALID_ARGUMENT;
+    completion.error = Error::INVALID_ARGUMENT;
+    return completion;
 }
 
 }  // namespace dtv::userland::detail

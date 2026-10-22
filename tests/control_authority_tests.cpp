@@ -33,7 +33,12 @@ public:
     }
     bool selects_satellite_stream_before_tune() const noexcept override { return false; }
     std::uint32_t lock_settle_ms(ReceiverId, ReceiverSystem) const noexcept override { return 0U; }
-    Result<void> open(ReceiverId) noexcept override { return Result<void>::success(); }
+    Result<void> open(ReceiverId) noexcept override
+    {
+        ++open_calls;
+        open_thread = std::this_thread::get_id();
+        return Result<void>::success();
+    }
     Result<void> tune(ReceiverId, ReceiverSystem, std::uint32_t,
                       std::uint32_t) noexcept override
     {
@@ -72,6 +77,15 @@ public:
     Result<void> close(ReceiverId) noexcept override
     {
         ++close_calls;
+        close_thread = std::this_thread::get_id();
+        {
+            std::unique_lock<std::mutex> lock(mutex);
+            if (block_close) {
+                close_started = true;
+                condition.notify_all();
+                condition.wait(lock, [&] { return !block_close; });
+            }
+        }
         return close_error == Error::OK ? Result<void>::success()
                                         : Result<void>::failure(close_error);
     }
@@ -109,11 +123,27 @@ public:
         block_tune = false;
         condition.notify_all();
     }
+    void wait_for_close()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        condition.wait(lock, [&] { return close_started; });
+    }
+    void unblock_close()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        block_close = false;
+        condition.notify_all();
+    }
 
     std::mutex mutex;
     std::condition_variable condition;
     bool block_tune = false;
     bool tune_started = false;
+    bool block_close = false;
+    bool close_started = false;
+    std::thread::id open_thread{};
+    std::thread::id close_thread{};
+    std::atomic<int> open_calls{0};
     std::atomic<int> hz_calls{0};
     std::atomic<int> khz_calls{0};
     std::atomic<int> close_calls{0};
@@ -235,8 +265,9 @@ bool hello(ControlAuthority& authority, ControlServiceSession& session, Executor
            send_full(authority, session, executor) == Error::OK;
 }
 
-AuthorityReply acquire(ControlAuthority& authority, ControlServiceSession& session,
-                       Executor& executor, std::uint32_t id, ReceiverId receiver)
+AuthorityReply acquire(ControlAuthority& authority, ReceiverEngine& engine,
+                       ControlServiceSession& session, Executor& executor,
+                       std::uint32_t id, ReceiverId receiver)
 {
     std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
     const auto size = w::encode_acquire_request({authority.server().epoch,
@@ -244,9 +275,22 @@ AuthorityReply acquire(ControlAuthority& authority, ControlServiceSession& sessi
     if (!size) return {};
     w::Context context;
     w::Snapshot snapshot;
-    return authority.accept(session,
+    auto reply = authority.accept(session,
         frame(w::kOpcodeAcquire, id, {payload.data(), size.value()}), context, snapshot, 0U,
         executor);
+    if (!reply.queued || executor.count != 1U) return reply;
+    const AuthorityJob job = executor.pop();
+    return authority.complete(ControlAuthority::execute_job_value(engine, job));
+}
+
+AuthorityCompletion execute_on_worker(ReceiverEngine& engine, const AuthorityJob& job)
+{
+    AuthorityCompletion completion;
+    std::thread worker([&] {
+        completion = ControlAuthority::execute_job_value(engine, job);
+    });
+    worker.join();
+    return completion;
 }
 
 std::uint64_t acquired_lease(const AuthorityReply& reply)
@@ -319,11 +363,11 @@ bool test_projection_lease_tune_and_gate()
           !status_value.value().lnb_15v_enabled.present);
     CHECK(send_full(authority, first, executor) == Error::OK);
 
-    const auto lease_reply = acquire(authority, first, executor, 4U, 17U);
+    const auto lease_reply = acquire(authority, engine, first, executor, 4U, 17U);
     CHECK(lease_reply.action == w::InboundAction::respond && acquired_lease(lease_reply) != 0U);
     const std::uint64_t lease = acquired_lease(lease_reply);
     CHECK(send_full(authority, first, executor) == Error::OK);
-    const auto busy = acquire(authority, second, executor, 2U, 17U);
+    const auto busy = acquire(authority, engine, second, executor, 2U, 17U);
     CHECK(busy.action == w::InboundAction::respond);
     const auto busy_header = w::decode_header({busy.frame.data, w::kHeaderSize});
     CHECK(busy_header && busy_header.value().kind == w::Kind::error_response);
@@ -404,7 +448,7 @@ bool test_authority_release_preserves_legacy_engine_lease()
     ControlServiceSession session(authority);
     Executor executor;
     CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
-    const auto acquired = acquire(authority, session, executor, 2U, 18U);
+    const auto acquired = acquire(authority, engine, session, executor, 2U, 18U);
     const std::uint64_t authority_lease = acquired_lease(acquired);
     CHECK(acquired.action == w::InboundAction::respond && authority_lease != 0U);
     CHECK(send_full(authority, session, executor) == Error::OK);
@@ -462,7 +506,7 @@ bool test_rejected_queue_aborts_and_late_completion_drops()
     ControlServiceSession session(authority);
     Executor executor;
     CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
-    const auto acquired = acquire(authority, session, executor, 2U, 17U);
+    const auto acquired = acquire(authority, engine, session, executor, 2U, 17U);
     const std::uint64_t lease = acquired_lease(acquired);
     CHECK(lease != 0U && send_full(authority, session, executor) == Error::OK);
 
@@ -537,7 +581,7 @@ bool test_running_tune_completion_after_close_and_cleanup()
     ControlServiceSession session(authority);
     Executor executor;
     CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
-    const auto acquired = acquire(authority, session, executor, 2U, 17U);
+    const auto acquired = acquire(authority, engine, session, executor, 2U, 17U);
     const auto lease = acquired_lease(acquired);
     CHECK(lease != 0U && send_full(authority, session, executor) == Error::OK);
     std::array<std::uint8_t, 128> payload{};
@@ -596,7 +640,7 @@ bool test_failed_release_is_not_quiesced()
     ControlServiceSession session(authority);
     Executor executor;
     CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
-    const auto acquired = acquire(authority, session, executor, 2U, 17U);
+    const auto acquired = acquire(authority, engine, session, executor, 2U, 17U);
     const auto lease = acquired_lease(acquired);
     CHECK(lease != 0U && send_full(authority, session, executor) == Error::OK);
     std::array<std::uint8_t, 128> payload{};
@@ -624,6 +668,148 @@ bool test_failed_release_is_not_quiesced()
               static_cast<std::uint32_t>(Error::USB_IO));
     CHECK(send_full(authority, session, executor) == Error::OK);
     (void)authority.close(session);
+    return true;
+}
+
+bool test_async_acquire_rollback_and_close_ownership()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 2> ids{{17U, 18U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const std::array<ReceiverCapability, 2> caps{{
+        ReceiverCapability{17U, true, false, true},
+        ReceiverCapability{18U, true, false, true}}};
+    CHECK(engine.configure_strict_capabilities(caps.data(), caps.size()));
+    const auto list = make_list(ids.data(), ids.size());
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession first(authority);
+    ControlServiceSession second(authority);
+    Executor executor;
+    CHECK(authority.open(first) == Error::OK && authority.open(second) == Error::OK);
+    CHECK(hello(authority, first, executor) && hello(authority, second, executor));
+
+    std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
+    auto size = w::encode_acquire_request({server.epoch, 17U},
+        {payload.data(), payload.size()});
+    CHECK(size);
+    w::Context context;
+    w::Snapshot snapshot;
+    executor.reject = true;
+    const auto rejected = authority.accept(first,
+        frame(w::kOpcodeAcquire, 2U, {payload.data(), size.value()}), context, snapshot,
+        0U, executor);
+    CHECK(rejected.action == w::InboundAction::respond && !rejected.queued &&
+          backend.open_calls == 0 && executor.count == 0U);
+    CHECK(send_full(authority, first, executor) == Error::OK);
+    executor.reject = false;
+
+    const auto pending = authority.accept(first,
+        frame(w::kOpcodeAcquire, 3U, {payload.data(), size.value()}), context, snapshot,
+        0U, executor);
+    CHECK(pending.queued && executor.count == 1U && backend.open_calls == 0);
+    const std::thread::id poll_thread = std::this_thread::get_id();
+    const AuthorityJob acquire_job = executor.pop();
+    CHECK(acquire_job.kind == AuthorityJobKind::acquire &&
+          acquire_job.key.client_id == first.client_id() && acquire_job.receiver == 17U);
+    const AuthorityCompletion acquired = execute_on_worker(engine, acquire_job);
+    CHECK(acquired.error == Error::OK && acquired.lease_id != 0U &&
+          acquired.kind == AuthorityJobKind::acquire && backend.open_calls == 1 &&
+          backend.open_thread != poll_thread);
+    AuthorityCompletion wrong_kind = acquired;
+    wrong_kind.kind = AuthorityJobKind::tune;
+    CHECK(authority.complete(wrong_kind).action == w::InboundAction::close);
+    AuthorityCompletion malformed = acquired;
+    malformed.receiver = 18U;
+    const auto rollback = authority.complete(malformed);
+    CHECK(rollback.cleanup_required && rollback.queued &&
+          rollback.cleanup.kind == AuthorityJobKind::rollback_release &&
+          rollback.cleanup.lease_id == acquired.lease_id &&
+          rollback.cleanup.receiver == 17U && backend.close_calls == 0);
+    CHECK(authority.complete(acquired).action == w::InboundAction::close);
+
+    executor.reject = true;
+    CHECK(!executor.submit(rollback.cleanup));
+    executor.reject = false;
+    CHECK(executor.submit(rollback.cleanup) && executor.count == 1U);
+    const AuthorityJob rollback_job = executor.pop();
+    backend.block_close = true;
+    AuthorityCompletion rolled_back;
+    std::thread worker([&] {
+        rolled_back = ControlAuthority::execute_job_value(engine, rollback_job);
+    });
+    backend.wait_for_close();
+    CHECK(backend.close_calls == 1);
+    size = w::encode_acquire_request({server.epoch, 18U},
+        {payload.data(), payload.size()});
+    CHECK(size);
+    const auto other_pending = authority.accept(second,
+        frame(w::kOpcodeAcquire, 2U, {payload.data(), size.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(other_pending.queued && executor.count == 1U);
+    const AuthorityJob other_job = executor.pop();
+    const AuthorityCompletion other_failure{other_job.key, other_job.kind,
+                                             Error::USB_IO, 0U, other_job.receiver};
+    const auto other_completed = authority.complete(other_failure);
+    const auto other_header = w::decode_header(
+        {other_completed.frame.data, w::kHeaderSize});
+    CHECK(other_completed.action == w::InboundAction::respond && other_header &&
+          other_header.value().kind == w::Kind::error_response &&
+          send_full(authority, second, executor) == Error::OK);
+    const auto other_list = w::encode_list_request({server.epoch},
+        {payload.data(), payload.size()});
+    CHECK(other_list);
+    const auto listed = authority.accept(second,
+        frame(w::kOpcodeList, 3U, {payload.data(), other_list.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(listed.action == w::InboundAction::respond && send_full(authority, second,
+          executor) == Error::OK);
+    backend.unblock_close();
+    worker.join();
+    CHECK(rolled_back.error == Error::OK &&
+          rolled_back.kind == AuthorityJobKind::rollback_release &&
+          backend.close_thread != poll_thread);
+    const auto rollback_done = authority.complete(rolled_back);
+    const auto rollback_header = w::decode_header(
+        {rollback_done.frame.data, w::kHeaderSize});
+    CHECK(rollback_done.action == w::InboundAction::respond && rollback_header &&
+          rollback_header.value().kind == w::Kind::error_response && backend.close_calls == 1);
+    CHECK(send_full(authority, first, executor) == Error::OK);
+
+    size = w::encode_acquire_request({server.epoch, 18U},
+        {payload.data(), payload.size()});
+    CHECK(size);
+    const auto late_pending = authority.accept(second,
+        frame(w::kOpcodeAcquire, 4U, {payload.data(), size.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(late_pending.queued && backend.open_calls == 1);
+    const AuthorityJob late_job = executor.pop();
+    const auto late_completion = execute_on_worker(engine, late_job);
+    CHECK(late_completion.error == Error::OK && backend.open_calls == 2 &&
+          backend.open_thread != poll_thread);
+    const AuthorityJob deferred = authority.close(second);
+    CHECK(deferred.kind == AuthorityJobKind::disconnect && deferred.deferred &&
+          backend.close_calls == 1);
+    const auto late_reply = authority.complete(late_completion);
+    CHECK(late_reply.action == w::InboundAction::close && late_reply.cleanup_required &&
+          late_reply.cleanup.kind == AuthorityJobKind::disconnect &&
+          !late_reply.cleanup.deferred && backend.close_calls == 1);
+    executor.reject = true;
+    CHECK(!executor.submit(late_reply.cleanup));
+    CHECK(authority.cleanup_submitted(late_reply.cleanup, false) == Error::OK);
+    executor.reject = false;
+    CHECK(executor.submit(late_reply.cleanup));
+    CHECK(authority.cleanup_submitted(late_reply.cleanup, true) == Error::OK);
+    const AuthorityCompletion disconnected = execute_on_worker(engine, executor.pop());
+    CHECK(disconnected.kind == AuthorityJobKind::disconnect &&
+          disconnected.error == Error::OK && backend.close_calls == 2 &&
+          backend.close_thread != poll_thread);
+    CHECK(authority.complete(disconnected).action == w::InboundAction::close);
+    (void)authority.close(first);
     return true;
 }
 
@@ -702,6 +888,7 @@ int main()
     if (!test_rejected_queue_aborts_and_late_completion_drops()) return 1;
     if (!test_running_tune_completion_after_close_and_cleanup()) return 1;
     if (!test_failed_release_is_not_quiesced()) return 1;
+    if (!test_async_acquire_rollback_and_close_ownership()) return 1;
     if (!test_other_receiver_cleanup_while_tune_blocks()) return 1;
     if (!test_client_id_domain_and_authority_exhaustion()) return 1;
     std::puts("control authority tests passed");

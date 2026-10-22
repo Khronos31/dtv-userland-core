@@ -908,10 +908,14 @@ struct ControlWorkerLanes::Impl final {
         completion.status_scope = task.status_scope;
         Error operation_error = Error::OK;
         switch (task.operation) {
-        case ControlWorkerOperation::tuner_authority_job:
-            operation_error = ControlWorkerLanes::execute_authority_job(
+        case ControlWorkerOperation::tuner_authority_job: {
+            completion.authority_completion = ControlWorkerLanes::execute_authority_job(
                 tuner_service, task.authority_job);
+            operation_error = completion.authority_completion.error;
+            completion.lease_id = completion.authority_completion.lease_id;
+            completion.receiver = completion.authority_completion.receiver;
             break;
+        }
         case ControlWorkerOperation::tuner_acquire: {
             const auto result = tuner_service.acquire(task.client_id, task.receiver);
             if (!result) operation_error = result.error();
@@ -1347,8 +1351,11 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     }
     if (task.operation == ControlWorkerOperation::tuner_authority_job) {
         const auto& job = task.authority_job;
+        if (job.deferred) return Result<void>::failure(Error::INVALID_ARGUMENT);
         if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::acquire &&
             job.kind != dtv::userland::detail::AuthorityJobKind::release &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::rollback_release &&
             job.kind != dtv::userland::detail::AuthorityJobKind::disconnect) {
             return Result<void>::failure(Error::INVALID_ARGUMENT);
         }
@@ -1382,11 +1389,11 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     return impl_->lanes[index]->submit(task);
 }
 
-Error ControlWorkerLanes::execute_authority_job(
+dtv::userland::detail::AuthorityCompletion ControlWorkerLanes::execute_authority_job(
     TunerService& tuner_service,
     const dtv::userland::detail::AuthorityJob& job) noexcept
 {
-    return dtv::userland::detail::ControlAuthority::execute_job(
+    return dtv::userland::detail::ControlAuthority::execute_job_value(
         tuner_service.engine_, job);
 }
 

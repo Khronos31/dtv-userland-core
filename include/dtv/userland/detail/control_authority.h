@@ -18,7 +18,17 @@ struct SessionKey final {
     std::uint64_t request_id = 0U;
 };
 
-enum class AuthorityJobKind : std::uint8_t { tune, release, disconnect };
+enum class AuthorityJobKind : std::uint8_t {
+    acquire, tune, release, rollback_release, disconnect
+};
+
+struct AuthorityCompletion final {
+    SessionKey key{};
+    AuthorityJobKind kind = AuthorityJobKind::tune;
+    Error error = Error::OK;
+    std::uint64_t lease_id = 0U;
+    ReceiverId receiver = 0U;
+};
 
 struct AuthorityJob final {
     AuthorityJobKind kind = AuthorityJobKind::tune;
@@ -27,11 +37,16 @@ struct AuthorityJob final {
     std::uint64_t client_id = 0U;
     std::uint64_t lease_id = 0U;
     ReceiverId receiver = 0U;
+    Error rollback_error = Error::OK;
+    // A deferred disconnect is only a close intent; completion must first
+    // return the runnable cleanup value.
+    bool deferred = false;
 };
 
 class ControlAuthorityExecutor {
 public:
     virtual ~ControlAuthorityExecutor() noexcept = default;
+    // false means no worker owns the job; true transfers the value to it.
     virtual bool submit(const AuthorityJob& job) noexcept = 0;
 };
 
@@ -40,6 +55,8 @@ struct AuthorityReply final {
     ByteView frame{nullptr, 0U};
     bool close_after_reply = false;
     bool queued = false;
+    // The caller owns cleanup until submit acceptance and must retain it when
+    // submit rejects; a returned completion never submits this value itself.
     bool cleanup_required = false;
     AuthorityJob cleanup{};
 };
@@ -73,6 +90,7 @@ private:
     std::uint64_t pending_request_id_ = 0U;
     std::uint64_t pending_lease_id_ = 0U;
     std::uint64_t pending_tune_revision_ = 0U;
+    Error pending_error_ = Error::OK;
     ReceiverId pending_receiver_ = 0U;
     AuthorityJobKind pending_kind_ = AuthorityJobKind::tune;
     bool used_ = false;
@@ -102,12 +120,17 @@ public:
                           std::uint64_t accepted_at_ms,
                           ControlAuthorityExecutor& executor) noexcept;
     AuthorityJob close(ControlServiceSession& session) noexcept;
+    AuthorityReply complete(const AuthorityCompletion& completion) noexcept;
     AuthorityReply complete(const SessionKey& key, Error result) noexcept;
+    // Records acceptance for a retained disconnect value after rollback/close.
+    Error cleanup_submitted(const AuthorityJob& job, bool accepted) noexcept;
     Error response_sent(ControlServiceSession& session, bool complete_frame,
                         ControlAuthorityExecutor& executor,
                         AuthorityJob* rejected_cleanup) noexcept;
 
     static Error execute_job(ReceiverEngine& engine, const AuthorityJob& job) noexcept;
+    static AuthorityCompletion execute_job_value(ReceiverEngine& engine,
+                                                  const AuthorityJob& job) noexcept;
 
 private:
     friend class ControlServiceSession;
@@ -124,6 +147,7 @@ private:
     bool remember_lease(ControlServiceSession& session, std::uint64_t lease_id,
                         ReceiverId receiver) noexcept;
     void forget_lease(ControlServiceSession& session, std::uint64_t lease_id) noexcept;
+    AuthorityJob disconnect_job(ControlServiceSession& session) noexcept;
 
     wire::ServerHello server_;
     wire::ListResponse canonical_;

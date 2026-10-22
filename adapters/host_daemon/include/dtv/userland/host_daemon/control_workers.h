@@ -149,6 +149,7 @@ struct ControlWorkerCompletion final {
     dtv::userland::detail::SessionKey authority_key{};
     dtv::userland::detail::AuthorityJobKind authority_job_kind =
         dtv::userland::detail::AuthorityJobKind::tune;
+    dtv::userland::detail::AuthorityCompletion authority_completion{};
     std::uint64_t card_handle = 0U;
     Error error = Error::OK;
     TunerAcquireResult tuner_acquire{};
@@ -230,7 +231,7 @@ public:
     Result<void> join() noexcept;
 
 private:
-    static Error execute_authority_job(
+    static dtv::userland::detail::AuthorityCompletion execute_authority_job(
         TunerService& tuner_service,
         const dtv::userland::detail::AuthorityJob& job) noexcept;
     struct Impl;
