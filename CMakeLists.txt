@@ -311,6 +311,10 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         adapters/host_facade/include/px4/ipc.h
         adapters/host_facade/include/px4/transport.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/px4)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/TUNER_SERVICE_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_tuner)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
