@@ -390,6 +390,12 @@ AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) n
     if (session == nullptr || !session->pending_ ||
         session->pending_request_id_ != key.request_id)
         return {};
+    if (session->pending_kind_ == AuthorityJobKind::acquire ||
+        session->pending_kind_ == AuthorityJobKind::rollback_release) {
+        AuthorityReply rejected;
+        rejected.action = wire::InboundAction::ignored;
+        return rejected;
+    }
     return complete(AuthorityCompletion{key, session->pending_kind_, result, 0U,
                                         session->pending_receiver_});
 }

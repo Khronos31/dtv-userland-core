@@ -85,6 +85,8 @@ enum class InboundAction : std::uint8_t {
     dispatch,
     // The input broke a framing or connection rule: close without a reply.
     close,
+    // An internal completion was rejected without a reply or connection close.
+    ignored,
 };
 
 struct Inbound final {
