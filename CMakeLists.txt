@@ -85,7 +85,7 @@ target_include_directories(dtv_userland_json PUBLIC
 target_link_libraries(dtv_userland_json PUBLIC dtv::wire)
 
 if(DTV_USERLAND_BUILD_CONTROL)
-    add_library(dtv_userland_control STATIC src/control_connection.cpp)
+    add_library(dtv_userland_control STATIC src/control_connection.cpp src/control_client.cpp)
     add_library(dtv::control ALIAS dtv_userland_control)
     set_target_properties(dtv_userland_control PROPERTIES
         EXPORT_NAME control
@@ -184,7 +184,8 @@ if(DTV_USERLAND_BUILD_CARD)
 endif()
 install(DIRECTORY include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}
     PATTERN "detail" EXCLUDE
-    PATTERN "control_connection.h" EXCLUDE)
+    PATTERN "control_connection.h" EXCLUDE
+    PATTERN "control_client.h" EXCLUDE)
 install(FILES
     include/dtv/userland/detail/text.h
     include/dtv/userland/detail/sha256.h
@@ -211,7 +212,9 @@ if(DTV_USERLAND_BUILD_CONTROL)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
 endif()
 if(DTV_USERLAND_BUILD_CONTROL)
-    install(FILES include/dtv/userland/control_connection.h
+    install(FILES
+        include/dtv/userland/control_connection.h
+        include/dtv/userland/control_client.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland)
 endif()
 if(DTV_USERLAND_BUILD_CARD)
@@ -283,6 +286,10 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(control_connection_tests tests/control_connection_tests.cpp)
         target_link_libraries(control_connection_tests PRIVATE dtv::control)
         add_test(NAME control_connection_tests COMMAND control_connection_tests)
+
+        add_executable(control_client_tests tests/control_client_tests.cpp)
+        target_link_libraries(control_client_tests PRIVATE dtv::control)
+        add_test(NAME control_client_tests COMMAND control_client_tests)
     endif()
 
     add_executable(status_json_tests tests/status_json_tests.cpp)
