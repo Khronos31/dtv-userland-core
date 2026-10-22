@@ -30,6 +30,12 @@ beginは1つの上限付きworkspaceを例外なしのheap確保で使い、既�
 
 `stop_recording` はsessionのstreamへ1回のtyped STOPを送り、leaseを解放しない。`release_recording` はsessionのleaseへ別のtyped RELEASEを1回送る。両APIは失敗・応答不明のrequestを再送せず、成功時はtransportを開いたまま返す。応答が届く前にdaemonがSTART/STOP/RELEASEを適用した可能性はclientから判定できないため、timeout後に物理cleanup完了や `quiesced=true` を推定しない。disconnect後の回収はdaemon owner契約の責任である。
 
+## CARD session client
+
+`begin_card(TimedClientTransport&, CardClientOptions, Timeout)` はCARD_SERVICEをrequired featureとしてHELLOし、同じ接続でLIST/STATUS、readerの存在確認、CARD_STATUS、CARD_CONNECTを行う。HELLO/LIST/STATUSには一つの期限、CARD_STATUS/CARD_CONNECTにはその後に始める同じ長さの期限を使い、各区間内でdeadlineを延長しない。request IDは1–5を使う。readerがsnapshotにない場合やidentity constraintが一致しない場合は `NOT_FOUND` で接続を閉じ、readerやCARD capabilityを推定しない。成功時はdaemon epoch、reader、handle、generation、CARD_CONNECTが選択したprotocol、次request ID 6を `CardClientSession` に保持し、接続を開いたまま返す。
+
+`card_status` はsessionのepoch/readerを使って現在generationと挿入・初期化状態を取得する。`card_disconnect` はsessionのepoch/reader/handle/bound generationを使う。responseが同じreader/handleを示して `consumed=true` なら、`quiesced` やcleanup errorの有無にかかわらずsessionのhandle/generation/protocolを消費し、typed responseをresultに保持する。cleanup errorがあればremote error codeを保持して対応するErrorを返し、errorがなく `quiesced=false` ならprotocol errorを返す。`consumed=false` とerrorなしもprotocol errorで、sessionは消費しない。status/disconnectそれぞれ一回の呼び出し内で単一deadlineを使い、失敗時は接続を閉じてrequestを再送しない。今回のclient incrementにはCARD_RESET/TRANSMIT APIは含めず、後続incrementで追加する。
+
 ## 独立LNB power client
 
 `set_lnb_power(TimedClientTransport&, enabled, Timeout)` は同じ接続でHELLO/LIST/STATUSを行い、STATUSのepochを使ってopcode `0x0039` の `LnbPowerRequest` をrequest ID 4で一度送る。HELLOからLNB応答まで一つの単調時計deadlineを共有し、timeout後にdeadlineを更新しない。wire versionやfeature bitは追加しない。LNB能力・daemonの `--allow-lnb-power`・物理操作はserver owner側の責任で、このclientはそれらを代行しない。
