@@ -10,6 +10,14 @@
 #include <pthread.h>
 #endif
 
+#if defined(__SANITIZE_ADDRESS__)
+#define DTV_USERLAND_CONTROL_ADDRESS_SANITIZER 1
+#elif defined(__has_feature)
+#if __has_feature(address_sanitizer)
+#define DTV_USERLAND_CONTROL_ADDRESS_SANITIZER 1
+#endif
+#endif
+
 namespace {
 
 namespace w = dtv::userland::wire;
@@ -421,7 +429,11 @@ bool run_stack_probe(w::ClientTransport& transport, std::size_t stack_size,
 
 void test_small_stack_probes()
 {
+#if defined(DTV_USERLAND_CONTROL_ADDRESS_SANITIZER)
+    constexpr std::size_t kStackSizes[] = {512U * 1024U, 768U * 1024U};
+#else
     constexpr std::size_t kStackSizes[] = {256U * 1024U, 512U * 1024U, 768U * 1024U};
+#endif
     FakeTransport source;
     const w::StatusFetchResult seeded = w::fetch_status(source);
     CHECK(seeded);
