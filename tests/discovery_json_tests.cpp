@@ -228,6 +228,25 @@ void test_serial_uniqueness_and_unknown_receivers()
     CHECK(second != std::string::npos && json.find("\"receivers\"", second) == std::string::npos);
 }
 
+void test_duplicate_enclosure_serial_is_not_unique()
+{
+    Fixture fixture;
+    make_scan(fixture);
+    fixture.scan.enclosure_count = 1U;
+    fixture.enclosures[0].status = w::DiscoveryEnclosureStatus::duplicate;
+    fixture.enclosures[0].device_count = 0U;
+    fixture.enclosures[0].readers_known = false;
+    fixture.enclosures[0].reader_count = 0U;
+
+    const auto json = encode(fixture.scan);
+    CHECK(json.find("\"status\":\"duplicate\"") != std::string::npos);
+    CHECK(json.find("\"serial_unique\":false") != std::string::npos);
+
+    fixture.scan.complete = false;
+    const auto incomplete_json = encode(fixture.scan);
+    CHECK(incomplete_json.find("\"serial_unique\":false") != std::string::npos);
+}
+
 void test_atomic_failures()
 {
     Fixture fixture;
@@ -262,6 +281,7 @@ int main(int argc, char** argv)
     test_shared_capability_presence_and_reader_references();
     test_receiver_number_is_unique_within_device();
     test_serial_uniqueness_and_unknown_receivers();
+    test_duplicate_enclosure_serial_is_not_unique();
     test_atomic_failures();
     return failures == 0 ? 0 : 1;
 }

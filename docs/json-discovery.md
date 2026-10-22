@@ -49,11 +49,20 @@ local index on that device. Reader `device` also references a USB function id.
 Candidate `device` is the legacy device slot within the candidate observation,
 not the enclosure id or an assertion that the candidate is a child device.
 
-`serial_unique` is null if the serial was not observed or the scan was
-incomplete and no duplicate was observed. Matching serials on distinct
-enclosures are false even in an incomplete scan. A non-duplicate observed
-serial is true only after a complete scan. This describes uniqueness among
-enclosures in this scan, not a global guarantee.
+`serial_unique` describes how to select this enclosure when starting a daemon:
+`true` means `--device serial:…` can select it, while `false` means to use
+`--device usb:…` with its USB path because a duplicate enclosure or matching
+serial makes serial selection ambiguous. `null` retains the existing meaning:
+the serial was not observed, or the scan was incomplete and no duplicate was
+observed. For an observed serial, a duplicate status or matching serial is
+false even in an incomplete scan. A non-duplicate observed serial is true only
+after a complete scan. This describes uniqueness among enclosures in this
+scan, not a global guarantee.
+
+Earlier daemon startup accepted only serial selection. M1UR and S1UR units can
+share the serial `000000000000001`, making that selection ambiguous; the
+`--device`/`--usb-path` options were added for USB-path selection and are now
+represented by the unified `--device serial:`/`usb:` forms.
 
 scan.complete and scan.issues describe enumeration of the whole scan.
 Issues carry a stable code and human-readable detail. Enclosure status
