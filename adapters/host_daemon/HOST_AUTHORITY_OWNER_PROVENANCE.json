@@ -1,0 +1,15 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/dtv-userland-core",
+  "source_commit": "53a40c1edb05c01541f03c4f07b3aa7b69c5a6d4",
+  "source_paths": [
+    "adapters/host_daemon/src/host_authority_owner.cpp",
+    "adapters/host_daemon/include/px4/host_authority_owner.h"
+  ],
+  "composed_targets": [
+    "dtv::host_tuner",
+    "dtv::authority"
+  ],
+  "boundary": "The host owner borrows TunerService's single private ReceiverEngine by friend access and exposes only the ControlAuthority facade."
+}

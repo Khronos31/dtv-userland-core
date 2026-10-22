@@ -6,6 +6,7 @@
 #include <chrono>
 #include <condition_variable>
 #include <cstdio>
+#include <limits>
 #include <mutex>
 #include <thread>
 
@@ -615,6 +616,25 @@ bool test_other_receiver_cleanup_while_tune_blocks()
     return true;
 }
 
+bool test_client_id_domain_and_authority_exhaustion()
+{
+    CHECK(!is_legacy_client_id(0U));
+    CHECK(is_legacy_client_id(1U));
+    CHECK(is_legacy_client_id(kLegacyClientIdMax));
+    CHECK(!is_legacy_client_id(kAuthorityClientIdFirst));
+
+    ClientIdAllocator legacy_ids(kLegacyClientIdMax - 1U, kLegacyClientIdMax);
+    CHECK(legacy_ids.next().value() == kLegacyClientIdMax - 1U);
+    CHECK(legacy_ids.next().value() == kLegacyClientIdMax);
+    CHECK(!legacy_ids.next());
+    ClientIdAllocator authority_ids(std::numeric_limits<std::uint64_t>::max() - 1U,
+                                    std::numeric_limits<std::uint64_t>::max());
+    CHECK(authority_ids.next().value() == std::numeric_limits<std::uint64_t>::max() - 1U);
+    CHECK(authority_ids.next().value() == std::numeric_limits<std::uint64_t>::max());
+    CHECK(!authority_ids.next());
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -624,6 +644,7 @@ int main()
     if (!test_running_tune_completion_after_close_and_cleanup()) return 1;
     if (!test_failed_release_is_not_quiesced()) return 1;
     if (!test_other_receiver_cleanup_while_tune_blocks()) return 1;
+    if (!test_client_id_domain_and_authority_exhaustion()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }

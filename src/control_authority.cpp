@@ -109,15 +109,11 @@ ControlServiceSession* ControlAuthority::find_session(std::uint64_t client_id) c
 Error ControlAuthority::open(ControlServiceSession& session) noexcept
 {
     if (!valid_ || &session.authority_ != this || session.connected() || session.next_ != nullptr ||
-        session.used_ ||
-        exhausted_ || next_client_id_ == 0U)
+        session.used_)
         return Error::INVALID_ARGUMENT;
-    session.client_id_ = next_client_id_;
-    if (next_client_id_ == std::numeric_limits<std::uint64_t>::max()) {
-        exhausted_ = true;
-    } else {
-        ++next_client_id_;
-    }
+    const auto client_id = client_ids_.next();
+    if (!client_id) return Error::INVALID_ARGUMENT;
+    session.client_id_ = client_id.value();
     session.closed_ = false;
     session.used_ = true;
     session.next_ = sessions_;

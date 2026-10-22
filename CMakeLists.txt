@@ -19,6 +19,7 @@ option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF
 option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority service" OFF)
 option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER "Build the host authority owner seam" OFF)
 option(DTV_USERLAND_BUILD_HOST_WORKERS "Build the host control worker lanes" OFF)
 
 add_library(dtv_userland_core STATIC
@@ -200,6 +201,33 @@ if(DTV_USERLAND_BUILD_HOST_WORKERS)
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
+if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_AUTHORITY)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER requires DTV_USERLAND_BUILD_HOST_TUNER and DTV_USERLAND_BUILD_AUTHORITY")
+    endif()
+    add_library(dtv_userland_host_authority_owner STATIC
+        adapters/host_daemon/src/host_authority_owner.cpp)
+    add_library(dtv::host_authority_owner ALIAS dtv_userland_host_authority_owner)
+    set_target_properties(dtv_userland_host_authority_owner PROPERTIES
+        EXPORT_NAME host_authority_owner
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_authority_owner PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_authority_owner PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_authority_owner PUBLIC
+        dtv::authority dtv::host_tuner)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_authority_owner PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_authority_owner PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
     if(NOT DTV_USERLAND_BUILD_CONTROL OR NOT DTV_USERLAND_BUILD_RECEIVER)
         message(FATAL_ERROR
@@ -267,7 +295,9 @@ if(DTV_USERLAND_BUILD_AUTHORITY)
         FILE dtv_userland_authorityTargets.cmake
         NAMESPACE dtv::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
-    install(FILES include/dtv/userland/detail/control_authority.h
+    install(FILES
+        include/dtv/userland/detail/client_id_allocator.h
+        include/dtv/userland/detail/control_authority.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
 endif()
 
@@ -367,6 +397,21 @@ if(DTV_USERLAND_BUILD_HOST_WORKERS)
         adapters/host_daemon/COPYING
         adapters/host_daemon/HOST_WORKERS_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_workers)
+endif()
+if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
+    install(TARGETS dtv_userland_host_authority_owner
+        EXPORT dtv_userland_host_authority_ownerTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_authority_ownerTargets
+        FILE dtv_userland_host_authority_ownerTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES adapters/host_daemon/include/px4/host_authority_owner.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/px4)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/HOST_AUTHORITY_OWNER_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_authority_owner)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
@@ -556,6 +601,12 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(host_tuner_tests tests/host_tuner_tests.cpp)
         target_link_libraries(host_tuner_tests PRIVATE dtv::host_tuner)
         add_test(NAME host_tuner_tests COMMAND host_tuner_tests)
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
+        add_executable(host_authority_owner_tests tests/host_authority_owner_tests.cpp)
+        target_link_libraries(host_authority_owner_tests PRIVATE dtv::host_authority_owner)
+        add_test(NAME host_authority_owner_tests COMMAND host_authority_owner_tests)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_WORKERS)

@@ -12,6 +12,8 @@
 
 namespace px4::userland {
 
+class HostAuthorityOwner;
+
 // R3 strict frequency facts, data only.  A backend reports them per receiver
 // and system; TunerService copies them once before workers start and the pure
 // strict preparation evaluates only this owned copy (no backend call).
@@ -502,6 +504,8 @@ public:
                                                     std::uint64_t lease_id) const noexcept;
 
 private:
+    friend class HostAuthorityOwner;
+
     // The lease, tune, and stream lifecycle runs in the common receiver
     // engine.  These adapters only translate the PX4 seams and types; the
     // PX-Q3U4 receiver defaults, the settle policy, and request validation

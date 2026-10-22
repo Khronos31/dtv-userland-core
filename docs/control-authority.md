@@ -7,6 +7,13 @@ receiver engine, and STATUS projection options. Installed consumers request
 link `dtv::authority`. The component adds no socket, OS thread, timer, data
 path, product adapter, or USB dependency.
 
+The host owner seam configures Authority IDs in `2^63..UINT64_MAX`; the legacy
+TunerService domain is `1..2^63-1`. Both domains allocate monotonically and do
+not wrap or reuse IDs. This range is an internal identity boundary and does
+not change wire records. The current Core main has no `ControlServer` counter;
+downstream server integration must apply the low-half ceiling to its own
+allocator before using the shared Engine.
+
 `ControlAuthority` holds one `ReceiverEngine` reference, the immutable server
 HELLO values, and the canonical LIST. Caller-owned `ControlServiceSession`
 objects register in its intrusive session table. Each session has a
