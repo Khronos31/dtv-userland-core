@@ -358,7 +358,10 @@ bool test_projection_lease_tune_and_gate()
     CHECK(result && result.value().requested_hz == tune.frequency_hz &&
           result.value().programmed_hz.present &&
           result.value().programmed_hz.value == tune.frequency_hz + 9U &&
-          result.value().tune_revision == 1U);
+          result.value().tune_revision == 1U &&
+          result.value().verification == w::Verification::lock &&
+          result.value().lock.state == w::MeasureState::valid &&
+          result.value().lock.value);
     CHECK(send_full(authority, first, executor) == Error::OK);
 
     std::array<std::uint8_t, 128> release_payload{};

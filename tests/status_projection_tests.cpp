@@ -218,6 +218,7 @@ bool test_engine_projection_and_validation()
     CHECK(projected.current_tune.value.frequency_hz == tune.requested_hz);
     CHECK(projected.current_tune.value.programmed_hz.present &&
           projected.current_tune.value.programmed_hz.value == tune.requested_hz + 7U);
+    CHECK(projected.current_tune.value.verification == w::Verification::lock);
     CHECK(projected.last_successful_tune.present);
     CHECK(projected.measurements.entries.count == 3U);
     CHECK(projected.measurements.entries.items[0U].boolean.state == w::MeasureState::unknown);
