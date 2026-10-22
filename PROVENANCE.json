@@ -306,5 +306,72 @@
     ],
     "scope": "Read-only client within the existing opt-in dtv::control component. ClientTransport is borrowed and injected; it owns no OS resource. Successful fetch leaves it open, while a failure closes it and publishes no partial snapshot.",
     "new_files": "tests/control_client_tests.cpp, tests/consumer/control_client/, and docs/control-client.md are MIT. CMake/package integration, README and this provenance entry are additions to existing files."
+  },
+  "v1_stream_lifecycle": {
+    "method": "Partially adapted the v1 receiver stream lifecycle from the previous Core #16 head onto the current Hz/strict-admission/authority engine. The current main kHz/Hz entrances and std::optional programmed-Hz representation remain authoritative. Added readiness evidence and the Core #1 post-mutex phase recheck locally; no host, recording client, product source or product pin was adopted.",
+    "authority": [
+      "Core main 190625505da9e6b94a92fca5539d5d9b14b2dac8",
+      "Core previous PR #16 head 80ccc7b7e9ccad7c9b3656f02a28d12f003c45a0",
+      "agent-workspace subagent/instructions/20261022-core-v1-stream-lifecycle-code.md",
+      "agent-workspace design/common-api-contract.md and design/adoption-status.md"
+    ],
+    "source_commit": "80ccc7b7e9ccad7c9b3656f02a28d12f003c45a0",
+    "source_files": [
+      {
+        "path": "include/dtv/userland/detail/receiver_engine.h",
+        "sha256": "0ec1e23bb37f268c4069e49f8329cd8d2ab76f245938dc165f02b29a7d6bc0df",
+        "destination_path": "include/dtv/userland/detail/receiver_engine.h",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Only the v1 StreamContract/phase/start/ticket/stop result declarations, lifecycle operations and per-lease lifecycle bookkeeping were adapted. The destination retains the current Hz request, std::optional programmed_hz, strict capability and current leased/status declarations.",
+        "excluded_scope": "The old kHz/Hz API, old optional representation, host/client/service, product dispatch and product-specific types were not copied over the current Core definitions."
+      },
+      {
+        "path": "src/receiver_engine.cpp",
+        "sha256": "b26df34fcf1dcaa95de932c15a71b215baa627f5a8b4acc3c99d56bcad737b70",
+        "destination_path": "src/receiver_engine.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "The v1 configure/start/reserve/prepare/commit/abort/stop/cleanup/terminal lifecycle and legacy-entry gating were adapted into current receiver acquire/release/status bookkeeping. Readiness flow was adapted to current exact-Hz strict admission and current wire Measurement types.",
+        "excluded_scope": "Old tune implementation, old API and optional types, host/recording client, product backend, production dispatch and hardware operations were not adopted. The mutex-after-prepare phase/cleanup recheck is a local Core #1 fix, not present in the source commit."
+      },
+      {
+        "path": "tests/stream_v1_authority_tests.cpp",
+        "sha256": "c7fc7847e111763e776f1672a17b6f3b40da5dfd532fd4a2d7e66f79a62c06f5",
+        "destination_path": "tests/stream_v1_authority_tests.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Device-free v1 contract, start/reserve/prepare/commit/abort/stop and legacy/v1 isolation fixtures.",
+        "excluded_scope": "No product/host/client or hardware fixtures."
+      },
+      {
+        "path": "tests/stream_v1_late_prepare_tests.cpp",
+        "sha256": "4ad15a50fdfbbbb13e7c28af36a6344f5d2fabc5491767fac3f98324cd946730",
+        "destination_path": "tests/stream_v1_late_prepare_tests.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "The held-prepare ownership/cleanup and terminal-final fixtures were adapted. A bounded receiver-mutex race now observes prepare claim under the registry mutex, races STOP cleanup for the receiver mutex, records cleanup-first order count, and fails if the target order was not observed.",
+        "excluded_scope": "The old cleanup-after-completed late-prepare-only fixture is insufficient by itself and is replaced by the observed contention fixture for Core #1 coverage. The deterministic held-backend-prepare fixture remains."
+      },
+      {
+        "path": "tests/stream_v1_owner_cleanup_tests.cpp",
+        "sha256": "b2a6de0253ceeee5e2d52772446c9e05406592318b1fdb3d435c80a27b9a81c8",
+        "destination_path": "tests/stream_v1_owner_cleanup_tests.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Device-free owner cleanup, exact-ticket and terminal retention fixtures.",
+        "excluded_scope": "No product/host/client or hardware fixtures."
+      },
+      {
+        "path": "tests/stream_v1_store_tests.cpp",
+        "sha256": "055a72f9edb66c2fb567042b6919aef220f81d47736dff5698ba45b099e9a1c3",
+        "destination_path": "tests/stream_v1_store_tests.cpp",
+        "source_spdx": "MIT",
+        "destination_spdx": "MIT",
+        "moved_scope": "Per-attachment v1 evict-oldest queue policy fixtures while retaining the legacy full-ring behavior checks.",
+        "excluded_scope": "No recording client, host adapter, producer or product path."
+      }
+    ],
+    "scope": "Internal receiver lifecycle and readiness only. The bounded #1 regression fixture, docs/status-projection.md, docs/receiver-v1-stream.md, README test index and this provenance entry document the adopted source and verification behavior; no runtime/API change is made by the follow-up."
   }
 }

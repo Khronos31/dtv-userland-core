@@ -37,6 +37,8 @@ using namespace dtv::userland::detail;
     } while (false)
 
 constexpr std::uint64_t kEpoch = 0x1234U;
+std::size_t g_cleanup_first_observations = 0U;
+std::size_t g_cleanup_first_attempts = 0U;
 
 class Gate final {
 public:
@@ -90,6 +92,20 @@ public:
 
 private:
     std::thread& thread_;
+};
+
+class UnlockOnExit final {
+public:
+    explicit UnlockOnExit(std::unique_lock<std::mutex>& lock) noexcept : lock_(lock) {}
+    ~UnlockOnExit()
+    {
+        if (lock_.owns_lock()) lock_.unlock();
+    }
+    UnlockOnExit(const UnlockOnExit&) = delete;
+    UnlockOnExit& operator=(const UnlockOnExit&) = delete;
+
+private:
+    std::unique_lock<std::mutex>& lock_;
 };
 
 class MockBackend final : public ReceiverBackend {
@@ -322,27 +338,83 @@ bool test_cleanup_waits_for_held_prepare()
 
 bool test_cleanup_wins_before_late_prepare()
 {
-    Fixture f;
-    LATE_CHECK(f.engine.configure_stream_contract(StreamContract::v1, kEpoch));
-    std::uint64_t lease = 0U;
-    std::uint64_t revision = 0U;
-    LATE_CHECK(acquire_and_tune(f, lease, revision));
-    const auto started = f.engine.start_stream_v1(1U, lease, revision, 1000U, 5000U);
-    LATE_CHECK(started);
-    const auto reserved = f.engine.reserve_attach_v1(
-        1U, lease, kEpoch, started.value().stream_id, started.value().token, 1000U);
-    LATE_CHECK(reserved);
-    const StreamAttachTicket ticket = reserved.value();
-    const auto stopped = f.engine.stop_stream_v1(1U, lease, started.value().stream_id);
-    LATE_CHECK(stopped && stopped.value().cleanup_owner && !stopped.value().quiesced);
-    LATE_CHECK(f.engine.run_stream_cleanup_v1(ticket));
-    const auto late_prepare = f.engine.prepare_attach_v1(ticket);
-    LATE_CHECK(!late_prepare && late_prepare.error() == Error::NOT_FOUND);
-    const auto final = f.engine.stream_last_terminal_v1(1U, lease);
-    LATE_CHECK(final && final.value().final_valid && final.value().quiesced);
-    LATE_CHECK(f.backend.starts == 0 && f.stream.attaches == 0 &&
-               f.backend.stops == 0 && f.stream.detaches == 0);
-    LATE_CHECK(f.engine.release(1U, lease));
+    constexpr std::size_t kMaxAttempts = 2000U;
+    for (std::size_t attempt = 0U;
+         attempt < kMaxAttempts && g_cleanup_first_observations == 0U; ++attempt) {
+        ++g_cleanup_first_attempts;
+        Fixture f;
+        LATE_CHECK(f.engine.configure_stream_contract(StreamContract::v1, kEpoch));
+        std::uint64_t lease = 0U;
+        std::uint64_t revision = 0U;
+        LATE_CHECK(acquire_and_tune(f, lease, revision));
+        const auto started = f.engine.start_stream_v1(1U, lease, revision, 1000U, 5000U);
+        LATE_CHECK(started);
+        const auto reserved = f.engine.reserve_attach_v1(
+            1U, lease, kEpoch, started.value().stream_id, started.value().token, 1000U);
+        LATE_CHECK(reserved);
+        const StreamAttachTicket ticket = reserved.value();
+
+        std::unique_lock<std::mutex> receiver_lock(f.engine.receiver_mutexes_[0U]);
+        Error prepare_error = Error::OK;
+        std::thread prepare([&] {
+            const auto result = f.engine.prepare_attach_v1(ticket);
+            prepare_error = result ? Error::OK : result.error();
+        });
+        Joiner prepare_joiner(prepare);
+        UnlockOnExit unlock_receiver(receiver_lock);
+        bool prepare_claimed = false;
+        {
+            const auto limit = std::chrono::steady_clock::now() +
+                               std::chrono::seconds(10);
+            while (std::chrono::steady_clock::now() < limit) {
+                {
+                    std::lock_guard<std::mutex> lock(f.engine.mutex_);
+                    prepare_claimed =
+                        f.engine.leases_[ticket.slot].stream_prepare_inflight;
+                }
+                if (prepare_claimed) break;
+                std::this_thread::yield();
+            }
+        }
+        LATE_CHECK(prepare_claimed);
+        const auto stopped = f.engine.stop_stream_v1(
+            1U, lease, started.value().stream_id);
+        LATE_CHECK(stopped && stopped.value().cleanup_owner &&
+                   !stopped.value().quiesced);
+
+        // prepare is queued on the held receiver mutex; this worker races it
+        // for that mutex. Only the observed cleanup-first ordering contributes
+        // to g_cleanup_first_observations below.
+        receiver_lock.unlock();
+        const auto cleanup = f.engine.run_stream_cleanup_v1(ticket);
+        LATE_CHECK(cleanup);
+        prepare.join();
+        LATE_CHECK(prepare_error == Error::NOT_FOUND);
+        const auto final = f.engine.stream_last_terminal_v1(1U, lease);
+        LATE_CHECK(final && final.value().final_valid && final.value().quiesced);
+
+        if (f.backend.starts == 1 && f.stream.attaches == 1 &&
+            f.backend.stops == 0 && f.stream.detaches == 0) {
+            ++g_cleanup_first_observations;
+            std::fprintf(stderr,
+                         "cleanup-first order observed %zu/%zu; late physical start after quiesced\n",
+                         g_cleanup_first_observations, g_cleanup_first_attempts);
+            return false;
+        }
+        if (f.backend.starts == 0 && f.stream.attaches == 0 &&
+            f.backend.stops == 0 && f.stream.detaches == 0) {
+            ++g_cleanup_first_observations;
+        } else {
+            // If prepare wins the receiver mutex, cleanup must observe and
+            // compensate the physical ownership before reporting quiescence.
+            LATE_CHECK(f.backend.starts == 1 && f.stream.attaches == 1 &&
+                       f.backend.stops == 1 && f.stream.detaches == 1);
+        }
+        LATE_CHECK(f.engine.release(1U, lease));
+    }
+    std::printf("cleanup-first order observed %zu/%zu bounded attempts\n",
+                g_cleanup_first_observations, g_cleanup_first_attempts);
+    LATE_CHECK(g_cleanup_first_observations > 0U);
     return true;
 }
 
