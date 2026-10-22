@@ -90,7 +90,8 @@ public:
     // daemon epoch (otherwise STALE_HANDLE). START and STOP also carry and
     // check the epoch. Nothing is written to output for dispatch or close.
     // output must hold kHeaderSize + kMaxControlPayload bytes so every reply
-    // fits. A dispatch result is not service execution or success.
+    // fits. A dispatch result is not service execution or success. request
+    // is valid only when this call returns InboundAction::dispatch.
     Inbound accept(const Frame& frame, ControlRequest& request,
                    MutableByteView output) noexcept;
 

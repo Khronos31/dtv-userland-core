@@ -119,6 +119,12 @@ When the canonical context is missing (or its epoch does not match), the functio
   and CLI translation.
 - Any product endpoint, CLI, JSON cutover, version bump or publication.
 
+This section describes the `dtv::wire` component alone. When
+`DTV_USERLAND_BUILD_CONTROL=ON`, the separate internal `dtv::control` component
+provides the socketless connection gate and response helpers described in
+[`control-connection.md`](control-connection.md); service execution and product
+integration remain outside that component.
+
 ## Rules taken as adopted, not open
 
 The review that preceded this revision flagged several points that the design documents do
