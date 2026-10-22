@@ -19,6 +19,7 @@ option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF
 option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority service" OFF)
 option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_WORKERS "Build the host control worker lanes" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -170,6 +171,35 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
+if(DTV_USERLAND_BUILD_HOST_WORKERS)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_CARD)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_WORKERS requires DTV_USERLAND_BUILD_HOST_TUNER and DTV_USERLAND_BUILD_CARD")
+    endif()
+    find_package(Threads REQUIRED)
+    add_library(dtv_userland_host_workers STATIC
+        adapters/host_daemon/src/card_service.cpp
+        adapters/host_daemon/src/control_workers.cpp)
+    add_library(dtv::host_workers ALIAS dtv_userland_host_workers)
+    set_target_properties(dtv_userland_host_workers PROPERTIES
+        EXPORT_NAME host_workers
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_workers PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_workers PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_workers PUBLIC
+        Threads::Threads dtv::host_tuner dtv::card)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_workers PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_workers PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
     if(NOT DTV_USERLAND_BUILD_CONTROL OR NOT DTV_USERLAND_BUILD_RECEIVER)
         message(FATAL_ERROR
@@ -315,6 +345,28 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         adapters/host_daemon/COPYING
         adapters/host_daemon/TUNER_SERVICE_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_tuner)
+endif()
+if(DTV_USERLAND_BUILD_HOST_WORKERS)
+    install(TARGETS dtv_userland_host_workers
+        EXPORT dtv_userland_host_workersTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_workersTargets
+        FILE dtv_userland_host_workersTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_daemon/include/dtv/userland/host_daemon/card_service.h
+        adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_daemon)
+    install(FILES
+        adapters/host_daemon/include/px4/card_service.h
+        adapters/host_daemon/include/px4/control_execution_layout.h
+        adapters/host_facade/include/px4/card_atr_bytes.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/px4)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/HOST_WORKERS_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_workers)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
@@ -504,6 +556,16 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(host_tuner_tests tests/host_tuner_tests.cpp)
         target_link_libraries(host_tuner_tests PRIVATE dtv::host_tuner)
         add_test(NAME host_tuner_tests COMMAND host_tuner_tests)
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_WORKERS)
+        target_compile_definitions(dtv_userland_host_workers PRIVATE
+            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+        add_executable(host_worker_closure_tests tests/host_worker_closure_tests.cpp)
+        target_link_libraries(host_worker_closure_tests PRIVATE dtv::host_workers)
+        target_compile_definitions(host_worker_closure_tests PRIVATE
+            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+        add_test(NAME host_worker_closure_tests COMMAND host_worker_closure_tests)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)
