@@ -4,7 +4,7 @@
 
 ## 提供ライブラリと構成
 
-静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）、`dtv::control`（`DTV_USERLAND_BUILD_CONTROL`、既定値 OFF）、`dtv::status_projection`（`DTV_USERLAND_BUILD_STATUS_PROJECTION`、既定値 OFF）、`dtv::authority`（`DTV_USERLAND_BUILD_AUTHORITY`、既定値 OFF）および `dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）を備える。
+静的ライブラリとして `dtv::core`、`dtv::wire`、`dtv::identity`、`dtv::tuning`、`dtv::json` を提供する。また、オプショナルな内部コンポーネントとして `dtv::receiver`（CMake オプション `DTV_USERLAND_BUILD_RECEIVER`、既定値 OFF）、`dtv::capture`（`DTV_USERLAND_BUILD_CAPTURE`、既定値 OFF）、`dtv::control`（`DTV_USERLAND_BUILD_CONTROL`、既定値 OFF）、`dtv::status_projection`（`DTV_USERLAND_BUILD_STATUS_PROJECTION`、既定値 OFF）、`dtv::authority`（`DTV_USERLAND_BUILD_AUTHORITY`、既定値 OFF）、`dtv::card`（`DTV_USERLAND_BUILD_CARD`、既定値 OFF）、およびGPL-2.0-onlyの互換owner adapter `dtv::host_tuner`（`DTV_USERLAND_BUILD_HOST_TUNER`、既定値 OFF）を備える。`dtv::host_tuner`の境界と利用条件は[host tuner](docs/host-tuner.md)を参照のこと。
 
 ### 依存関係
 
@@ -16,6 +16,7 @@
 - `dtv::status_projection`: `dtv::control` と `dtv::receiver` にリンク。canonical LIST由来のSTATUS shellへengine状態を投影
 - `dtv::authority`: `dtv::status_projection` にリンク。socketなしcontrol authority/session serviceを提供
 - `dtv::receiver`: `dtv::core` および `Threads` にリンク
+- `dtv::host_tuner`: `dtv::receiver` にリンク。既存TunerServiceのowner adapterのみを提供
 - `dtv::capture`: `dtv::core` および `Threads` にリンク。receiver エンジンには依存しない
 - `dtv::card`（INTERFACE ターゲット）: `dtv::core` にリンク
 
@@ -35,6 +36,7 @@ CMake で設定し、`BUILD_TESTING`（または `DTV_USERLAND_BUILD_TESTING`）
 - `discovery_json_tests`、`discovery_json_consumer`（`dtv::json`）
 - `card_ownership_engine_tests`（`DTV_USERLAND_BUILD_CARD` 有効時、`dtv::card`）
 - `receiver_engine_tests`、`receiver_r2_tests`、`receiver_hz_tests`、`stream_v1_authority_tests`、`stream_v1_owner_cleanup_tests`、`stream_v1_late_prepare_tests`（`DTV_USERLAND_BUILD_RECEIVER` 有効時、`dtv::receiver`）
+- `host_tuner_tests`（`DTV_USERLAND_BUILD_HOST_TUNER` 有効時、`dtv::host_tuner`）
 - `packet_stream_session_tests`、`stream_v1_store_tests`（`DTV_USERLAND_BUILD_CAPTURE` 有効時、`dtv::capture`）
 - `control_connection_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
 - `control_client_tests`（`DTV_USERLAND_BUILD_CONTROL` 有効時、`dtv::control`）
@@ -110,6 +112,10 @@ target_link_libraries(my_consumer PRIVATE dtv::control)
 # canonical LIST と ReceiverEngine の STATUS 投影を利用する場合
 find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS status_projection)
 target_link_libraries(my_consumer PRIVATE dtv::status_projection)
+
+# legacy TunerService owner adapter（GPL-2.0-only）を利用する場合
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS host_tuner)
+target_link_libraries(my_consumer PRIVATE dtv::host_tuner)
 ```
 
 ### 利用側のビルド手順

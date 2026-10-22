@@ -18,6 +18,7 @@ option(DTV_USERLAND_BUILD_CAPTURE "Build the internal packet-session storage" OF
 option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF)
 option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority service" OFF)
+option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -140,6 +141,32 @@ if(DTV_USERLAND_BUILD_RECEIVER)
         target_compile_options(dtv_userland_receiver PRIVATE /EHs-c- /GR- /W4)
     else()
         target_compile_options(dtv_userland_receiver PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+if(DTV_USERLAND_BUILD_HOST_TUNER)
+    if(NOT DTV_USERLAND_BUILD_RECEIVER)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_TUNER requires DTV_USERLAND_BUILD_RECEIVER")
+    endif()
+    add_library(dtv_userland_host_tuner STATIC
+        adapters/host_daemon/src/tuner_service.cpp)
+    add_library(dtv::host_tuner ALIAS dtv_userland_host_tuner)
+    set_target_properties(dtv_userland_host_tuner PROPERTIES
+        EXPORT_NAME host_tuner
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_tuner PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_tuner PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_tuner PUBLIC dtv::receiver)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_tuner PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_tuner PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
@@ -269,6 +296,25 @@ endif()
 if(DTV_USERLAND_BUILD_RECEIVER)
     install(FILES include/dtv/userland/detail/receiver_engine.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/detail)
+endif()
+if(DTV_USERLAND_BUILD_HOST_TUNER)
+    install(TARGETS dtv_userland_host_tuner
+        EXPORT dtv_userland_host_tunerTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_tunerTargets
+        FILE dtv_userland_host_tunerTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_daemon/include/px4/tuner_service.h
+        adapters/host_facade/include/px4/error.h
+        adapters/host_facade/include/px4/ipc.h
+        adapters/host_facade/include/px4/transport.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/px4)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/TUNER_SERVICE_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_tuner)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
@@ -452,6 +498,12 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(control_authority_tests PRIVATE dtv::authority)
         add_test(NAME control_authority_tests COMMAND control_authority_tests)
         set_tests_properties(control_authority_tests PROPERTIES TIMEOUT 120)
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_TUNER)
+        add_executable(host_tuner_tests tests/host_tuner_tests.cpp)
+        target_link_libraries(host_tuner_tests PRIVATE dtv::host_tuner)
+        add_test(NAME host_tuner_tests COMMAND host_tuner_tests)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)
