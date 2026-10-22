@@ -158,9 +158,39 @@
   },
   "wire": {
     "method": "New independent implementation of the documented common UDTV wire; no PX4 wire source was copied or modified.",
-    "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
+    "scope": "UDTV 1.0 envelope and bounded frame/header handling; typed HELLO request, HELLO response, error response, ACQUIRE request/response, LIST/STATUS snapshots (producer, context, topology, enclosure, USB functions, receiver/reader descriptors and status, measurements and counters), LNB power request/response, TUNE request/result, START/ATTACH/STOP/RELEASE, TS_DATA, STATE_EVENT/STREAM_END and the CARD_*/transaction records, all with bounded storage, control-payload cap preflight and cross-record validators. It is not a complete protocol: dispatcher/connection state, timers, sockets, JSON/CLI translation and product endpoint migration are out of scope.",
     "error_values_added": "RESOURCE_LIMIT = 17 was added additively for the control-payload cap. All pre-existing Error values and the one-byte size are unchanged.",
-    "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. The STATUS enclosure optional booleans follow the accepted internal layout from Core development commits a9c72e75a66c66c274c6df3804a14510d3ba44c0 and 303840acabf84c0d4d87c3158bd0adca19e90d76; only the typed fields and their STATUS codec order are included in this increment. LNB operation, host_ctl, JSON and product backend changes are excluded. No product payload, card/hardware sequence or vendor asset was copied."
+    "provenance": "Independently written from design/common-wire-draft.md, wire-record-layout.md, common-api-contract.md, json-record-contract.md and cli-contract-draft.md under the conditional adoption in design/adoption-status.md and the scope in design/independent-code-policy.md. The STATUS enclosure optional booleans follow the accepted internal layout from Core development commits a9c72e75a66c66c274c6df3804a14510d3ba44c0 and 303840acabf84c0d4d87c3158bd0adca19e90d76; only the typed fields and their STATUS codec order are included in this increment. The independent LNB power record is documented below. LNB dispatch/client, host_ctl, JSON and product backend changes are excluded. No product payload, card/hardware sequence or vendor asset was copied.",
+    "lnb_power_record": {
+      "method": "Limited adaptation of the existing same-series Core LNB power record layout through the current independent typed-record codec. Only the opcode and epoch/enabled request and response records were added.",
+      "authority": [
+        "agent-workspace design/core-card-lnb-host-seam-plan-20261022.md",
+        "agent-workspace DECISIONS-20261021.md, decision 6327113891",
+        "agent-workspace RC-INTEGRATION-CHECKPOINT-20261019.md, items 11-13"
+      ],
+      "source_commit": "af82b7a9329bfe2202e07c960f368469612e28f4",
+      "source_files": [
+        {
+          "path": "include/dtv/userland/records.h",
+          "sha256": "70690869f289002166fcde7a3e06f9647ed981a948908edd9a2217b5b9596776",
+          "destination_path": "include/dtv/userland/records.h",
+          "source_spdx": "MIT",
+          "destination_spdx": "MIT",
+          "moved_scope": "Opcode 0x0039 and the LnbPowerRequest/LnbPowerResponse field layout {epoch, enabled}.",
+          "excluded_scope": "No other opcode, record, transport API, dispatcher, client or product behavior was transferred."
+        },
+        {
+          "path": "src/records.cpp",
+          "sha256": "769b8ad6705403c244d4d9283c11d8f3fd760dbbe7ede266e2113d86ee2f86cc",
+          "destination_path": "src/records.cpp",
+          "source_spdx": "MIT",
+          "destination_spdx": "MIT",
+          "moved_scope": "The request and response bodies encode the 16-byte epoch followed by the existing strict one-byte boolean codec.",
+          "excluded_scope": "No connection gate, response roundtrip, permission check or backend code was transferred."
+        }
+      ],
+      "scope": "Typed LNB power record/codec only. No typed gate, client, authority, host adapter, product pin or device support was added."
+    }
   },
   "tuning": {
     "method": "New independent bounded resolver implementation from the adopted CLI contract and the T1 implementation specification; no product parser or product source was copied.",
