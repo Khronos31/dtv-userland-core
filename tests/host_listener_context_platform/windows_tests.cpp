@@ -172,6 +172,29 @@ bool test_pair_io_and_dacl() noexcept
         std::fprintf(stderr, "Windows reserve error=%u win32=%lu winsock=%d\n",
             static_cast<unsigned>(reserved), static_cast<unsigned long>(::GetLastError()),
             ::WSAGetLastError());
+        const auto report_directory = [](const char* label, const std::wstring& path) noexcept {
+            const DWORD attributes = ::GetFileAttributesW(path.c_str());
+            const DWORD attribute_error = attributes == INVALID_FILE_ATTRIBUTES ? ::GetLastError() : ERROR_SUCCESS;
+            const bool secure = attributes != INVALID_FILE_ATTRIBUTES &&
+                windows_security::verify_runtime_parent(path.c_str());
+            const DWORD verify_error = ::GetLastError();
+            std::fprintf(stderr, "Windows reserve path %s attrs=%lu attr_error=%lu secure=%u verify_error=%lu\n",
+                label, static_cast<unsigned long>(attributes),
+                static_cast<unsigned long>(attribute_error), secure ? 1U : 0U,
+                static_cast<unsigned long>(verify_error));
+        };
+        std::wstring root_wide;
+        if (to_wide(root, root_wide)) {
+            report_directory("runtime", root_wide);
+            report_directory("product", root_wide + L"\\listener-test");
+            report_directory("version", root_wide + L"\\listener-test\\v1");
+            report_directory("instance", root_wide + L"\\listener-test\\v1\\instance");
+            const std::wstring lock_path = root_wide + L"\\listener-test\\v1\\instance\\.listener.lock";
+            const DWORD lock_attributes = ::GetFileAttributesW(lock_path.c_str());
+            std::fprintf(stderr, "Windows reserve lock attrs=%lu error=%lu\n",
+                static_cast<unsigned long>(lock_attributes),
+                static_cast<unsigned long>(lock_attributes == INVALID_FILE_ATTRIBUTES ? ::GetLastError() : ERROR_SUCCESS));
+        }
     }
     if (!check(reserved == Error::OK, "reserve Windows private pair")) return false;
     auto competitor = create_listener_io();
