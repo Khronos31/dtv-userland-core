@@ -1589,3 +1589,5 @@ Result<void> ControlWorkerLanes::join() noexcept
 }
 
 }  // namespace px4::userland::ipc::posix
+
+// Trigger verification: dependency-source-only change for sanitizer CI.
