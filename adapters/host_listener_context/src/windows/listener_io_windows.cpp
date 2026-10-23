@@ -65,8 +65,10 @@ bool utf8_to_wide(const std::string& input, std::wstring& output) noexcept
                                              nullptr, 0);
     if (count <= 0) return false;
     output.resize(static_cast<std::size_t>(count));
-    return ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.c_str(), -1,
-                                 output.data(), count) == count;
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.c_str(), -1,
+                              output.data(), count) != count) return false;
+    output.resize(static_cast<std::size_t>(count - 1));
+    return true;
 }
 
 bool wide_to_utf8(const std::wstring& input, char* output, std::size_t capacity) noexcept
