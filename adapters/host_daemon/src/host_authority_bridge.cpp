@@ -55,10 +55,10 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     if (slot.state != SlotState::active || !slot.session) return {};
     const auto reply = authority_owner_.authority().accept(
         *slot.session, frame, context, snapshot, accepted_at_ms, *this);
-    if (reply.action == dtv::userland::wire::InboundAction::close &&
-        !reply.cleanup_required) {
+    if (reply.action == dtv::userland::wire::InboundAction::close) {
         slot.state = SlotState::tombstone;
         if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
+        if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
     }
     return reply;
 }

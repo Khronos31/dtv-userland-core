@@ -62,6 +62,18 @@ public:
     Error shutdown_result() const noexcept;
     HostAuthorityBridgeCounts counts() const noexcept;
     std::uint64_t client_id(std::uint8_t slot) const noexcept;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+    bool fatal_unresolved_for_test(std::uint8_t slot) const noexcept
+    {
+        return slot < slots_.size() &&
+               slots_[slot].state == SlotState::fatal_unresolved;
+    }
+    bool session_connected_for_test(std::uint8_t slot) const noexcept
+    {
+        return slot < slots_.size() && slots_[slot].session &&
+               slots_[slot].session->connected();
+    }
+#endif
 
     bool submit(const dtv::userland::detail::AuthorityJob& job) noexcept override;
 
