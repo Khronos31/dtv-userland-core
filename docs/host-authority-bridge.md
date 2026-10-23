@@ -68,7 +68,11 @@ the data slot. A closed data connection drops the final output but still waits
 for physical cleanup before reusing its slot. The caller owns encoding and
 full-write handling for `TsData` and `StreamEndEvent`.
 
-The socketless control-frame `accept()` path supports wire START but still
-rejects wire STOP; call `stop_stream()` with the decoded STOP identity to get
-the typed outcome and schedule exact-ticket cleanup. CARD/LNB dispatch, OS
+The socketless control-frame `accept()` path dispatches wire START and STOP on
+the same `ControlAuthority` and Engine. Wire STOP returns the correlated
+`StopResponse` after metadata STOP; when cleanup submission is rejected, the
+response reports `quiesced == false` with `BUSY`, while the tombstone and exact
+ticket remain pending for a later `poll()` retry. Full response-send
+confirmation still releases the one-outstanding-request gate; partial response
+handling closes the session through the existing path. CARD/LNB dispatch, OS
 listeners, product producers/pins, and deployment remain outside this increment.

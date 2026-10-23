@@ -73,7 +73,11 @@ completion. Wire validation remains in `ControlConnection`; receiver system,
 selection, and typed LNB values are checked against the canonical descriptor
 before admission. A host may provide an additional profile validator. LNA and
 PID requests are rejected because this Engine operation does not yet apply
-them. START/STOP return `UNSUPPORTED` in this slice.
+them. START is dispatched on the same Engine. STOP validates the session lease
+and stream epoch before asking the executor for the metadata-only stop result;
+the default executor returns `UNSUPPORTED` until it provides that operation.
+The host bridge turns an accepted STOP into exact-ticket cleanup and retains a
+pending tombstone when cleanup submission is temporarily rejected.
 
 RELEASE is queued as blocking work and responds only after Engine cleanup. A
 successful completion emits `released=true, quiesced=true`; failure preserves
