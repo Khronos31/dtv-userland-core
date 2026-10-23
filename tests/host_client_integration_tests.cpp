@@ -388,6 +388,8 @@ struct FakeService final {
     std::atomic<bool> saw_status{false};
     std::atomic<bool> saw_stop{false};
     std::atomic<bool> saw_release{false};
+    std::atomic<unsigned int> stop_count{0U};
+    std::atomic<unsigned int> release_count{0U};
     bool unsupported_status = false;
     std::mutex stop_mutex;
     std::condition_variable stop_changed;
@@ -492,6 +494,7 @@ struct FakeService final {
                                &wire::encode_start_response);
         }
         if (request.kind == wire::ControlRequestKind::stop_stream) {
+            stop_count.fetch_add(1U);
             wire::StopResponse response{};
             response.epoch = hello.epoch;
             response.final = make_final(request.stop_stream.stream_id);
@@ -505,6 +508,7 @@ struct FakeService final {
             return sent;
         }
         if (request.kind == wire::ControlRequestKind::release) {
+            release_count.fetch_add(1U);
             wire::ReleaseResponse response{};
             response.epoch = hello.epoch;
             response.lease_id = request.release.lease_id;
@@ -609,12 +613,15 @@ struct FakeDataServer final {
     Listener& listener;
     FakeService& service;
     bool close_before_stream_end;
+    bool wait_for_stop_without_data;
     std::atomic<bool> saw_attach{false};
     std::atomic<bool> good{true};
     std::thread worker;
 
-    FakeDataServer(Listener& endpoint, FakeService& state, bool close_early)
-        : listener(endpoint), service(state), close_before_stream_end(close_early) {}
+    FakeDataServer(Listener& endpoint, FakeService& state, bool close_early,
+                   bool wait_for_stop = false)
+        : listener(endpoint), service(state), close_before_stream_end(close_early),
+          wait_for_stop_without_data(wait_for_stop) {}
 
     void start()
     {
@@ -645,6 +652,15 @@ struct FakeDataServer final {
                 attach.value().lease_id != 77U || attach.value().stream_id != 99U ||
                 attach.value().attach_token[0U] != 0x33U) {
                 good.store(false);
+                close_socket(peer);
+                return;
+            }
+            if (wait_for_stop_without_data) {
+                saw_attach.store(true);
+                std::unique_lock<std::mutex> lock(service.stop_mutex);
+                if (!service.stop_changed.wait_for(lock, std::chrono::seconds(5), [this]() {
+                        return service.saw_stop.load();
+                    })) good.store(false);
                 close_socket(peer);
                 return;
             }
@@ -826,6 +842,39 @@ bool run_ts_lifecycle(bool close_before_stream_end)
     return result && diagnostics.stream_end_valid && diagnostics.packets_written == 1U;
 }
 
+bool test_host_ts_frame_allocation_failure_releases_lease()
+{
+    RuntimeTree live_root;
+    if (!live_root.create() || !live_root.create_instance("oom-live")) return false;
+    Listener control;
+    Listener data;
+    if (!control.bind(live_root.root, "oom-live", "control.sock") ||
+        !data.bind(live_root.root, "oom-live", "stream.sock")) return false;
+    FakeService service("oom-live");
+    FakeControlServer control_server(control, service, 2U);
+    FakeDataServer data_server(data, service, false, true);
+    control_server.start();
+    data_server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(live_root.root, roots)) return false;
+    const auto args = test_ts_arguments(1U);
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    px4::userland::cli::test_access::fail_next_frame_allocation();
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        args, profile, output, clock, signal, roots, nullptr, nullptr);
+    data_server.join();
+    control_server.join();
+    return !result && result.error() == Error::INTERNAL && output.bytes.empty() &&
+           data_server.saw_attach.load() && data_server.good.load() &&
+           control_server.good.load() && service.stop_count.load() == 1U &&
+           service.release_count.load() == 1U;
+}
+
 bool test_unsupported_candidate_then_live_instance()
 {
     RuntimeTree unsupported_root;
@@ -926,6 +975,7 @@ int main()
     const bool ctl = test_host_ctl_real_server();
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
+    const bool oom = test_host_ts_frame_allocation_failure_releases_lease();
     const bool unsupported = test_unsupported_candidate_then_live_instance();
     const bool security = test_security_refusal_stops_search();
 #if defined(_WIN32)
@@ -934,7 +984,8 @@ int main()
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
+    if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && ts && eof && unsupported && security ? 0 : 1;
+    return ctl && ts && eof && oom && unsupported && security ? 0 : 1;
 }
