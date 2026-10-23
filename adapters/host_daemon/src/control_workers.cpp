@@ -3,9 +3,6 @@
 
 #include <atomic>
 #include <limits>
-#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-#include <cstdio>
-#endif
 
 #if defined(_WIN32)
 #ifndef WIN32_LEAN_AND_MEAN
@@ -332,15 +329,9 @@ public:
         // untrusted user with write/delete-child rights could otherwise
         // replace our private child directory.
         if (!windows_security::verify_runtime_parent(base.data())) {
-#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-            std::fprintf(stderr, "WakePipe startup failed at parent security check\n");
-#endif
             return Result<void>::failure(Error::INTERNAL);
         }
         if (!create_private_directory(base.data())) {
-#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-            std::fprintf(stderr, "WakePipe startup failed at private directory creation\n");
-#endif
             return cleanup(Error::INTERNAL);
         }
         (void)path_identity(directory_.data(), FILE_FLAG_BACKUP_SEMANTICS,
@@ -1308,9 +1299,6 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create(
     auto impl = std::unique_ptr<Impl>(
         new Impl(card_service, tuner_service, execution));
     if (!impl->wake.open(runtime_directory)) {
-#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-        std::fprintf(stderr, "ControlWorkerLanes startup failed at wake open\n");
-#endif
         return Result<std::unique_ptr<ControlWorkerLanes>>::failure(Error::INTERNAL);
     }
     const std::array<ControlWorkerLane, 3U> lane_ids{
@@ -1321,9 +1309,6 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create(
             new Impl::Lane(*impl, lane_ids[index]));
         const auto initialized = impl->lanes[index]->initialize();
         if (!initialized) {
-#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
-            std::fprintf(stderr, "ControlWorkerLanes startup failed at lane %zu\n", index);
-#endif
             for (std::size_t stop = 0U; stop <= index; ++stop) {
                 if (impl->lanes[stop] != nullptr && impl->lanes[stop]->started) {
                     impl->lanes[stop]->stop();
