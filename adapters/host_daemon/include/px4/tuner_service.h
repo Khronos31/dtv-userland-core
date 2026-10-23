@@ -14,6 +14,7 @@ namespace px4::userland {
 
 class HostAuthorityOwner;
 namespace ipc::posix { class ControlWorkerLanes; }
+namespace ipc::posix { class HostAuthorityBridge; }
 class HostAuthorityOwnerTestAccess;
 
 // R3 strict frequency facts, data only.  A backend reports them per receiver
@@ -504,10 +505,38 @@ public:
                                             Error result, bool quiesced) noexcept;
     Result<TunerStreamStop> stream_last_terminal_v1(std::uint64_t client_id,
                                                     std::uint64_t lease_id) const noexcept;
+    Result<TunerStreamStart> authority_start_stream_v1(
+        std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t revision,
+        std::uint64_t now_ms, std::uint64_t arm_budget_ms) noexcept;
+    Result<TunerStreamTicket> authority_reserve_attach_v1(
+        std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t epoch,
+        std::uint64_t stream_id, const dtv::userland::detail::ReceiverToken& token,
+        std::uint64_t now_ms) noexcept;
+    Result<TunerStreamStop> authority_stop_stream_v1(
+        std::uint64_t client_id, std::uint64_t lease_id,
+        std::uint64_t stream_id) noexcept;
+    Result<TunerStreamStop> authority_stream_last_terminal_v1(
+        std::uint64_t client_id, std::uint64_t lease_id) const noexcept;
+    Result<void> authority_prepare_attach_v1(const TunerStreamTicket& ticket) noexcept;
+    Result<void> authority_commit_attach_v1(const TunerStreamTicket& ticket) noexcept;
+    Result<void> authority_abort_attach_v1(const TunerStreamTicket& ticket,
+                                           Error cause) noexcept;
+    Result<void> authority_run_stream_cleanup_v1(
+        const TunerStreamTicket& ticket) noexcept;
+    Result<TunerStreamReadResult> authority_read_stream_v1(
+        const TunerStreamTicket& ticket, MutableByteView output,
+        Timeout timeout) noexcept;
+    Result<TunerStreamCounters> authority_stream_stats_v1(
+        const TunerStreamTicket& ticket) const noexcept;
+    Result<TunerStreamFinalSnapshot> authority_final_snapshot_v1(
+        const TunerStreamTicket& ticket) const noexcept;
+    Result<void> authority_release_stream_final_v1(
+        const TunerStreamTicket& ticket) noexcept;
 
 private:
     friend class HostAuthorityOwner;
     friend class ipc::posix::ControlWorkerLanes;
+    friend class ipc::posix::HostAuthorityBridge;
     friend class HostAuthorityOwnerTestAccess;
 
     // The lease, tune, and stream lifecycle runs in the common receiver
@@ -616,6 +645,11 @@ private:
             const dtv::userland::detail::Attachment& attachment) const noexcept override;
         Result<dtv::userland::detail::StreamFinalSnapshot> final_snapshot(
             const dtv::userland::detail::Attachment& attachment) const noexcept override;
+        Result<dtv::userland::detail::StreamReadResult> read(
+            const dtv::userland::detail::Attachment& attachment,
+            MutableByteView output, Timeout timeout) noexcept;
+        Result<void> release_final(
+            const dtv::userland::detail::Attachment& attachment) noexcept;
 
     private:
         TunerStreamControl* stream_;

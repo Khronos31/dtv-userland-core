@@ -345,6 +345,23 @@ Result<engine::StreamFinalSnapshot> TunerService::StreamAdapter::final_snapshot(
         to_engine(snapshot.value().counters), snapshot.value().terminal});
 }
 
+Result<engine::StreamReadResult> TunerService::StreamAdapter::read(
+    const engine::Attachment& attachment, MutableByteView output,
+    Timeout timeout) noexcept
+{
+    const auto result = stream_->read(to_legacy(attachment), output, timeout);
+    if (!result) return Result<engine::StreamReadResult>::failure(result.error());
+    return Result<engine::StreamReadResult>::success(engine::StreamReadResult{
+        result.value().bytes, result.value().eof, result.value().timed_out,
+        static_cast<engine::StreamTerminal>(result.value().terminal)});
+}
+
+Result<void> TunerService::StreamAdapter::release_final(
+    const engine::Attachment& attachment) noexcept
+{
+    return stream_->release_final(to_legacy(attachment));
+}
+
 TunerService::TunerService(TunerServiceBackend& backend,
                            TunerNonceSource& nonce_source,
                            TunerServiceTime& time,
@@ -881,6 +898,123 @@ Result<TunerService::TunerStreamStop> TunerService::stream_last_terminal_v1(
     if (!valid_legacy_client_id(client_id))
         return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
     return engine_.stream_last_terminal_v1(client_id, lease_id);
+}
+
+Result<TunerService::TunerStreamStart> TunerService::authority_start_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t revision,
+    std::uint64_t now_ms, std::uint64_t arm_budget_ms) noexcept
+{
+    if ((client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamStart>::failure(Error::INVALID_ARGUMENT);
+    return engine_.start_stream_v1(client_id, lease_id, revision, now_ms,
+                                   arm_budget_ms);
+}
+
+Result<TunerService::TunerStreamTicket> TunerService::authority_reserve_attach_v1(
+    std::uint64_t client_id, std::uint64_t lease_id, std::uint64_t epoch,
+    std::uint64_t stream_id, const dtv::userland::detail::ReceiverToken& token,
+    std::uint64_t now_ms) noexcept
+{
+    if ((client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamTicket>::failure(Error::INVALID_ARGUMENT);
+    return engine_.reserve_attach_v1(client_id, lease_id, epoch, stream_id, token,
+                                     now_ms);
+}
+
+Result<TunerService::TunerStreamStop> TunerService::authority_stop_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id,
+    std::uint64_t stream_id) noexcept
+{
+    if ((client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
+    return engine_.stop_stream_v1(client_id, lease_id, stream_id);
+}
+
+Result<TunerService::TunerStreamStop> TunerService::authority_stream_last_terminal_v1(
+    std::uint64_t client_id, std::uint64_t lease_id) const noexcept
+{
+    if ((client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamStop>::failure(Error::INVALID_ARGUMENT);
+    return engine_.stream_last_terminal_v1(client_id, lease_id);
+}
+
+Result<void> TunerService::authority_prepare_attach_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    return engine_.prepare_attach_v1(ticket);
+}
+
+Result<void> TunerService::authority_commit_attach_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    return engine_.commit_attach_v1(ticket);
+}
+
+Result<void> TunerService::authority_abort_attach_v1(
+    const TunerStreamTicket& ticket, Error cause) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    return engine_.abort_attach_v1(ticket, cause);
+}
+
+Result<void> TunerService::authority_run_stream_cleanup_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    return engine_.run_stream_cleanup_v1(ticket);
+}
+
+Result<TunerStreamReadResult> TunerService::authority_read_stream_v1(
+    const TunerStreamTicket& ticket, MutableByteView output,
+    Timeout timeout) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
+    const auto attachment = engine_.stream_attachment_v1(ticket);
+    if (!attachment) return Result<TunerStreamReadResult>::failure(attachment.error());
+    const auto result = stream_control_.read(attachment.value(), output, timeout);
+    if (!result) return Result<TunerStreamReadResult>::failure(result.error());
+    return Result<TunerStreamReadResult>::success(TunerStreamReadResult{
+        result.value().bytes, result.value().eof, result.value().timed_out,
+        static_cast<TunerStreamTerminal>(result.value().terminal)});
+}
+
+Result<TunerStreamCounters> TunerService::authority_stream_stats_v1(
+    const TunerStreamTicket& ticket) const noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamCounters>::failure(Error::INVALID_ARGUMENT);
+    const auto counters = engine_.stream_stats_v1(ticket);
+    if (!counters) return Result<TunerStreamCounters>::failure(counters.error());
+    return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
+}
+
+Result<TunerStreamFinalSnapshot> TunerService::authority_final_snapshot_v1(
+    const TunerStreamTicket& ticket) const noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<TunerStreamFinalSnapshot>::failure(Error::INVALID_ARGUMENT);
+    const auto snapshot = engine_.stream_final_snapshot_v1(ticket);
+    if (!snapshot)
+        return Result<TunerStreamFinalSnapshot>::failure(snapshot.error());
+    return Result<TunerStreamFinalSnapshot>::success(TunerStreamFinalSnapshot{
+        to_legacy(snapshot.value().counters), snapshot.value().terminal});
+}
+
+Result<void> TunerService::authority_release_stream_final_v1(
+    const TunerStreamTicket& ticket) noexcept
+{
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+        return Result<void>::failure(Error::INVALID_ARGUMENT);
+    const auto attachment = engine_.stream_attachment_v1(ticket);
+    if (!attachment) return Result<void>::failure(attachment.error());
+    return stream_control_.release_final(attachment.value());
 }
 
 }  // namespace px4::userland

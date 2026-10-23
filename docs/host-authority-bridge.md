@@ -1,9 +1,10 @@
 # Host Authority bridge
 
-`dtv::host_authority_bridge` is an opt-in GPL host target. It owns two
-single-use `ControlServiceSession` slots and composes `HostAuthorityOwner` with
-the adopted `ControlWorkerLanes`; both caller domains therefore use the one
-`TunerService` Engine supplied to the bridge. It has no listener or socket.
+`dtv::host_authority_bridge` is an opt-in GPL host target. It owns 32
+single-use `ControlServiceSession` slots and a separate bounded pool of 32
+data connections, and composes `HostAuthorityOwner` with the adopted
+`ControlWorkerLanes`; both caller domains therefore use the one `TunerService`
+Engine supplied to the bridge. It has no listener or socket.
 
 The poll owner supplies decoded frames, context, snapshots, and the acceptance
 clock. It writes a returned response frame and calls `response_sent(true)` only
@@ -37,6 +38,37 @@ until all worker threads exit and completion queues are empty. Fatal unresolved
 leases keep the owner alive and produce `INTERNAL`; this bridge does not claim
 device quiescence or provide recovery for a permanently blocked backend.
 
-The first bridge increment handles LIST/STATUS and ACQUIRE/TUNE/RELEASE/
-DISCONNECT. Product listeners, START/STOP, ATTACH/data, CARD/LNB dispatch, and
-product pin changes remain downstream integration work.
+The fixed control table is allocated on the heap; construction failure rejects
+new control sessions with `RESOURCE_LIMIT`. Data handles use a separate
+generation-stamped pool, so a stale close cannot close a reused connection.
+Each pool rejects its 33rd live or retained entry independently.
+
+Configure `TunerService` with the v1 stream epoch before creating its workers,
+then register that engine epoch and the caller-supplied finite START arm budget
+with the bridge before opening sessions. The wire UUID epoch is checked against
+the server epoch and is not converted into the engine's numeric epoch.
+Authority START is handled by `ControlAuthority` on the same Engine. Data
+ATTACH reserves the exact Engine ticket, queues physical prepare to its receiver
+worker, and exposes a typed response only after prepare completion;
+`data_attach_response_sent(true)` is the only path that commits the ticket.
+An incomplete response aborts the ticket and retains the data tombstone until
+the exact-ticket cleanup completes. `stop_stream()` issues metadata STOP and
+queues cleanup against that retained ticket; its first result may therefore
+report `quiesced == false` until worker cleanup records the terminal state. A
+cleanup submit rejection keeps the ticket and tombstone pending for a later
+`poll()` retry; it does not release the data slot or treat the stream as
+quiesced.
+
+`read_data()` pulls complete packets through the ticket's exact attachment,
+returns a `TsData` view over caller storage, and advances a nonwrapping sequence
+per data connection. During STOP the data connection remains readable until
+its queue reaches EOF. After cleanup and drain, `take_data_stream_end()` exposes
+the exact retained final snapshot; `data_stream_end_sent(true)` releases it and
+the data slot. A closed data connection drops the final output but still waits
+for physical cleanup before reusing its slot. The caller owns encoding and
+full-write handling for `TsData` and `StreamEndEvent`.
+
+The socketless control-frame `accept()` path supports wire START but still
+rejects wire STOP; call `stop_stream()` with the decoded STOP identity to get
+the typed outcome and schedule exact-ticket cleanup. CARD/LNB dispatch, OS
+listeners, product producers/pins, and deployment remain outside this increment.

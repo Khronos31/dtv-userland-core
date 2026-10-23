@@ -194,8 +194,13 @@ if(DTV_USERLAND_BUILD_HOST_WORKERS)
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_include_directories(dtv_userland_host_workers PRIVATE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include>)
     target_link_libraries(dtv_userland_host_workers PUBLIC
         Threads::Threads dtv::host_tuner dtv::card dtv::authority)
+    if(WIN32)
+        target_link_libraries(dtv_userland_host_workers PUBLIC ws2_32 bcrypt advapi32)
+    endif()
     if(MSVC)
         target_compile_options(dtv_userland_host_workers PRIVATE /EHs-c- /GR- /W4)
     else()

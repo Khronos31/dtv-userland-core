@@ -124,6 +124,9 @@ int main()
     Nonce nonce;
     Time time;
     TunerService tuner(tuner_backend, nonce, time);
+    if (!tuner.configure_stream_contract(
+            dtv::userland::detail::StreamContract::v1, 0x434f4e53554d4552ULL))
+        return 1;
     CardBackend card_backend;
     CardSession card_session;
     CardService card(card_backend, card_session);
@@ -132,6 +135,8 @@ int main()
     const auto canonical = list();
     wire::ServerHello server{canonical.epoch, canonical.producer, 0U};
     ipc::posix::HostAuthorityBridge bridge(tuner, *workers.value(), server, canonical);
+    if (bridge.configure_stream_contract(
+            0x434f4e53554d4552ULL, 1000U) != Error::OK) return 1;
     const auto slot = bridge.open_session();
     if (!slot || bridge.close_session(slot.value()) != Error::OK) return 1;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
