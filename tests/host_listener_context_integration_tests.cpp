@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -296,15 +297,36 @@ bool read_frame(w::TimedClientTransport& transport, w::Frame& frame) noexcept
 
 bool lifecycle()
 {
+#if defined(_WIN32)
+    const char* runtime_parent = std::getenv("LOCALAPPDATA");
+    if (runtime_parent == nullptr || runtime_parent[0] == '\0') {
+        std::fprintf(stderr, "LOCALAPPDATA is not set for protected runtime parent\n");
+        return false;
+    }
+    const auto path = (std::filesystem::path(runtime_parent) /
+        ("dtv-context-" + std::to_string(std::chrono::steady_clock::now()
+            .time_since_epoch().count()))).string();
+#else
     const auto path = (std::filesystem::temp_directory_path() /
         ("dtv-context-" + std::to_string(std::chrono::steady_clock::now()
             .time_since_epoch().count()))).string();
+#endif
     std::error_code fs_error;
     if (!std::filesystem::create_directory(path, fs_error) || fs_error) {
         std::fprintf(stderr, "runtime directory create error=%u\n",
                      static_cast<unsigned>(fs_error.value()));
         return false;
     }
+#if !defined(_WIN32)
+    std::filesystem::permissions(path, std::filesystem::perms::owner_all,
+                                 std::filesystem::perm_options::replace, fs_error);
+    if (fs_error) {
+        std::fprintf(stderr, "runtime directory permissions error=%u\n",
+                     static_cast<unsigned>(fs_error.value()));
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+#endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<Family> family(new Family(shutdown));
     ContextConfig config;

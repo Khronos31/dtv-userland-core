@@ -1465,24 +1465,42 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
     TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
     if (!tuner.configure_strict_capabilities() ||
         !tuner.configure_stream_contract(
-            dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL)) return false;
+            dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL)) {
+        std::cerr << "failed ATTACH fixture stream configuration\n";
+        return false;
+    }
     CardBackend card_backend;
     CardSession card_session;
     CardService card(card_backend, card_session);
     auto created = ControlWorkerLanes::create(card, tuner, "/tmp");
-    if (!created) return false;
+    if (!created) {
+        std::cerr << "failed ATTACH fixture worker create error="
+                  << static_cast<unsigned>(created.error()) << "\n";
+        return false;
+    }
     const auto list = make_list();
     const w::ServerHello server{list.epoch, list.producer, 0U};
     HostAuthorityBridge bridge(tuner, *created.value(), server, list);
-    if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+    if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK) {
+        std::cerr << "failed ATTACH fixture bridge stream configuration\n";
         return false;
+    }
     const auto control = bridge.open_session();
-    if (!control || !hello(bridge, control.value())) return false;
+    if (!control || !hello(bridge, control.value())) {
+        std::cerr << "failed ATTACH fixture control HELLO\n";
+        return false;
+    }
     std::uint64_t lease = 0U;
     if (!acquire(bridge, control.value(), 2U, lease, 3U) ||
-        !tune(bridge, control.value(), list.epoch, lease, 4U)) return false;
+        !tune(bridge, control.value(), list.epoch, lease, 4U)) {
+        std::cerr << "failed ATTACH fixture acquire/tune\n";
+        return false;
+    }
     const auto status = tuner.engine_status();
-    if (!status || status.value().tune_metadata[2U].current_revision == 0U) return false;
+    if (!status || status.value().tune_metadata[2U].current_revision == 0U) {
+        std::cerr << "failed ATTACH fixture tune status\n";
+        return false;
+    }
     w::StartRequest start;
     start.epoch = list.epoch;
     start.lease_id = lease;
@@ -1497,19 +1515,34 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
     const auto started = bridge.accept(control.value(), frame(w::kOpcodeStartStream, 7U,
         {payload.data(), size.value()}), context, snapshot, 100U);
     if (started.action != w::InboundAction::respond ||
-        bridge.response_sent(control.value(), true) != Error::OK) return false;
+        bridge.response_sent(control.value(), true) != Error::OK) {
+        std::cerr << "failed ATTACH fixture start action="
+                  << static_cast<unsigned>(started.action) << "\n";
+        return false;
+    }
     const auto start_response = w::decode_start_response(
         {started.frame.data + w::kHeaderSize, started.frame.size - w::kHeaderSize});
-    if (!start_response) return false;
+    if (!start_response) {
+        std::cerr << "failed ATTACH fixture START response decode\n";
+        return false;
+    }
     const auto data = bridge.open_data_session();
-    if (!data) return false;
+    if (!data) {
+        std::cerr << "failed ATTACH fixture data open error="
+                  << static_cast<unsigned>(data.error()) << "\n";
+        return false;
+    }
     w::AttachRequest attach;
     attach.epoch = list.epoch;
     attach.lease_id = lease;
     attach.stream_id = start_response.value().stream_id;
     attach.attach_token = start_response.value().attach_token;
-    if (bridge.prepare_data_attach(data.value(), control.value(), attach, 101U) != Error::OK)
+    const Error prepared = bridge.prepare_data_attach(data.value(), control.value(), attach, 101U);
+    if (prepared != Error::OK) {
+        std::cerr << "failed ATTACH fixture prepare error="
+                  << static_cast<unsigned>(prepared) << "\n";
         return false;
+    }
     HostAuthorityAttachResult result{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!result.ready && std::chrono::steady_clock::now() < deadline) {
@@ -1518,7 +1551,14 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
         if (!result.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (!result.ready || result.error != Error::UNSUPPORTED ||
-        result.response.stream_id != start_response.value().stream_id) return false;
+        result.response.stream_id != start_response.value().stream_id) {
+        std::cerr << "failed ATTACH result ready=" << result.ready
+                  << " error=" << static_cast<unsigned>(result.error)
+                  << " stream=" << result.response.stream_id
+                  << " expected=" << start_response.value().stream_id
+                  << " capture_starts=" << backend.capture_starts << "\n";
+        return false;
+    }
     (void)bridge.close_data_session(data.value());
     bridge.close_session_for_test(control.value());
     return static_cast<bool>(created.value()->stop_and_join());

@@ -264,8 +264,8 @@ struct EnclosureContext::Impl final {
         if (!slot.used || slot.response_pending || slot.waiting_response)
             return Result<void>::failure(Error::PROTOCOL_ERROR);
         const std::uint64_t now_ms = family->time().monotonic_ms();
-        if (snapshot_sequence == std::numeric_limits<std::uint64_t>::max() ||
-            now_ms > std::numeric_limits<std::uint64_t>::max() / 1000000U)
+        if (snapshot_sequence == (std::numeric_limits<std::uint64_t>::max)() ||
+            now_ms > (std::numeric_limits<std::uint64_t>::max)() / 1000000U)
             return Result<void>::failure(Error::RESOURCE_LIMIT);
         ++snapshot_sequence;
         const wire::Snapshot snapshot{snapshot_sequence, now_ms * 1000000U};

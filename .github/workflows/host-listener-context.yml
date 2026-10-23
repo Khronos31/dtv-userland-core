@@ -125,6 +125,26 @@ jobs:
           -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
       - name: Build
         run: cmake --build build --config Release --parallel 2
+      - name: Prepare protected runtime parent
+        shell: pwsh
+        run: |
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP 'dtv-userland-core-listener-runtime'
+          New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $acl = Get-Acl $runtimeRoot
+          $acl.SetOwner($identity.User)
+          $acl.SetAccessRuleProtection($true, $false)
+          $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity.User,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+              [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+          $acl.SetAccessRule($rule)
+          Set-Acl -Path $runtimeRoot -AclObject $acl
+          Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$runtimeRoot"
+          Write-Host "listener_runtime_parent=$runtimeRoot"
       - name: Run Windows listener and bridge tests
         run: ctest --test-dir build -C Release -R '^(host_listener_context_.*|host_authority_bridge_tests)$' --output-on-failure
       - name: Measure Context fixture peak working set
