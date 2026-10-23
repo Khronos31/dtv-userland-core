@@ -1,0 +1,59 @@
+name: Host Authority Bridge Windows
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-authority-bridge-windows.yml'
+      - 'adapters/host_daemon/**'
+      - 'include/dtv/userland/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build -A x64
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+      - name: Build bridge tests
+        run: cmake --build build --config Release --target host_authority_bridge_tests
+      - name: Run bridge tests
+        run: ctest --test-dir build -C Release -R '^host_authority_bridge_tests$' --output-on-failure
+      - name: Measure bridge fixture peak working set
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\build\Release\host_authority_bridge_tests.exe' -PassThru
+          $peak = 0
+          while (-not $process.HasExited) {
+            $process.Refresh()
+            if ($process.WorkingSet64 -gt $peak) { $peak = $process.WorkingSet64 }
+            Start-Sleep -Milliseconds 1
+          }
+          if ($process.ExitCode -ne 0) { throw "bridge test exit=$($process.ExitCode)" }
+          Write-Host "bridge_test_peak_working_set_bytes=$peak"
+      - name: Install
+        run: cmake --install build --config Release --prefix '${{ runner.temp }}\dtv-install'
+      - name: Configure installed consumer
+        run: cmake -S tests/consumer/host_authority_bridge -B consumer-build -A x64 -DCMAKE_PREFIX_PATH='${{ runner.temp }}\dtv-install'
+      - name: Build installed consumer
+        run: cmake --build consumer-build --config Release
+      - name: Run installed consumer
+        run: .\consumer-build\Release\host_authority_bridge_consumer.exe

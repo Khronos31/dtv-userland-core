@@ -413,6 +413,7 @@ public:
     Result<void> configure_stream_contract(StreamContract contract,
                                            std::uint64_t context_epoch) noexcept;
     StreamContract stream_contract() const noexcept;
+    std::uint64_t stream_context_epoch() const noexcept;
 
     // START: bound to the owner, lease and the latest successful admitted
     // revision.  It issues a new non-reused stream ID, a fresh attach token,
@@ -475,6 +476,12 @@ public:
     // (current or previous stream).  It never exposes a token or handle.
     Result<StreamStopResult> stream_last_terminal_v1(std::uint64_t client_id,
                                                      std::uint64_t lease_id) const noexcept;
+    Result<Attachment> stream_attachment_v1(
+        const StreamAttachTicket& ticket) const noexcept;
+    Result<StreamCounters> stream_stats_v1(
+        const StreamAttachTicket& ticket) const noexcept;
+    Result<StreamFinalSnapshot> stream_final_snapshot_v1(
+        const StreamAttachTicket& ticket) const noexcept;
 
     // Bounded deterministic seam for the nonwrapping revision-exhaustion path.
     // It is an internal detail helper used only by the R2 core test; production

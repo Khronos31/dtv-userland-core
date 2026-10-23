@@ -115,6 +115,8 @@ public:
     const wire::ServerHello& server() const noexcept { return server_; }
     const wire::ListResponse& canonical_list() const noexcept { return canonical_; }
     Error open(ControlServiceSession& session) noexcept;
+    Error configure_stream_contract(std::uint64_t engine_epoch,
+                                   std::uint64_t arm_budget_ms) noexcept;
     AuthorityReply accept(ControlServiceSession& session, const wire::Frame& frame,
                           const wire::Context& context, const wire::Snapshot& snapshot,
                           std::uint64_t accepted_at_ms,
@@ -156,6 +158,8 @@ private:
     ControlServiceSession* sessions_ = nullptr;
     ClientIdAllocator client_ids_{kAuthorityClientIdFirst, UINT64_MAX};
     bool valid_ = false;
+    std::uint64_t stream_engine_epoch_ = 0U;
+    std::uint64_t stream_arm_budget_ms_ = 0U;
 };
 
 }  // namespace dtv::userland::detail

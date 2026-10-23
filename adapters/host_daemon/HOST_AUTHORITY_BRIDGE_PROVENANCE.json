@@ -2,16 +2,22 @@
   "schema": 1,
   "license": "GPL-2.0-only",
   "source_repository": "Khronos31/dtv-userland-core",
-  "source_commit": "1516626bebc13fce0be5755dfad05bbad72d308a",
+  "source_commit": "a8a840a7e44932db5baa897fd41da9a1035e58c7",
   "source_paths": [
     "adapters/host_daemon/src/host_authority_bridge.cpp",
     "adapters/host_daemon/include/dtv/userland/host_daemon/host_authority_bridge.h",
     "adapters/host_daemon/src/control_workers.cpp",
-    "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h"
+    "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h",
+    "adapters/host_daemon/src/tuner_service.cpp",
+    "adapters/host_daemon/include/px4/tuner_service.h",
+    "src/control_authority.cpp",
+    "include/dtv/userland/detail/control_authority.h",
+    "src/receiver_engine.cpp",
+    "include/dtv/userland/detail/receiver_engine.h"
   ],
   "composed_targets": [
     "dtv::host_authority_owner",
     "dtv::host_workers"
   ],
-  "boundary": "A bounded socketless poll-owner composes the adopted Authority owner and worker lanes over the single TunerService Engine. Worker source changes add only test-build fatal and malformed-completion controls. No listener, product dispatch, or device integration is included."
+  "boundary": "A bounded socketless poll-owner composes the adopted Authority owner and worker lanes over the single TunerService Engine. Control and data pools each have 32 entries. START, typed ATTACH prepare/commit, packet reads, typed STREAM_END, STOP cleanup, and paired ingress shutdown use the Authority high-ID stream ticket. Wire STOP dispatch and OS listeners remain outside this increment; no product dispatch or device integration is included."
 }

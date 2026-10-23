@@ -43,6 +43,7 @@ struct ControlWorkerStartupOptions final {
     bool duplicate_next_authority_completion = false;
     bool mismatch_next_authority_acquire_receiver = false;
     bool reject_next_authority_cleanup_submit = false;
+    bool reject_next_authority_stream_cleanup_submit = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 };
@@ -136,6 +137,9 @@ struct ControlWorkerTask final {
     bool attachment_valid = false;
     // Exact v1 attachment ticket for prepare and the physical cleanup.
     dtv::userland::detail::StreamAttachTicket stream_ticket{};
+    std::uint8_t data_slot = 0U;
+    std::uint64_t data_generation = 0U;
+    bool authority_stream = false;
     dtv::userland::detail::AuthorityJob authority_job{};
     bool lnb_enabled = false;
     dtv::userland::wire::Scope status_scope{};
@@ -154,6 +158,10 @@ struct ControlWorkerCompletion final {
     dtv::userland::detail::AuthorityJobKind authority_job_kind =
         dtv::userland::detail::AuthorityJobKind::tune;
     dtv::userland::detail::AuthorityCompletion authority_completion{};
+    dtv::userland::detail::StreamAttachTicket stream_ticket{};
+    std::uint8_t data_slot = 0U;
+    std::uint64_t data_generation = 0U;
+    bool authority_stream = false;
     std::uint64_t card_handle = 0U;
     Error error = Error::OK;
     TunerAcquireResult tuner_acquire{};

@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "dtv/userland/host_daemon/host_authority_bridge.h"
 
+#include <limits>
+
 namespace px4::userland::ipc::posix {
 namespace {
 
@@ -20,7 +22,9 @@ HostAuthorityBridge::HostAuthorityBridge(
     const dtv::userland::wire::ServerHello& server,
     const dtv::userland::wire::ListResponse& canonical,
     dtv::userland::detail::ControlAuthority::TuneValidator validate_tune) noexcept
-    : authority_owner_(tuner_service, server, canonical, validate_tune), workers_(workers)
+    : authority_owner_(tuner_service, server, canonical, validate_tune),
+      tuner_service_(tuner_service), workers_(workers),
+      slots_(new (std::nothrow) Slot[kHostAuthoritySessionCapacity])
 {
 }
 
@@ -28,7 +32,8 @@ Result<std::uint8_t> HostAuthorityBridge::open_session() noexcept
 {
     if (workers_.error() != Error::OK) enter_fatal();
     if (!accepting_) return Result<std::uint8_t>::failure(Error::NOT_READY);
-    for (std::size_t i = 0U; i < slots_.size(); ++i) {
+    if (!slots_) return Result<std::uint8_t>::failure(Error::RESOURCE_LIMIT);
+    for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
         Slot& slot = slots_[i];
         if (slot.state != SlotState::free) continue;
         slot.session.emplace(authority_owner_.authority());
@@ -50,7 +55,7 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     std::uint64_t accepted_at_ms) noexcept
 {
     if (workers_.error() != Error::OK) enter_fatal();
-    if (!accepting_ || index >= slots_.size()) return {};
+    if (!accepting_ || !slots_ || index >= kHostAuthoritySessionCapacity) return {};
     Slot& slot = slots_[index];
     if (slot.state != SlotState::active || !slot.session) return {};
     const auto reply = authority_owner_.authority().accept(
@@ -66,7 +71,7 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
 Error HostAuthorityBridge::response_sent(std::uint8_t index,
                                          bool complete_frame) noexcept
 {
-    if (index >= slots_.size()) return Error::INVALID_ARGUMENT;
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return Error::INVALID_ARGUMENT;
     Slot& slot = slots_[index];
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
     if (complete_frame) {
@@ -95,7 +100,7 @@ Error HostAuthorityBridge::response_sent(std::uint8_t index,
 dtv::userland::detail::AuthorityReply HostAuthorityBridge::take_response(
     std::uint8_t index) noexcept
 {
-    if (index >= slots_.size()) return {};
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return {};
     Slot& slot = slots_[index];
     if (!slot.response_ready) return {};
     slot.response_ready = false;
@@ -104,7 +109,7 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::take_response(
 
 Error HostAuthorityBridge::close_session(std::uint8_t index) noexcept
 {
-    if (index >= slots_.size()) return Error::INVALID_ARGUMENT;
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return Error::INVALID_ARGUMENT;
     Slot& slot = slots_[index];
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
     const AuthorityJob cleanup = authority_owner_.authority().close(*slot.session);
@@ -127,6 +132,306 @@ Error HostAuthorityBridge::set_ingress_stop(IngressStop stop_other_ingress,
     stop_other_ingress_ = stop_other_ingress;
     stop_other_ingress_context_ = context;
     return Error::OK;
+}
+
+Error HostAuthorityBridge::set_control_ingress_stop(IngressStop stop_control_ingress,
+                                                     void* context) noexcept
+{
+    if (!accepting_) return Error::NOT_READY;
+    if (stop_control_ingress == nullptr) return Error::INVALID_ARGUMENT;
+    stop_control_ingress_ = stop_control_ingress;
+    stop_control_ingress_context_ = context;
+    return Error::OK;
+}
+
+Error HostAuthorityBridge::set_data_ingress_stop(IngressStop stop_data_ingress,
+                                                  void* context) noexcept
+{
+    if (!accepting_) return Error::NOT_READY;
+    if (stop_data_ingress == nullptr) return Error::INVALID_ARGUMENT;
+    stop_data_ingress_ = stop_data_ingress;
+    stop_data_ingress_context_ = context;
+    return Error::OK;
+}
+
+Result<HostAuthorityDataConnection> HostAuthorityBridge::open_data_session() noexcept
+{
+    if (workers_.error() != Error::OK) enter_fatal();
+    if (!accepting_) return Result<HostAuthorityDataConnection>::failure(Error::NOT_READY);
+    for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
+        DataSlot& slot = data_slots_[i];
+        if (slot.state != DataSlotState::free) continue;
+        if (slot.generation == std::numeric_limits<std::uint64_t>::max()) {
+            slot.state = DataSlotState::retired;
+            continue;
+        }
+        ++slot.generation;
+        slot.state = DataSlotState::active;
+        slot.connection_open = true;
+        return Result<HostAuthorityDataConnection>::success(
+            HostAuthorityDataConnection{static_cast<std::uint8_t>(i), slot.generation});
+    }
+    return Result<HostAuthorityDataConnection>::failure(Error::RESOURCE_LIMIT);
+}
+
+Error HostAuthorityBridge::close_data_session(
+    HostAuthorityDataConnection connection) noexcept
+{
+    if (connection.slot >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    DataSlot& slot = data_slots_[connection.slot];
+    if ((slot.state != DataSlotState::active &&
+         slot.state != DataSlotState::tombstone) || !slot.connection_open ||
+        slot.generation != connection.generation) return Error::NOT_FOUND;
+    if (slot.ticket.stream_id != 0U) {
+        slot.connection_open = false;
+        slot.state = DataSlotState::tombstone;
+        slot.attach_result = HostAuthorityAttachResult{};
+        if (!slot.attach_pending && slot.prepared &&
+            !queue_stream_cleanup(connection.slot) && workers_.error() != Error::OK)
+            enter_fatal();
+        if (slot.cleanup_pending) return Error::RESOURCE_LIMIT;
+        return Error::OK;
+    }
+    slot.connection_open = false;
+    slot.state = DataSlotState::free;
+    return Error::OK;
+}
+
+Error HostAuthorityBridge::configure_stream_contract(
+    std::uint64_t engine_epoch, std::uint64_t arm_budget_ms) noexcept
+{
+    if (engine_epoch == 0U || arm_budget_ms == 0U) return Error::INVALID_ARGUMENT;
+    if (stream_engine_epoch_ != 0U) return Error::BUSY;
+    if (tuner_service_.engine_.stream_contract() !=
+            dtv::userland::detail::StreamContract::v1 ||
+        tuner_service_.engine_.stream_context_epoch() != engine_epoch)
+        return Error::INVALID_ARGUMENT;
+    const Error authority = authority_owner_.authority().configure_stream_contract(
+        engine_epoch, arm_budget_ms);
+    if (authority == Error::OK) stream_engine_epoch_ = engine_epoch;
+    return authority;
+}
+
+Result<dtv::userland::detail::StreamStartResult> HostAuthorityBridge::start_stream(
+    std::uint8_t control_slot, std::uint64_t lease_id,
+    std::uint64_t tune_revision, std::uint64_t now_ms,
+    std::uint64_t arm_budget_ms) noexcept
+{
+    if (!slots_ || control_slot >= kHostAuthoritySessionCapacity)
+        return Result<dtv::userland::detail::StreamStartResult>::failure(
+            Error::INVALID_ARGUMENT);
+    const Slot& slot = slots_[control_slot];
+    if (slot.state != SlotState::active || !slot.session)
+        return Result<dtv::userland::detail::StreamStartResult>::failure(Error::NOT_FOUND);
+    return tuner_service_.authority_start_stream_v1(slot.client_id, lease_id,
+        tune_revision, now_ms, arm_budget_ms);
+}
+
+Error HostAuthorityBridge::prepare_data_attach(
+    HostAuthorityDataConnection connection, std::uint8_t control_slot,
+    const dtv::userland::wire::AttachRequest& request,
+    std::uint64_t now_ms) noexcept
+{
+    if (!slots_ || control_slot >= kHostAuthoritySessionCapacity ||
+        connection.slot >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    Slot& owner = slots_[control_slot];
+    DataSlot& data = data_slots_[connection.slot];
+    if (owner.state != SlotState::active || !owner.session ||
+        data.state != DataSlotState::active ||
+        data.generation != connection.generation) return Error::NOT_FOUND;
+    if (stream_engine_epoch_ == 0U ||
+        request.epoch != authority_owner_.authority().server().epoch)
+        return Error::INVALID_ARGUMENT;
+    if (data.attach_pending || data.ticket.stream_id != 0U) return Error::BUSY;
+
+    dtv::userland::detail::ReceiverToken token{};
+    token = request.attach_token;
+    const auto reserved = tuner_service_.authority_reserve_attach_v1(
+        owner.client_id, request.lease_id, stream_engine_epoch_, request.stream_id,
+        token, now_ms);
+    if (!reserved) return reserved.error();
+    data.ticket = reserved.value();
+    data.lease_id = request.lease_id;
+    data.attach_result = HostAuthorityAttachResult{};
+    data.attach_pending = true;
+    data.prepared = false;
+
+    ControlWorkerTask task{};
+    task.kind = ControlWorkerTaskKind::client_request;
+    task.operation = ControlWorkerOperation::tuner_prepare_attach_v1;
+    task.stream_ticket = data.ticket;
+    task.receiver = static_cast<std::uint8_t>(data.ticket.slot);
+    task.client_id = owner.client_id;
+    task.lease_id = request.lease_id;
+    task.data_slot = connection.slot;
+    task.data_generation = connection.generation;
+    task.authority_stream = true;
+    const auto lane = workers_.authority_lane(task.receiver, false);
+    if (!lane || !workers_.submit(lane.value(), task)) {
+        data.attach_pending = false;
+        data.state = DataSlotState::tombstone;
+        (void)tuner_service_.authority_abort_attach_v1(data.ticket,
+                                                       Error::RESOURCE_LIMIT);
+        (void)queue_stream_cleanup(connection.slot);
+        return Error::RESOURCE_LIMIT;
+    }
+    return Error::OK;
+}
+
+HostAuthorityAttachResult HostAuthorityBridge::take_data_attach_result(
+    HostAuthorityDataConnection connection) noexcept
+{
+    if (connection.slot >= data_slots_.size()) return {};
+    DataSlot& slot = data_slots_[connection.slot];
+    if (slot.generation != connection.generation || !slot.attach_result.ready) return {};
+    HostAuthorityAttachResult result = slot.attach_result;
+    slot.attach_result = HostAuthorityAttachResult{};
+    return result;
+}
+
+Error HostAuthorityBridge::data_attach_response_sent(
+    HostAuthorityDataConnection connection, bool complete_frame) noexcept
+{
+    if (connection.slot >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    DataSlot& slot = data_slots_[connection.slot];
+    if (slot.generation != connection.generation || !slot.prepared)
+        return Error::NOT_FOUND;
+    if (complete_frame) {
+        const auto committed = tuner_service_.authority_commit_attach_v1(slot.ticket);
+        if (!committed) {
+            (void)tuner_service_.authority_abort_attach_v1(slot.ticket,
+                                                           committed.error());
+            slot.state = DataSlotState::tombstone;
+            return queue_stream_cleanup(connection.slot)
+                ? committed.error() : Error::RESOURCE_LIMIT;
+        }
+        return Error::OK;
+    }
+    (void)tuner_service_.authority_abort_attach_v1(slot.ticket, Error::OK);
+    slot.state = DataSlotState::tombstone;
+    return queue_stream_cleanup(connection.slot) ? Error::OK : Error::RESOURCE_LIMIT;
+}
+
+HostAuthorityDataReadResult HostAuthorityBridge::read_data(
+    HostAuthorityDataConnection connection, MutableByteView output,
+    Timeout timeout) noexcept
+{
+    HostAuthorityDataReadResult result{};
+    if (connection.slot >= data_slots_.size()) {
+        result.error = Error::INVALID_ARGUMENT;
+        return result;
+    }
+    DataSlot& data = data_slots_[connection.slot];
+    if (data.generation != connection.generation || !data.connection_open ||
+        (data.state != DataSlotState::active &&
+         data.state != DataSlotState::tombstone) || !data.prepared ||
+        data.ticket.stream_id == 0U) {
+        result.error = Error::NOT_FOUND;
+        return result;
+    }
+    if (data.next_sequence == std::numeric_limits<std::uint64_t>::max()) {
+        result.error = Error::RESOURCE_LIMIT;
+        return result;
+    }
+    const auto read = tuner_service_.authority_read_stream_v1(data.ticket, output,
+                                                               timeout);
+    if (!read) {
+        result.error = read.error();
+        return result;
+    }
+    result.eof = read.value().eof;
+    result.timed_out = read.value().timed_out;
+    result.terminal = read.value().terminal;
+    if (result.eof) data.drained = true;
+    if (result.eof || result.timed_out) return result;
+    if (read.value().bytes == 0U || output.data == nullptr ||
+        read.value().bytes > output.size ||
+        (read.value().bytes % dtv::userland::wire::kTsPacketSize) != 0U) {
+        result.error = Error::PROTOCOL_ERROR;
+        return result;
+    }
+    const auto counts = tuner_service_.authority_stream_stats_v1(data.ticket);
+    if (!counts) {
+        result.error = counts.error();
+        return result;
+    }
+    result.data.stream_id = data.ticket.stream_id;
+    result.data.sequence = data.next_sequence++;
+    result.data.cumulative_queue_dropped_packets = counts.value().queue_drops;
+    result.data.packets = ByteView{output.data, read.value().bytes};
+    return result;
+}
+
+HostAuthorityStreamEndResult HostAuthorityBridge::take_data_stream_end(
+    HostAuthorityDataConnection connection) noexcept
+{
+    if (connection.slot >= data_slots_.size()) return {};
+    const DataSlot& slot = data_slots_[connection.slot];
+    if (slot.generation != connection.generation || !slot.stream_end.ready ||
+        !slot.drained) return {};
+    return slot.stream_end;
+}
+
+Error HostAuthorityBridge::data_stream_end_sent(
+    HostAuthorityDataConnection connection, bool complete_frame) noexcept
+{
+    if (connection.slot >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    DataSlot& slot = data_slots_[connection.slot];
+    if (slot.generation != connection.generation || !slot.stream_end.ready ||
+        !slot.drained)
+        return Error::NOT_FOUND;
+    if (!complete_frame) return Error::OK;
+    const auto released = tuner_service_.authority_release_stream_final_v1(slot.ticket);
+    if (!released) {
+        slot.state = DataSlotState::fatal_unresolved;
+        enter_fatal();
+        return released.error();
+    }
+    slot = DataSlot{slot.generation, DataSlotState::free};
+    return Error::OK;
+}
+
+Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream(
+    std::uint8_t control_slot, std::uint64_t lease_id,
+    std::uint64_t stream_id) noexcept
+{
+    if (!slots_ || control_slot >= kHostAuthoritySessionCapacity)
+        return Result<dtv::userland::detail::StreamStopResult>::failure(
+            Error::INVALID_ARGUMENT);
+    Slot& owner = slots_[control_slot];
+    if (owner.state != SlotState::active || !owner.session)
+        return Result<dtv::userland::detail::StreamStopResult>::failure(Error::NOT_FOUND);
+    const auto stopped = tuner_service_.authority_stop_stream_v1(
+        owner.client_id, lease_id, stream_id);
+    if (!stopped) return stopped;
+    for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
+        DataSlot& data = data_slots_[i];
+        if (data.ticket.client_id != owner.client_id ||
+            data.lease_id != lease_id || data.ticket.stream_id != stream_id)
+            continue;
+        data.state = DataSlotState::tombstone;
+        if (stopped.value().cleanup_owner && !data.attach_pending &&
+            !queue_stream_cleanup(i))
+            return Result<dtv::userland::detail::StreamStopResult>::failure(
+                Error::RESOURCE_LIMIT);
+        break;
+    }
+    return stopped;
+}
+
+HostAuthorityDataCounts HostAuthorityBridge::data_counts() const noexcept
+{
+    HostAuthorityDataCounts result{};
+    for (const DataSlot& slot : data_slots_) {
+        switch (slot.state) {
+        case DataSlotState::free: ++result.free; break;
+        case DataSlotState::active: ++result.active; break;
+        case DataSlotState::tombstone: ++result.tombstone; break;
+        case DataSlotState::fatal_unresolved: ++result.fatal_unresolved; break;
+        case DataSlotState::retired: ++result.retired; break;
+        }
+    }
+    return result;
 }
 
 Error HostAuthorityBridge::set_legacy_completion_sink(
@@ -156,14 +461,15 @@ bool HostAuthorityBridge::submit(const AuthorityJob& job) noexcept
     const std::uint64_t id = job.kind == AuthorityJobKind::tune
         ? job.tune.client_id : job.client_id;
     const std::size_t index = find_slot(id);
-    if (index == slots_.size()) return false;
+    if (index == kHostAuthoritySessionCapacity) return false;
     return queue_job(job, index);
 }
 
 bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
                                     std::size_t index) noexcept
 {
-    if (index >= slots_.size() || job.key.request_id > 0xffffffffU) return false;
+    if (!slots_ || index >= kHostAuthoritySessionCapacity ||
+        job.key.request_id > 0xffffffffU) return false;
     Slot& slot = slots_[index];
     if (job.kind == AuthorityJobKind::disconnect && slot.inflight != 0U) {
         retain_cleanup(job, index);
@@ -218,16 +524,125 @@ void HostAuthorityBridge::retain_cleanup(const AuthorityJob& job,
 
 std::size_t HostAuthorityBridge::find_slot(std::uint64_t id) const noexcept
 {
-    for (std::size_t i = 0U; i < slots_.size(); ++i) {
+    if (!slots_) return kHostAuthoritySessionCapacity;
+    for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
         if (slots_[i].state != SlotState::free && slots_[i].client_id == id)
             return i;
     }
-    return slots_.size();
+    return kHostAuthoritySessionCapacity;
 }
 
 void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                                   std::size_t lane) noexcept
 {
+    if (completion.authority_stream) {
+        if (completion.data_slot >= data_slots_.size()) {
+            enter_fatal();
+            return;
+        }
+        DataSlot& data = data_slots_[completion.data_slot];
+        if (data.generation != completion.data_generation ||
+            data.ticket.stream_id != completion.stream_ticket.stream_id ||
+            data.ticket.reservation != completion.stream_ticket.reservation) {
+            enter_fatal();
+            return;
+        }
+        if (completion.operation == ControlWorkerOperation::tuner_prepare_attach_v1) {
+            data.attach_pending = false;
+            if (completion.error == Error::OK && data.state == DataSlotState::active) {
+                data.prepared = true;
+                data.attach_result.error = Error::OK;
+                data.attach_result.response.epoch =
+                    authority_owner_.authority().server().epoch;
+                data.attach_result.response.stream_id = data.ticket.stream_id;
+                data.attach_result.ready = true;
+            } else {
+                data.drained = true;
+                (void)tuner_service_.authority_abort_attach_v1(
+                    data.ticket, completion.error == Error::OK
+                        ? Error::NOT_FOUND : completion.error);
+                data.state = DataSlotState::tombstone;
+                if (!queue_stream_cleanup(completion.data_slot) &&
+                    workers_.error() != Error::OK) enter_fatal();
+            }
+            return;
+        }
+        if (completion.operation ==
+            ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1 ||
+            completion.operation == ControlWorkerOperation::tuner_run_stream_cleanup_v1) {
+            data.cleanup_inflight = false;
+            if (completion.error == Error::OK && data.state == DataSlotState::tombstone) {
+                const auto final = tuner_service_.authority_final_snapshot_v1(data.ticket);
+                if (!final && final.error() != Error::UNSUPPORTED) {
+                    data.state = DataSlotState::fatal_unresolved;
+                    enter_fatal();
+                    return;
+                }
+                if (final) {
+                    const auto terminal = tuner_service_.authority_stream_last_terminal_v1(
+                        data.ticket.client_id, data.lease_id);
+                    if (!terminal || !terminal.value().quiesced) {
+                        data.state = DataSlotState::fatal_unresolved;
+                        enter_fatal();
+                        return;
+                    }
+                    auto& event = data.stream_end.event;
+                    event.final.id = data.ticket.stream_id;
+                    event.final.tune_revision = data.ticket.revision;
+                    switch (static_cast<dtv::userland::detail::StreamTerminal>(
+                                final.value().terminal)) {
+                    case dtv::userland::detail::StreamTerminal::slow_consumer:
+                        event.final.reason = dtv::userland::wire::StreamEndReason::slow_consumer;
+                        break;
+                    case dtv::userland::detail::StreamTerminal::disconnected:
+                        event.final.reason = dtv::userland::wire::StreamEndReason::owner_closed;
+                        break;
+                    case dtv::userland::detail::StreamTerminal::stopped:
+                    case dtv::userland::detail::StreamTerminal::none:
+                        event.final.reason = dtv::userland::wire::StreamEndReason::stopped;
+                        break;
+                    default:
+                        event.final.reason = dtv::userland::wire::StreamEndReason::backend_error;
+                        break;
+                    }
+                    event.final.statistics.entries.count = 2U;
+                    event.final.statistics.entries.items[0U].id =
+                        dtv::userland::wire::kCounterIdTransmittedPackets;
+                    event.final.statistics.entries.items[1U].id =
+                        dtv::userland::wire::kCounterIdQueueDroppedPackets;
+                    auto& packets = event.final.statistics.entries.items[0U].counter;
+                    packets.measurement.state = dtv::userland::wire::MeasureState::valid;
+                    packets.measurement.value = final.value().counters.packets;
+                    packets.overflow = packets.measurement.value ==
+                        std::numeric_limits<std::uint64_t>::max();
+                    auto& drops = event.final.statistics.entries.items[1U].counter;
+                    drops.measurement.state = dtv::userland::wire::MeasureState::valid;
+                    drops.measurement.value = final.value().counters.queue_drops;
+                    drops.overflow = drops.measurement.value ==
+                        std::numeric_limits<std::uint64_t>::max();
+                    data.stream_end.ready = true;
+                    if (!data.connection_open) {
+                        const auto released =
+                            tuner_service_.authority_release_stream_final_v1(data.ticket);
+                        if (!released) {
+                            data.state = DataSlotState::fatal_unresolved;
+                            enter_fatal();
+                            return;
+                        }
+                        data = DataSlot{data.generation, DataSlotState::free};
+                    }
+                } else {
+                    data = DataSlot{data.generation, DataSlotState::free};
+                }
+            } else {
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+            }
+            return;
+        }
+        enter_fatal();
+        return;
+    }
     if (completion.operation != ControlWorkerOperation::tuner_authority_job) {
         if (legacy_completion_sink_ != nullptr) {
             legacy_completion_sink_(legacy_completion_context_, completion);
@@ -239,7 +654,7 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
     }
     const auto& value = completion.authority_completion;
     const std::size_t index = find_slot(value.key.client_id);
-    if (index == slots_.size()) {
+    if (index == kHostAuthoritySessionCapacity) {
         enter_fatal();
         return;
     }
@@ -359,8 +774,78 @@ void HostAuthorityBridge::finish_slot(std::size_t index) noexcept
 
 void HostAuthorityBridge::close_all() noexcept
 {
-    for (std::size_t i = 0U; i < slots_.size(); ++i) {
+    if (!slots_) return;
+    for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
         if (slots_[i].state == SlotState::active) (void)close_session(static_cast<std::uint8_t>(i));
+    }
+}
+
+void HostAuthorityBridge::close_all_data() noexcept
+{
+    for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
+        DataSlot& slot = data_slots_[i];
+        if (slot.state != DataSlotState::active) continue;
+        if (slot.ticket.stream_id == 0U) {
+            slot.connection_open = false;
+            slot.state = DataSlotState::free;
+            continue;
+        }
+        slot.connection_open = false;
+        slot.state = DataSlotState::tombstone;
+        if (!slot.attach_pending && slot.prepared &&
+            !queue_stream_cleanup(i) && workers_.error() != Error::OK)
+            enter_fatal();
+    }
+}
+
+bool HostAuthorityBridge::queue_stream_cleanup(std::size_t index) noexcept
+{
+    if (index >= data_slots_.size()) return false;
+    DataSlot& data = data_slots_[index];
+    if (data.ticket.stream_id == 0U) return true;
+    if (data.cleanup_inflight) return true;
+    ControlWorkerTask task{};
+    task.kind = ControlWorkerTaskKind::cleanup;
+    task.operation = ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1;
+    task.stream_ticket = data.ticket;
+    task.receiver = static_cast<std::uint8_t>(data.ticket.slot);
+    task.client_id = data.ticket.client_id;
+    task.lease_id = data.lease_id;
+    task.data_slot = static_cast<std::uint8_t>(index);
+    task.data_generation = data.generation;
+    task.authority_stream = true;
+    const auto lane = workers_.authority_lane(task.receiver, false);
+    if (!lane || !workers_.submit(lane.value(), task)) {
+        data.cleanup_pending = true;
+        return false;
+    }
+    data.cleanup_pending = false;
+    data.cleanup_inflight = true;
+    return true;
+}
+
+void HostAuthorityBridge::stop_ingresses() noexcept
+{
+    if (!control_ingress_stopped_) {
+        if (stop_control_ingress_ != nullptr)
+            stop_control_ingress_(stop_control_ingress_context_);
+        control_ingress_stopped_ = true;
+    }
+    if (!data_ingress_stopped_) {
+        if (stop_data_ingress_ != nullptr &&
+            (stop_data_ingress_ != stop_control_ingress_ ||
+             stop_data_ingress_context_ != stop_control_ingress_context_))
+            stop_data_ingress_(stop_data_ingress_context_);
+        data_ingress_stopped_ = true;
+    }
+    if (!other_ingress_stopped_) {
+        if (stop_other_ingress_ != nullptr &&
+            (stop_other_ingress_ != stop_control_ingress_ ||
+             stop_other_ingress_context_ != stop_control_ingress_context_) &&
+            (stop_other_ingress_ != stop_data_ingress_ ||
+             stop_other_ingress_context_ != stop_data_ingress_context_))
+            stop_other_ingress_(stop_other_ingress_context_);
+        other_ingress_stopped_ = true;
     }
 }
 
@@ -369,12 +854,11 @@ void HostAuthorityBridge::enter_fatal() noexcept
     if (!fatal_) {
         accepting_ = false;
         fatal_ = true;
+        stop_ingresses();
         close_all();
+        close_all_data();
     }
-    if (!other_ingress_stopped_ && stop_other_ingress_ != nullptr) {
-        stop_other_ingress_(stop_other_ingress_context_);
-        other_ingress_stopped_ = true;
-    }
+    stop_ingresses();
     if (!stop_requested_) {
         stop_requested_ = true;
         (void)workers_.request_stop();
@@ -390,13 +874,11 @@ Error HostAuthorityBridge::begin_shutdown(IngressStop stop_other_ingress,
         stop_other_ingress_ = stop_other_ingress;
         stop_other_ingress_context_ = context;
     }
-    if (!other_ingress_stopped_ && stop_other_ingress_ != nullptr) {
-        stop_other_ingress_(stop_other_ingress_context_);
-        other_ingress_stopped_ = true;
-    }
+    stop_ingresses();
     accepting_ = false;
     shutting_down_ = true;
     close_all();
+    close_all_data();
     advance();
     return fatal_ ? Error::INTERNAL : Error::OK;
 }
@@ -427,13 +909,21 @@ Error HostAuthorityBridge::poll() noexcept
 
 void HostAuthorityBridge::advance() noexcept
 {
-    for (std::size_t i = 0U; i < slots_.size(); ++i) {
+    if (slots_) for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
         Slot& slot = slots_[i];
         if (slot.state != SlotState::free && slot.inflight == 0U &&
             slot.cleanup_pending && !fatal_) {
             if (!queue_job(slot.cleanup, i)) {
                 if (workers_.error() != Error::OK) enter_fatal();
             }
+        }
+    }
+    for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
+        DataSlot& slot = data_slots_[i];
+        if (slot.state == DataSlotState::tombstone && slot.cleanup_pending &&
+            !slot.attach_pending && !slot.cleanup_inflight && !fatal_) {
+            if (!queue_stream_cleanup(i) && workers_.error() != Error::OK)
+                enter_fatal();
         }
     }
     if (fatal_) {
@@ -443,7 +933,13 @@ void HostAuthorityBridge::advance() noexcept
         }
     } else if (shutting_down_ && !stop_requested_) {
         bool owned = false;
-        for (const Slot& slot : slots_) owned = owned || slot.state != SlotState::free;
+        if (slots_) {
+            for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i)
+                owned = owned || slots_[i].state != SlotState::free;
+        }
+        for (const DataSlot& slot : data_slots_)
+            owned = owned || (slot.state != DataSlotState::free &&
+                              slot.state != DataSlotState::retired);
         for (bool deferred : deferred_legacy_valid_) owned = owned || deferred;
         if (!owned && workers_.idle()) {
             stop_requested_ = true;
@@ -476,8 +972,9 @@ void HostAuthorityBridge::advance() noexcept
         if (!pending && workers_.live_thread_count() == 0U) {
             (void)workers_.join();
             stopped_ = true;
-            for (Slot& slot : slots_) {
-                if (slot.state == SlotState::tombstone) slot.state = SlotState::fatal_unresolved;
+            if (slots_) for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
+                if (slots_[i].state == SlotState::tombstone)
+                    slots_[i].state = SlotState::fatal_unresolved;
             }
         }
     }
@@ -486,7 +983,8 @@ void HostAuthorityBridge::advance() noexcept
 HostAuthorityBridgeCounts HostAuthorityBridge::counts() const noexcept
 {
     HostAuthorityBridgeCounts result{};
-    for (const Slot& slot : slots_) {
+    for (std::size_t i = 0U; slots_ && i < kHostAuthoritySessionCapacity; ++i) {
+        const Slot& slot = slots_[i];
         switch (slot.state) {
         case SlotState::free: ++result.free; break;
         case SlotState::active: ++result.active; break;
@@ -499,7 +997,7 @@ HostAuthorityBridgeCounts HostAuthorityBridge::counts() const noexcept
 
 std::uint64_t HostAuthorityBridge::client_id(std::uint8_t index) const noexcept
 {
-    return index < slots_.size() ? slots_[index].client_id : 0U;
+    return slots_ && index < kHostAuthoritySessionCapacity ? slots_[index].client_id : 0U;
 }
 
 Error HostAuthorityBridge::shutdown_result() const noexcept

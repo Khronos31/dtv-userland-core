@@ -808,6 +808,11 @@ StreamContract ReceiverEngine::stream_contract() const noexcept
     return contract_;
 }
 
+std::uint64_t ReceiverEngine::stream_context_epoch() const noexcept
+{
+    return context_epoch_;
+}
+
 bool ReceiverEngine::stream_ticket_matches_locked(std::size_t slot,
                                                   const StreamAttachTicket& ticket,
                                                   StreamState expected) const noexcept
@@ -1404,6 +1409,49 @@ Result<StreamStopResult> ReceiverEngine::stream_last_terminal_v1(
     result.cleanup_error = lease.last_error;
     result.quiesced = lease.last_quiesced;
     return Result<StreamStopResult>::success(result);
+}
+
+Result<Attachment> ReceiverEngine::stream_attachment_v1(
+    const StreamAttachTicket& ticket) const noexcept
+{
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<Attachment>::failure(Error::NOT_FOUND);
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!stream_cleanup_ticket_matches_locked(ticket.slot, ticket))
+        return Result<Attachment>::failure(Error::NOT_FOUND);
+    const Lease& lease = leases_[ticket.slot];
+    Attachment attachment = attachment_for(lease, ticket.reservation);
+    attachment.token = ticket.token;
+    return Result<Attachment>::success(attachment);
+}
+
+Result<StreamCounters> ReceiverEngine::stream_stats_v1(
+    const StreamAttachTicket& ticket) const noexcept
+{
+    const auto attachment = stream_attachment_v1(ticket);
+    if (!attachment) return Result<StreamCounters>::failure(attachment.error());
+    if (stream_control_ == nullptr)
+        return Result<StreamCounters>::failure(Error::UNSUPPORTED);
+    return stream_control_->stats(attachment.value());
+}
+
+Result<StreamFinalSnapshot> ReceiverEngine::stream_final_snapshot_v1(
+    const StreamAttachTicket& ticket) const noexcept
+{
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<StreamFinalSnapshot>::failure(Error::NOT_FOUND);
+    Attachment attachment{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!stream_cleanup_ticket_matches_locked(ticket.slot, ticket) ||
+            !leases_[ticket.slot].stream_cleanup_completed)
+            return Result<StreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        attachment = attachment_for(leases_[ticket.slot], ticket.reservation);
+        attachment.token = ticket.token;
+    }
+    if (stream_control_ == nullptr)
+        return Result<StreamFinalSnapshot>::failure(Error::UNSUPPORTED);
+    return stream_control_->final_snapshot(attachment);
 }
 
 // Bounded deterministic seam for the nonwrapping revision-exhaustion path.

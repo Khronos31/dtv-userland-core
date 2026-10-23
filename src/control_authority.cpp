@@ -121,6 +121,16 @@ Error ControlAuthority::open(ControlServiceSession& session) noexcept
     return Error::OK;
 }
 
+Error ControlAuthority::configure_stream_contract(std::uint64_t engine_epoch,
+                                                  std::uint64_t arm_budget_ms) noexcept
+{
+    if (engine_epoch == 0U || arm_budget_ms == 0U) return Error::INVALID_ARGUMENT;
+    if (stream_engine_epoch_ != 0U) return Error::BUSY;
+    stream_engine_epoch_ = engine_epoch;
+    stream_arm_budget_ms_ = arm_budget_ms;
+    return Error::OK;
+}
+
 AuthorityReply ControlAuthority::reply(ControlServiceSession& session, std::size_t size,
                                        bool close_after) noexcept
 {
@@ -345,7 +355,41 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         queued.queued = true;
         return queued;
     }
-    case wire::ControlRequestKind::start_stream:
+    case wire::ControlRequestKind::start_stream: {
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, "start_stream");
+        if (stream_engine_epoch_ == 0U || request.start_stream.epoch != server_.epoch)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::INVALID_ARGUMENT, "start_stream");
+        std::size_t lease_slot = 0U;
+        while (lease_slot < session.lease_count_ &&
+               session.lease_ids_[lease_slot] != request.start_stream.lease_id)
+            ++lease_slot;
+        if (lease_slot == session.lease_count_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "start_stream");
+        const auto started = engine_.start_stream_v1(session.client_id_,
+            request.start_stream.lease_id, request.start_stream.tune_revision,
+            accepted_at_ms, stream_arm_budget_ms_);
+        if (!started)
+            return error_reply(session, request.opcode, request.request_id,
+                               started.error(), "start_stream");
+        wire::StartResponse response;
+        response.epoch = server_.epoch;
+        response.stream_id = started.value().stream_id;
+        response.attach_token = started.value().token;
+        const std::uint64_t remaining = started.value().expires_at_ms > accepted_at_ms
+            ? started.value().expires_at_ms - accepted_at_ms : 0U;
+        response.expires_after_ms = remaining > UINT32_MAX
+            ? UINT32_MAX : static_cast<std::uint32_t>(remaining);
+        const auto size = wire::encode_record_frame(wire::Kind::response,
+            wire::kOpcodeStartStream, request.request_id, response,
+            &wire::encode_start_response, output);
+        return size ? reply(session, size.value())
+                    : error_reply(session, request.opcode, request.request_id,
+                                  size.error(), "start_stream");
+    }
     case wire::ControlRequestKind::stop_stream:
         return error_reply(session, request.opcode, request.request_id,
                            Error::UNSUPPORTED, "control");

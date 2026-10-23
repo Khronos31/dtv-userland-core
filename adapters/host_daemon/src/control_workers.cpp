@@ -738,6 +738,12 @@ struct ControlWorkerLanes::Impl final {
                 owner.reject_next_authority_cleanup_submit.exchange(false)) {
                 return Result<void>::failure(Error::BUSY);
             }
+            if (task.authority_stream &&
+                (task.operation == ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1 ||
+                 task.operation == ControlWorkerOperation::tuner_run_stream_cleanup_v1) &&
+                owner.reject_next_authority_stream_cleanup_submit.exchange(false)) {
+                return Result<void>::failure(Error::BUSY);
+            }
 #endif
             if (pthread_mutex_lock(&mutex) != 0) {
                 return Result<void>::failure(Error::INTERNAL);
@@ -883,6 +889,7 @@ struct ControlWorkerLanes::Impl final {
     std::atomic<bool> duplicate_next_authority_completion{false};
     std::atomic<bool> mismatch_next_authority_acquire_receiver{false};
     std::atomic<bool> reject_next_authority_cleanup_submit{false};
+    std::atomic<bool> reject_next_authority_stream_cleanup_submit{false};
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 #endif
@@ -905,6 +912,8 @@ struct ControlWorkerLanes::Impl final {
                 options->mismatch_next_authority_acquire_receiver);
             reject_next_authority_cleanup_submit.store(
                 options->reject_next_authority_cleanup_submit);
+            reject_next_authority_stream_cleanup_submit.store(
+                options->reject_next_authority_stream_cleanup_submit);
             before_tuner_attach_completion =
                 options->before_tuner_attach_completion;
             before_tuner_attach_completion_context =
@@ -924,6 +933,10 @@ struct ControlWorkerLanes::Impl final {
         completion.request_id = task.request_id;
         completion.receiver = task.receiver;
         completion.lease_id = task.lease_id;
+        completion.stream_ticket = task.stream_ticket;
+        completion.data_slot = task.data_slot;
+        completion.data_generation = task.data_generation;
+        completion.authority_stream = task.authority_stream;
         if (task.operation == ControlWorkerOperation::tuner_authority_job) {
             completion.authority_key = task.authority_job.key;
             completion.authority_job_kind = task.authority_job.kind;
@@ -1034,17 +1047,26 @@ struct ControlWorkerLanes::Impl final {
             break;
         }
         case ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1: {
-            const auto stopped = tuner_service.stop_stream_v1(
+            const auto stopped = task.authority_stream
+                ? tuner_service.authority_stop_stream_v1(
+                    task.stream_ticket.client_id, task.lease_id,
+                    task.stream_ticket.stream_id)
+                : tuner_service.stop_stream_v1(
                 task.stream_ticket.client_id, task.lease_id,
                 task.stream_ticket.stream_id);
             if (!stopped) operation_error = stopped.error();
             else {
                 const auto cleaned =
-                    tuner_service.run_stream_cleanup_v1(task.stream_ticket);
+                    task.authority_stream
+                        ? tuner_service.authority_run_stream_cleanup_v1(task.stream_ticket)
+                        : tuner_service.run_stream_cleanup_v1(task.stream_ticket);
                 if (!cleaned && cleaned.error() != Error::NOT_FOUND)
                     operation_error = cleaned.error();
-                const auto final = tuner_service.stream_last_terminal_v1(
-                    task.stream_ticket.client_id, task.lease_id);
+                const auto final = task.authority_stream
+                    ? tuner_service.authority_stream_last_terminal_v1(
+                        task.stream_ticket.client_id, task.lease_id)
+                    : tuner_service.stream_last_terminal_v1(
+                        task.stream_ticket.client_id, task.lease_id);
                 if (final) {
                     // Keep the exact STOP identity/revision; the cleanup
                     // observation adds the settled quiescence and error.
@@ -1060,12 +1082,16 @@ struct ControlWorkerLanes::Impl final {
             break;
         }
         case ControlWorkerOperation::tuner_prepare_attach_v1: {
-            const auto result = tuner_service.prepare_attach_v1(task.stream_ticket);
+            const auto result = task.authority_stream
+                ? tuner_service.authority_prepare_attach_v1(task.stream_ticket)
+                : tuner_service.prepare_attach_v1(task.stream_ticket);
             if (!result) operation_error = result.error();
             break;
         }
         case ControlWorkerOperation::tuner_run_stream_cleanup_v1: {
-            const auto result = tuner_service.run_stream_cleanup_v1(task.stream_ticket);
+            const auto result = task.authority_stream
+                ? tuner_service.authority_run_stream_cleanup_v1(task.stream_ticket)
+                : tuner_service.run_stream_cleanup_v1(task.stream_ticket);
             if (!result) operation_error = result.error();
             break;
         }
