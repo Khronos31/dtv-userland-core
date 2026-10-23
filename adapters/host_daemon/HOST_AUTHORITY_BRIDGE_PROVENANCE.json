@@ -1,0 +1,17 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/dtv-userland-core",
+  "source_commit": "1516626bebc13fce0be5755dfad05bbad72d308a",
+  "source_paths": [
+    "adapters/host_daemon/src/host_authority_bridge.cpp",
+    "adapters/host_daemon/include/dtv/userland/host_daemon/host_authority_bridge.h",
+    "adapters/host_daemon/src/control_workers.cpp",
+    "adapters/host_daemon/include/dtv/userland/host_daemon/control_workers.h"
+  ],
+  "composed_targets": [
+    "dtv::host_authority_owner",
+    "dtv::host_workers"
+  ],
+  "boundary": "A bounded socketless poll-owner composes the adopted Authority owner and worker lanes over the single TunerService Engine. Worker source changes add only test-build fatal and malformed-completion controls. No listener, product dispatch, or device integration is included."
+}

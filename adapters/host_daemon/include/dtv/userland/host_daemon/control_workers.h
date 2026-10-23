@@ -39,6 +39,10 @@ struct ControlWorkerStartupOptions final {
     // the post-admission abort path is exercised without relying on a real
     // pthread error.
     bool fail_tune_signal = false;
+    int fatal_after_authority_lane = -1;
+    bool duplicate_next_authority_completion = false;
+    bool mismatch_next_authority_acquire_receiver = false;
+    bool reject_next_authority_cleanup_submit = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 };
@@ -213,6 +217,8 @@ public:
 
     Result<void> submit(ControlWorkerLane lane,
                         const ControlWorkerTask& task) noexcept;
+    Result<ControlWorkerLane> authority_lane(std::uint8_t receiver,
+                                             bool cleanup) const noexcept;
     bool try_pop(ControlWorkerLane lane, ControlWorkerCompletion& completion) noexcept;
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     std::size_t pending_completions_for_test(ControlWorkerLane lane) const noexcept;

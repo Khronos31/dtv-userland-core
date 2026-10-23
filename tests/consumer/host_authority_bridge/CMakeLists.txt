@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(dtv_userland_host_authority_bridge_consumer LANGUAGES CXX)
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS host_authority_bridge)
+add_executable(host_authority_bridge_consumer main.cpp)
+target_compile_features(host_authority_bridge_consumer PRIVATE cxx_std_17)
+target_link_libraries(host_authority_bridge_consumer PRIVATE dtv::host_authority_bridge)
