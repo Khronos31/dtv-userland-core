@@ -332,9 +332,15 @@ public:
         // untrusted user with write/delete-child rights could otherwise
         // replace our private child directory.
         if (!windows_security::verify_runtime_parent(base.data())) {
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+            std::fprintf(stderr, "WakePipe startup failed at parent security check\n");
+#endif
             return Result<void>::failure(Error::INTERNAL);
         }
         if (!create_private_directory(base.data())) {
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+            std::fprintf(stderr, "WakePipe startup failed at private directory creation\n");
+#endif
             return cleanup(Error::INTERNAL);
         }
         (void)path_identity(directory_.data(), FILE_FLAG_BACKUP_SEMANTICS,
