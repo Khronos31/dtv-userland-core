@@ -27,6 +27,10 @@ public:
         return Error::OK;
     }
     AcceptResult accept(ListenerToken) noexcept override { return {}; }
+    Error set_connection_interest(ConnectionToken, std::uint8_t) noexcept override
+    {
+        return Error::OK;
+    }
     IoResult read_some(ConnectionToken, MutableByteView) noexcept override { return {}; }
     IoResult write_some(ConnectionToken, ByteView) noexcept override { return {}; }
     Error close_connection(ConnectionToken) noexcept override { return Error::OK; }

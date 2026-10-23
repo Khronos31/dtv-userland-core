@@ -87,6 +87,10 @@ public:
                        std::size_t event_capacity,
                        std::size_t& event_count) noexcept = 0;
     virtual AcceptResult accept(ListenerToken listener) noexcept = 0;
+    // Replaces the readiness interest for a connection; only ready_read and
+    // ready_write are valid requested flags.
+    virtual Error set_connection_interest(ConnectionToken connection,
+                                          std::uint8_t flags) noexcept = 0;
     // progress carries a partial byte count; would_block carries no progress,
     // eof is a clean peer EOF, and failure carries a typed Error.
     virtual IoResult read_some(ConnectionToken connection,
