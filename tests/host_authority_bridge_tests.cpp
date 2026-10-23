@@ -1084,7 +1084,7 @@ bool test_authority_stream_prepare_commit_stop()
         bridge.response_sent(control.value(), true) != Error::OK) return false;
     auto decoded_error = w::decode_error_response(
         {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
-    if (!decoded_error || decoded_error.value().error.code == 0U ||
+    if (!decoded_error || decoded_error.value().error.code != w::kWireErrorStaleHandle ||
         bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U) {
         std::cerr << "wrong epoch reply action=" << static_cast<unsigned>(rejected.action)
                   << " error=" << (decoded_error ? decoded_error.value().error.code : 0U)
@@ -1100,7 +1100,8 @@ bool test_authority_stream_prepare_commit_stop()
         bridge.response_sent(control.value(), true) != Error::OK) return false;
     decoded_error = w::decode_error_response(
         {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
-    if (!decoded_error || decoded_error.value().error.code == 0U ||
+    if (!decoded_error || decoded_error.value().error.code !=
+            static_cast<std::uint32_t>(Error::NOT_FOUND) ||
         bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U)
         return false;
     rejected = send_stop(control.value(), 10U, list.epoch, lease + 1U,
@@ -1111,7 +1112,8 @@ bool test_authority_stream_prepare_commit_stop()
         bridge.response_sent(control.value(), true) != Error::OK) return false;
     decoded_error = w::decode_error_response(
         {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
-    if (!decoded_error || decoded_error.value().error.code == 0U ||
+    if (!decoded_error || decoded_error.value().error.code !=
+            static_cast<std::uint32_t>(Error::NOT_FOUND) ||
         bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U)
         return false;
     const auto stop_reply = send_stop(control.value(), 12U, list.epoch, lease,
