@@ -9,6 +9,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <memory>
 #include <thread>
@@ -256,7 +257,12 @@ w::ListResponse make_list()
 ContextConfig config()
 {
     ContextConfig value;
+#if defined(_WIN32)
+    const char* runtime_directory = std::getenv("LOCALAPPDATA");
+    value.runtime_directory = runtime_directory == nullptr ? "" : runtime_directory;
+#else
     value.runtime_directory = "/tmp";
+#endif
     value.product = "context-test";
     value.instance = "one";
     value.stream_engine_epoch = 42U;
