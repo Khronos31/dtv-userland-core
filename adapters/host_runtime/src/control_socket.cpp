@@ -111,14 +111,14 @@ bool current_sid(PSID& sid, HANDLE& token, std::array<std::uint8_t, 512U>& stora
     return sid != nullptr;
 }
 
-bool endpoint_security(const std::string& path) noexcept
+Error endpoint_security(const std::string& path) noexcept
 {
     const int wide_length = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
         path.c_str(), -1, nullptr, 0);
-    if (wide_length <= 0) return false;
+    if (wide_length <= 0) return Error::UNSUPPORTED;
     std::wstring wide(static_cast<std::size_t>(wide_length), L'\0');
     if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, path.c_str(), -1,
-            wide.data(), wide_length) != wide_length) return false;
+            wide.data(), wide_length) != wide_length) return Error::UNSUPPORTED;
 
     PSID owner = nullptr;
     PACL dacl = nullptr;
@@ -126,15 +126,17 @@ bool endpoint_security(const std::string& path) noexcept
     const DWORD result = ::GetNamedSecurityInfoW(wide.data(), SE_FILE_OBJECT,
         OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
         &owner, nullptr, &dacl, nullptr, &descriptor);
+    if (result == ERROR_FILE_NOT_FOUND || result == ERROR_PATH_NOT_FOUND)
+        return Error::NOT_FOUND;
     if (result != ERROR_SUCCESS || owner == nullptr || dacl == nullptr || descriptor == nullptr)
-        return false;
+        return Error::UNSUPPORTED;
 
     SECURITY_DESCRIPTOR_CONTROL control = 0U;
     DWORD revision = 0U;
     if (::GetSecurityDescriptorControl(descriptor, &control, &revision) == 0 ||
         (control & SE_DACL_PROTECTED) == 0U) {
         (void)::LocalFree(descriptor);
-        return false;
+        return Error::UNSUPPORTED;
     }
 
     std::array<std::uint8_t, 512U> storage{};
@@ -174,7 +176,7 @@ bool endpoint_security(const std::string& path) noexcept
     }
     if (token != nullptr) (void)::CloseHandle(token);
     if (descriptor != nullptr) (void)::LocalFree(descriptor);
-    return accepted;
+    return accepted ? Error::OK : Error::UNSUPPORTED;
 }
 
 #else
@@ -202,15 +204,20 @@ bool secure_directory(const std::string& path, EndpointAccess access, uid_t owne
     return (info.st_mode & forbidden) == 0;
 }
 
-bool secure_endpoint(const std::string& path, EndpointAccess access, uid_t owner,
-                     struct stat& identity) noexcept
+enum class EndpointCheck : std::uint8_t { ready, missing, refused };
+
+EndpointCheck secure_endpoint(const std::string& path, EndpointAccess access, uid_t owner,
+                              struct stat& identity) noexcept
 {
-    if (::lstat(path.c_str(), &identity) != 0 || !S_ISSOCK(identity.st_mode) ||
-        identity.st_uid != owner) return false;
+    if (::lstat(path.c_str(), &identity) != 0)
+        return errno == ENOENT ? EndpointCheck::missing : EndpointCheck::refused;
+    if (!S_ISSOCK(identity.st_mode) || identity.st_uid != owner)
+        return EndpointCheck::refused;
     if (access == EndpointAccess::private_user)
-        return (identity.st_mode & 0077) == 0;
-    return (identity.st_mode & 0007) == 0 &&
-           (identity.st_mode & 0060) == 0060;
+        return (identity.st_mode & 0077) == 0 ? EndpointCheck::ready :
+                                               EndpointCheck::refused;
+    return (identity.st_mode & 0007) == 0 && (identity.st_mode & 0060) == 0060
+        ? EndpointCheck::ready : EndpointCheck::refused;
 }
 
 bool wait_socket(NativeSocket socket, short events, Clock::time_point deadline) noexcept
@@ -222,9 +229,12 @@ bool wait_socket(NativeSocket socket, short events, Clock::time_point deadline) 
         const auto milliseconds = std::min<std::int64_t>(remaining.count() + 1, 0x7fffffff);
         pollfd descriptor{socket, events, 0};
         const int result = ::poll(&descriptor, 1U, static_cast<int>(milliseconds));
-        if (result > 0)
-            return (descriptor.revents & events) != 0 &&
-                   (descriptor.revents & (POLLERR | POLLHUP | POLLNVAL)) == 0;
+        if (result > 0) {
+            if ((descriptor.revents & POLLNVAL) != 0) return false;
+            if ((descriptor.revents & events) != 0) return true;
+            return (events & POLLIN) != 0 &&
+                   (descriptor.revents & (POLLERR | POLLHUP)) != 0;
+        }
         if (result == 0) return false;
         if (errno != EINTR) return false;
     }
@@ -378,8 +388,11 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
 #if defined(_WIN32)
     if (config.access != EndpointAccess::private_user)
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
-    if (!ensure_winsock() || !endpoint_security(path))
+    if (!ensure_winsock())
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
+    const Error security = endpoint_security(path);
+    if (security != Error::OK)
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(security);
     NativeSocket socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (socket == kInvalidSocket) return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
     u_long nonblocking = 1U;
@@ -425,8 +438,11 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         !secure_directory(instance_dir, config.access, owner))
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
     struct stat endpoint_before{};
-    if (!secure_endpoint(path, config.access, owner, endpoint_before))
-        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
+    const EndpointCheck endpoint_check = secure_endpoint(
+        path, config.access, owner, endpoint_before);
+    if (endpoint_check != EndpointCheck::ready)
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(
+            endpoint_check == EndpointCheck::missing ? Error::NOT_FOUND : Error::UNSUPPORTED);
     NativeSocket socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
     if (socket < 0) return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
     const int original = ::fcntl(socket, F_GETFL, 0);
@@ -458,7 +474,7 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         }
     }
     struct stat endpoint_after{};
-    if (!secure_endpoint(path, config.access, owner, endpoint_after) ||
+    if (secure_endpoint(path, config.access, owner, endpoint_after) != EndpointCheck::ready ||
         endpoint_before.st_dev != endpoint_after.st_dev || endpoint_before.st_ino != endpoint_after.st_ino) {
         (void)::close(socket);
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);

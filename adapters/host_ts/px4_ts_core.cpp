@@ -1096,7 +1096,8 @@ Error select_receiver(const wire::ListResponse& list, bool explicit_receiver,
 static Result<Px4TsRunResult> run_wire_profile(
     const Px4TsArguments& arguments, Px4TsOutput& output, Px4TsClock& clock,
     const Px4TsSignal& signal, Px4TsFailureKind* failure_kind,
-    Px4TsRunDiagnostics* diagnostics, const TsClientProfile* profile) noexcept
+    Px4TsRunDiagnostics* diagnostics, const TsClientProfile* profile,
+    const ipc::posix::RuntimeRootCandidates* runtime_roots_override = nullptr) noexcept
 {
     if (failure_kind != nullptr) *failure_kind = Px4TsFailureKind::ipc;
     if (diagnostics != nullptr) *diagnostics = Px4TsRunDiagnostics{};
@@ -1144,6 +1145,8 @@ static Result<Px4TsRunResult> run_wire_profile(
                 return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
             std::memcpy(roots.paths[0].data(), arguments.runtime_directory.c_str(),
                         arguments.runtime_directory.size() + 1U);
+        } else if (runtime_roots_override != nullptr) {
+            roots = *runtime_roots_override;
         } else {
             const auto candidates = client_runtime_roots();
             if (!candidates) return Result<Px4TsRunResult>::failure(candidates.error());
@@ -1166,7 +1169,10 @@ static Result<Px4TsRunResult> run_wire_profile(
             const auto discovered = discover_runtime_instances(
                 root.c_str(), access,
                 profile != nullptr ? profile->product_slug : "px4-userland");
-            if (!discovered) return Result<Px4TsRunResult>::failure(discovered.error());
+            if (!discovered) {
+                if (discovered.error() == Error::NOT_FOUND) continue;
+                return Result<Px4TsRunResult>::failure(discovered.error());
+            }
             if (discovered.value().canonical_collision)
                 return Result<Px4TsRunResult>::failure(Error::NOT_FOUND);
             for (std::size_t candidate = 0U; candidate < discovered.value().count; ++candidate) {
@@ -1179,7 +1185,8 @@ static Result<Px4TsRunResult> run_wire_profile(
                                                                    "px4-userland"};
                 auto probe = SocketStream::connect(endpoint, Timeout{budget});
                 if (!probe) {
-                    if (probe.error() == Error::NOT_FOUND) continue;
+                    if (probe.error() == Error::NOT_FOUND ||
+                        probe.error() == Error::NOT_READY) continue;
                     return Result<Px4TsRunResult>::failure(probe.error());
                 }
                 SocketClientTransport probe_transport(probe.value());
@@ -1190,6 +1197,9 @@ static Result<Px4TsRunResult> run_wire_profile(
                 }
                 const auto snapshot = wire::fetch_status(probe_transport, Timeout{fetch_budget});
                 probe.value().close();
+                if (!snapshot && (snapshot.error == Error::NOT_FOUND ||
+                                  snapshot.error == Error::NOT_READY ||
+                                  snapshot.error == Error::UNSUPPORTED)) continue;
                 if (!snapshot)
                     return Result<Px4TsRunResult>::failure(snapshot.error);
                 if (!matches_host_product(snapshot.snapshot.status.producer.product, profile) ||
@@ -1398,6 +1408,10 @@ static Result<Px4TsRunResult> run_wire_profile(
             primary = read.error();
             break;
         }
+        if (read.value() == 0U) {
+            primary = Error::DISCONNECTED;
+            break;
+        }
         const auto fed = receiver.feed(
             ByteView{read_buffer.data(), read.value()}, reader);
         if (!fed) {
@@ -1425,6 +1439,10 @@ static Result<Px4TsRunResult> run_wire_profile(
                     continue;
                 }
                 primary = read.error();
+                break;
+            }
+            if (read.value() == 0U) {
+                primary = Error::DISCONNECTED;
                 break;
             }
             const auto fed = receiver.feed(
@@ -1493,7 +1511,7 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
     Px4TsRunDiagnostics* diagnostics) noexcept
 {
     return run_wire_profile(arguments, output, clock, signal, failure_kind,
-                            diagnostics, nullptr);
+                            diagnostics, nullptr, nullptr);
 }
 
 Result<Px4TsRunResult> Px4TsRunner::run_wire(
@@ -1506,7 +1524,27 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
         profile.tool_name == nullptr)
         return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
     return run_wire_profile(arguments, output, clock, signal, failure_kind,
-                            diagnostics, &profile);
+                            diagnostics, &profile, nullptr);
 }
+
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+namespace test_access {
+
+Result<Px4TsRunResult> run_wire_with_roots(
+    const Px4TsArguments& arguments, const TsClientProfile& profile,
+    Px4TsOutput& output, Px4TsClock& clock, const Px4TsSignal& signal,
+    const ipc::posix::RuntimeRootCandidates& roots,
+    Px4TsFailureKind* failure_kind,
+    Px4TsRunDiagnostics* diagnostics) noexcept
+{
+    if (!arguments.common_profile || profile.product_slug == nullptr ||
+        profile.tool_name == nullptr)
+        return Result<Px4TsRunResult>::failure(Error::INVALID_ARGUMENT);
+    return run_wire_profile(arguments, output, clock, signal, failure_kind,
+                            diagnostics, &profile, &roots);
+}
+
+}  // namespace test_access
+#endif
 
 }  // namespace px4::userland::cli

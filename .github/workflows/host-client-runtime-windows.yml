@@ -46,7 +46,7 @@ jobs:
       - name: Run host client/runtime tests
         shell: pwsh
         run: |
-          ctest --test-dir build -C Release -R '^(host_runtime_tests|host_ctl_tests|host_ts_tests)$' --verbose 2>&1 |
+          ctest --test-dir build -C Release -R '^(host_runtime_tests|host_runtime_discovery_windows_tests|host_ctl_tests|host_ts_tests|host_client_integration_tests)$' --verbose 2>&1 |
             Tee-Object -FilePath host-client-runtime-tests.log
           if ($LASTEXITCODE -ne 0) { throw "client/runtime test exit=$LASTEXITCODE" }
       - name: Install

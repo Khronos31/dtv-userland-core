@@ -128,10 +128,13 @@ bool socket_transport_test()
     if (peer == INVALID_SOCKET) return false;
     const std::uint8_t byte = 0x5aU;
     const bool sent = ::send(peer, reinterpret_cast<const char*>(&byte), 1, 0) == 1;
+    (void)::closesocket(peer);
     std::array<std::uint8_t, 1U> received{};
     const auto read = transport.value()->read_some(
         dtv::userland::MutableByteView{received.data(), received.size()}, {1000U});
-    (void)::closesocket(peer);
+    std::array<std::uint8_t, 1U> after_eof{};
+    const auto eof = transport.value()->read_some(
+        dtv::userland::MutableByteView{after_eof.data(), after_eof.size()}, {1000U});
     transport.value()->close();
     const bool rejected_acl = add_everyone_allow(wide_path.data()) &&
         !dtv::userland::host_runtime::connect_control(config, {1000U});
@@ -152,7 +155,8 @@ bool socket_transport_test()
     (void)::RemoveDirectoryW(product);
     (void)::RemoveDirectoryW(runtime);
     (void)::RemoveDirectoryW(directory);
-    return sent && read && read.value() == 1U && received[0] == byte && rejected_acl &&
+    return sent && read && read.value() == 1U && received[0] == byte &&
+           eof && eof.value() == 0U && rejected_acl &&
            rejected_group;
 }
 
@@ -205,11 +209,16 @@ bool socket_transport_test()
             const int peer = ::accept(server, nullptr, nullptr);
             const std::uint8_t byte = 0x5aU;
             ok = peer >= 0 && ::send(peer, &byte, 1U, 0) == 1;
+            if (peer >= 0) (void)::close(peer);
             std::array<std::uint8_t, 1U> received{};
             const auto read = transport.value()->read_some(
                 dtv::userland::MutableByteView{received.data(), received.size()}, {1000U});
-            ok = ok && read && read.value() == 1U && received[0] == byte;
-            if (peer >= 0) (void)::close(peer);
+            std::array<std::uint8_t, 1U> after_eof{};
+            const auto eof = transport.value()->read_some(
+                dtv::userland::MutableByteView{after_eof.data(), after_eof.size()}, {1000U});
+            ok = ok && read && read.value() == 1U && received[0] == byte &&
+                 eof && eof.value() == 0U;
+            if (ok) std::puts("posix_buffered_hup_payload_then_eof=PASS");
             transport.value()->close();
         }
     }

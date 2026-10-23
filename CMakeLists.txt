@@ -903,6 +903,14 @@ if(DTV_USERLAND_BUILD_TESTING)
             dtv::host_runtime ${_dtv_userland_host_facade_test_target})
         add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
     endif()
+    if(WIN32 AND DTV_USERLAND_BUILD_HOST_RUNTIME)
+        add_executable(host_runtime_discovery_windows_tests
+            tests/host_runtime_discovery_windows_tests.cpp)
+        target_link_libraries(host_runtime_discovery_windows_tests PRIVATE
+            dtv::host_runtime)
+        add_test(NAME host_runtime_discovery_windows_tests
+            COMMAND host_runtime_discovery_windows_tests)
+    endif()
     if(DTV_USERLAND_BUILD_HOST_CTL)
         add_executable(host_ctl_tests tests/host_ctl_tests.cpp)
         target_link_libraries(host_ctl_tests PRIVATE dtv::host_ctl)
@@ -912,6 +920,32 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(host_ts_tests tests/host_ts_tests.cpp)
         target_link_libraries(host_ts_tests PRIVATE dtv::host_ts)
         add_test(NAME host_ts_tests COMMAND host_ts_tests)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_TS AND DTV_USERLAND_BUILD_HOST_CTL AND
+       DTV_USERLAND_BUILD_HOST_RUNTIME)
+        find_package(Threads REQUIRED)
+        add_library(dtv_userland_host_ts_test STATIC ${_dtv_userland_host_ts_sources})
+        target_compile_features(dtv_userland_host_ts_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_ts_test PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ts/include>)
+        target_link_libraries(dtv_userland_host_ts_test PUBLIC
+            dtv::host_runtime dtv::control dtv::identity dtv::tuning)
+        target_compile_definitions(dtv_userland_host_ts_test PRIVATE
+            DTV_USERLAND_HOST_TS_TEST_ACCESS=1)
+        if(MSVC)
+            target_compile_options(dtv_userland_host_ts_test PRIVATE /EHs-c- /GR- /W4)
+            target_link_libraries(dtv_userland_host_ts_test PUBLIC shell32)
+        else()
+            target_compile_options(dtv_userland_host_ts_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        add_executable(host_client_integration_tests
+            tests/host_client_integration_tests.cpp)
+        target_link_libraries(host_client_integration_tests PRIVATE
+            dtv::host_ctl dtv_userland_host_ts_test Threads::Threads)
+        add_test(NAME host_client_integration_tests
+            COMMAND host_client_integration_tests)
+        set_tests_properties(host_client_integration_tests PROPERTIES TIMEOUT 60)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
