@@ -129,7 +129,8 @@ bool socket_transport_test()
     const std::uint8_t byte = 0x5aU;
     const bool sent = ::send(peer, reinterpret_cast<const char*>(&byte), 1, 0) == 1;
     std::array<std::uint8_t, 1U> received{};
-    const auto read = transport.value()->read_some(received, {1000U});
+    const auto read = transport.value()->read_some(
+        dtv::userland::MutableByteView{received.data(), received.size()}, {1000U});
     (void)::closesocket(peer);
     transport.value()->close();
     const bool rejected_acl = add_everyone_allow(wide_path.data()) &&
