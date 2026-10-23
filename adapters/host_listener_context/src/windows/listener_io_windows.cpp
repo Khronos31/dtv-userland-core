@@ -510,6 +510,7 @@ public:
 
     Error release_namespace() noexcept override
     {
+        if (published_) return Error::BUSY;
         if (lock_handle_ == INVALID_HANDLE_VALUE) { reserved_ = false; return Error::OK; }
         (void)::UnlockFileEx(lock_handle_, 0U, MAXDWORD, MAXDWORD, &lock_overlap_);
         const BOOL result = ::CloseHandle(lock_handle_);

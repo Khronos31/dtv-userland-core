@@ -87,6 +87,7 @@ bool test_pair_io_and_interest() noexcept
         std::filesystem::remove_all(root);
         return false;
     }
+    if (!check(io->release_namespace() == Error::BUSY, "published pair retains namespace lease")) return false;
     std::string control_path;
     struct stat info{};
     const bool mode_ok = path_for(control, control_path) &&

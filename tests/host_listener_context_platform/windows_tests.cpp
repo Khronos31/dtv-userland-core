@@ -173,6 +173,9 @@ bool test_pair_io_and_dacl() noexcept
                "exclusive namespace lease")) return false;
     ListenerPair pair{};
     if (!check(io->publish_pair(pair) == Error::OK, "publish Windows pair")) return false;
+    if (!check(io->release_namespace() == Error::BUSY &&
+               competitor->reserve_pair(control, data) == Error::BUSY,
+               "published pair retains exclusive namespace lease")) return false;
     if (!check(endpoint_dacl_is_current_user_only(control_path.c_str()) &&
                endpoint_dacl_is_current_user_only(data_path.c_str()),
                "protected current-user endpoint DACL readback")) return false;
