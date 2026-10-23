@@ -265,11 +265,11 @@ struct Listener final {
         const Socket accepted = ::accept(socket, nullptr, nullptr);
         if (accepted == kInvalidSocket) return accepted;
 #if defined(_WIN32)
-        const DWORD timeout = 5000U;
+        const DWORD socket_timeout = 5000U;
         (void)::setsockopt(accepted, SOL_SOCKET, SO_RCVTIMEO,
-                           reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+                           reinterpret_cast<const char*>(&socket_timeout), sizeof(socket_timeout));
         (void)::setsockopt(accepted, SOL_SOCKET, SO_SNDTIMEO,
-                           reinterpret_cast<const char*>(&timeout), sizeof(timeout));
+                           reinterpret_cast<const char*>(&socket_timeout), sizeof(socket_timeout));
 #else
         timeval timeout{5, 0};
         (void)::setsockopt(accepted, SOL_SOCKET, SO_RCVTIMEO, &timeout, sizeof(timeout));
