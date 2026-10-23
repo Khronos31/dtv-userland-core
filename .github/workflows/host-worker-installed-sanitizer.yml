@@ -54,6 +54,10 @@ jobs:
           -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
           -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
           -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_FACADE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_CTL=ON
+          -DDTV_USERLAND_BUILD_HOST_TS=ON
       - name: Build and test current sanitizer targets
         run: |
           cmake --build build/current --parallel 2
@@ -114,6 +118,16 @@ jobs:
           cmake --build build/current-consumer --parallel 2
       - name: Run installed consumer with sanitizers
         run: build/current-consumer/host_authority_bridge_consumer
+      - name: Configure and build installed host TS consumer with sanitizers
+        run: |
+          cmake -S tests/consumer/host_ts -B build/current-host-ts-consumer \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer' \
+            -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr' \
+            -DCMAKE_PREFIX_PATH="$PWD/build/current-install"
+          cmake --build build/current-host-ts-consumer --parallel 2
+      - name: Run installed host TS consumer with sanitizers
+        run: build/current-host-ts-consumer/host_ts_consumer
       - uses: actions/checkout@v4
         with:
           ref: 80095f4d5c9f396ec7267b3202115f8df71226ee
@@ -137,6 +151,10 @@ jobs:
           -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
           -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
           -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_FACADE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_CTL=ON
+          -DDTV_USERLAND_BUILD_HOST_TS=ON
       - name: Build and install historical ABI mismatch
         run: |
           cmake --build build/historical --parallel 2

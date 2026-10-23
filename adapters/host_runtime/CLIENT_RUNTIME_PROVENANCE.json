@@ -1,0 +1,43 @@
+{
+  "license": "GPL-2.0-only",
+  "base_core": "bdb062f71183b76f9920ca343ba4a30e5545fb9d",
+  "adapted_sources": [
+    {
+      "repository": "Khronos31/px4-userland",
+      "revision": "90b08dfe79b0b40e393f015975c761863830866a",
+      "paths": [
+        "sianod.cpp",
+        "sianoctl.cpp",
+        "siano-wire-ts.cpp",
+        "siano-enclosure.cpp",
+        "siano-runtime-backend.h"
+      ],
+      "purpose": "Siano consumer symbol and header closure audit"
+    },
+    {
+      "repository": "Khronos31/dtv-userland-core",
+      "revision": "af82b7a9329bfe2202e07c960f368469612e28f4",
+      "paths": [
+        "adapters/host_ts/px4_ts_core.cpp",
+        "adapters/host_ts/posix/px4_ts_posix.cpp",
+        "adapters/host_ts/windows/px4_ts_windows_output.cpp",
+        "adapters/host_ts/include/dtv/host_ts/px4_ts_core.h"
+      ],
+      "purpose": "Current wire TS client code, retaining wire runner and excluding legacy internal-IPC runner"
+    }
+  ],
+  "new_runtime_sources": [
+    "adapters/host_runtime/src/control_socket.cpp",
+    "adapters/host_runtime/src/posix_client_compat.cpp",
+    "adapters/host_runtime/src/posix_tuner_nonce.cpp",
+    "adapters/host_runtime/src/windows_tuner_nonce.cpp",
+    "adapters/host_facade/src/px4d_signals.cpp",
+    "adapters/host_ctl/src/host_ctl.cpp"
+  ],
+  "excluded": [
+    "host daemon listener and Context",
+    "Siano product targets and pin changes",
+    "legacy PosixControlClient internal-IPC path",
+    "USB device access"
+  ]
+}
