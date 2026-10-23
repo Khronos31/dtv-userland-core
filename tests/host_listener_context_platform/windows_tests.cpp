@@ -143,6 +143,24 @@ bool endpoint_dacl_is_current_user_only(const wchar_t* path) noexcept
     return valid;
 }
 
+bool apply_current_user_endpoint_security(const wchar_t* path) noexcept
+{
+    SECURITY_ATTRIBUTES attributes{};
+    SECURITY_DESCRIPTOR descriptor{};
+    PACL acl = nullptr;
+    windows_security::SidBuffer sid_storage{};
+    if (!windows_security::build_current_user_security(attributes, descriptor, acl,
+                                                        sid_storage)) return false;
+    PSID owner = windows_security::current_user_sid(sid_storage);
+    const DWORD status = owner == nullptr ? ERROR_INVALID_OWNER :
+        ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path), SE_FILE_OBJECT,
+            OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION |
+                PROTECTED_DACL_SECURITY_INFORMATION,
+            owner, nullptr, acl, nullptr);
+    (void)::LocalFree(acl);
+    return status == ERROR_SUCCESS && endpoint_dacl_is_current_user_only(path);
+}
+
 bool endpoint_is_af_unix_socket(const wchar_t* path) noexcept
 {
     const HANDLE file = ::CreateFileW(path, FILE_READ_ATTRIBUTES,
@@ -388,6 +406,9 @@ bool test_stale_foreign_and_shared_boundary() noexcept
             ::bind(stale, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0,
             "create stale AF_UNIX path")) return false;
     (void)::closesocket(stale);
+    if (!check(endpoint_is_af_unix_socket(data_path.c_str()), "stale path has AF_UNIX reparse tag") ||
+        !check(apply_current_user_endpoint_security(data_path.c_str()),
+               "stale path has protected current-user owner and DACL")) return false;
     ListenerPair pair{};
     if (!check(io->publish_pair(pair) == Error::OK, "replace stale owned path")) return false;
     (void)io->unpublish_pair(pair);
