@@ -166,8 +166,14 @@ bool test_pair_io_and_dacl() noexcept
     if (!check(path_for(control, control_utf8, control_path) &&
                path_for(data, data_utf8, data_path), "endpoint paths")) return false;
     auto io = create_listener_io();
-    if (!check(io != nullptr && io->reserve_pair(control, data) == Error::OK,
-               "reserve Windows private pair")) return false;
+    if (!check(io != nullptr, "Windows listener factory")) return false;
+    const Error reserved = io->reserve_pair(control, data);
+    if (reserved != Error::OK) {
+        std::fprintf(stderr, "Windows reserve error=%u win32=%lu winsock=%d\n",
+            static_cast<unsigned>(reserved), static_cast<unsigned long>(::GetLastError()),
+            ::WSAGetLastError());
+    }
+    if (!check(reserved == Error::OK, "reserve Windows private pair")) return false;
     auto competitor = create_listener_io();
     if (!check(competitor->reserve_pair(control, data) == Error::BUSY,
                "exclusive namespace lease")) return false;
