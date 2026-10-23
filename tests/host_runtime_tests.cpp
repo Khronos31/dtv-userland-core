@@ -152,14 +152,14 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
     PSID everyone = nullptr;
     if (user == nullptr || ::ConvertStringSidToSidW(L"S-1-1-0", &everyone) == 0)
         return false;
-    constexpr DWORD object_flags =
-        ACE_OBJECT_TYPE_PRESENT | ACE_INHERITED_OBJECT_TYPE_PRESENT;
-    const std::size_t sid_start_offset = sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) +
-        sizeof(DWORD);
-    const std::size_t actual_sid_offset = sid_start_offset + 2U * sizeof(GUID);
+    constexpr DWORD object_flags = ACE_OBJECT_TYPE_PRESENT;
+    const std::size_t fixed_sid_offset = offsetof(ACCESS_ALLOWED_OBJECT_ACE, SidStart);
+    const std::size_t actual_sid_offset = sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) +
+        sizeof(DWORD) + sizeof(GUID);
     const DWORD everyone_size = ::GetLengthSid(everyone);
-    const bool layout_fits = user_size != 0U && user_size <= actual_sid_offset - sid_start_offset;
-    const std::size_t ace_size = actual_sid_offset + everyone_size;
+    const bool layout_fits = user_size != 0U && actual_sid_offset + everyone_size <=
+        fixed_sid_offset;
+    const std::size_t ace_size = fixed_sid_offset + user_size;
     std::vector<std::uint8_t> ace(layout_fits ? ace_size : 0U, 0U);
     bool built = layout_fits;
     if (built) {
@@ -169,11 +169,11 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
         *reinterpret_cast<ACCESS_MASK*>(ace.data() + sizeof(ACE_HEADER)) = GENERIC_ALL;
         *reinterpret_cast<DWORD*>(ace.data() + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK)) =
             object_flags;
-        built = ::CopySid(user_size, ace.data() + sid_start_offset,
-                          const_cast<PSID>(user)) != 0 &&
-            ::CopySid(everyone_size, ace.data() + actual_sid_offset, everyone) != 0 &&
-            ::EqualSid(ace.data() + sid_start_offset, user) != 0 &&
-            ::EqualSid(ace.data() + actual_sid_offset, everyone) != 0;
+        built = ::CopySid(everyone_size, ace.data() + actual_sid_offset, everyone) != 0 &&
+            ::CopySid(user_size, ace.data() + fixed_sid_offset,
+                      const_cast<PSID>(user)) != 0 &&
+            ::EqualSid(ace.data() + actual_sid_offset, everyone) != 0 &&
+            ::EqualSid(ace.data() + fixed_sid_offset, user) != 0;
     }
     (void)::LocalFree(everyone);
     if (!built) return false;
