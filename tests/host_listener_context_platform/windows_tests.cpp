@@ -308,24 +308,19 @@ bool test_pair_io_and_dacl() noexcept
                "read Windows fragment")) return false;
     if (!check(set_connection_send_buffer_for_test(*io, accepted.connection, 4096) == Error::OK,
                "constrain Windows server send buffer")) return false;
-    std::vector<std::uint8_t> large(8U * 1024U * 1024U, 0x5aU);
-    IoResult written{};
-    std::size_t full_writes = 0U;
-    bool partial_write = false;
-    for (std::size_t attempt = 0U; attempt < 4U; ++attempt) {
-        written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
-        if (written.status == IoStatus::progress && written.transferred > 0U &&
-            written.transferred < large.size()) {
-            partial_write = true;
-            break;
-        }
-        if (written.status != IoStatus::progress || written.transferred == 0U) break;
-        ++full_writes;
-    }
+    std::vector<std::uint8_t> large(12U * 1024U * 1024U, 0x5aU);
+    constexpr std::size_t prefill_size = 8U * 1024U * 1024U;
+    const IoResult prefill = io->write_some(accepted.connection,
+        ByteView{large.data(), prefill_size});
+    if (!check(prefill.status == IoStatus::progress && prefill.transferred == prefill_size,
+               "prefill Windows peer receive queue")) return false;
+    const IoResult written = io->write_some(accepted.connection,
+        ByteView{large.data(), large.size()});
+    const bool partial_write = written.status == IoStatus::progress &&
+        written.transferred > 0U && written.transferred < large.size();
     if (!partial_write) {
-        std::fprintf(stderr,
-            "Windows write full_attempts=%zu final_status=%u final_transferred=%zu final_error=%u\n",
-            full_writes, static_cast<unsigned>(written.status), written.transferred,
+        std::fprintf(stderr, "Windows write prefill=%zu status=%u transferred=%zu error=%u\n",
+            prefill.transferred, static_cast<unsigned>(written.status), written.transferred,
             static_cast<unsigned>(written.error));
     }
     if (!check(partial_write, "partial Windows write")) return false;
