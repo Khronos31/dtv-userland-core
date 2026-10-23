@@ -45,11 +45,11 @@ finally {
 }
 
 try {
-    $pattern = '(?s)(\} else if \(header->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE\) \{\s*)accepted = false;\s*break;(\s*\})'
+    $pattern = '(?s)(\} else if \(header->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE\) \{\s*)accepted = false;\s*break;(\s*\})'
     $matches = [System.Text.RegularExpressions.Regex]::Matches($socketOriginal, $pattern)
-    if ($matches.Count -ne 1) { throw "Expected one object-ACE fail-closed branch, found $($matches.Count)" }
+    if ($matches.Count -ne 1) { throw "Expected one callback-object-ACE fail-closed branch, found $($matches.Count)" }
     $oldObjectParse = '$1trustee = const_cast<DWORD*>(' + [Environment]::NewLine +
-        '                    &static_cast<ACCESS_ALLOWED_OBJECT_ACE*>(raw)->SidStart);$2'
+        '                    &static_cast<ACCESS_ALLOWED_CALLBACK_OBJECT_ACE*>(raw)->SidStart);$2'
     $socketOldBehavior = [System.Text.RegularExpressions.Regex]::Replace(
         $socketOriginal, $pattern, $oldObjectParse, 1)
     [System.IO.File]::WriteAllText($socketPath, $socketOldBehavior, $encoding)

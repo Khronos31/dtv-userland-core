@@ -164,7 +164,7 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
     bool built = layout_fits;
     if (built) {
         auto* header = reinterpret_cast<ACE_HEADER*>(ace.data());
-        header->AceType = ACCESS_ALLOWED_OBJECT_ACE_TYPE;
+        header->AceType = ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE;
         header->AceSize = static_cast<WORD>(ace.size());
         *reinterpret_cast<ACCESS_MASK*>(ace.data() + sizeof(ACE_HEADER)) = GENERIC_ALL;
         *reinterpret_cast<DWORD*>(ace.data() + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK)) =
@@ -227,7 +227,7 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
             std::printf("windows_sid_start_fixture_readback_ace index=%lu type=%u size=%u\n",
                 static_cast<unsigned long>(index), static_cast<unsigned>(header->AceType),
                 static_cast<unsigned>(header->AceSize));
-            if (header->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE) continue;
+            if (header->AceType != ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE) continue;
             const auto* bytes = static_cast<const std::uint8_t*>(raw);
             if (header->AceSize < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) + sizeof(DWORD))
                 continue;
