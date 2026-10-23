@@ -1,0 +1,64 @@
+name: Host Client Runtime Regression Fixtures Windows
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-client-runtime-regressions-windows.yml'
+      - 'scripts/test-client-runtime-regression-mutations.ps1'
+      - 'adapters/host_facade/**'
+      - 'adapters/host_runtime/**'
+      - 'adapters/host_ctl/**'
+      - 'adapters/host_ts/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+
+permissions:
+  contents: read
+
+jobs:
+  windows-regressions:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure all host client runtime targets
+        run: >-
+          cmake -S . -B build -A x64
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_FACADE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_CTL=ON
+          -DDTV_USERLAND_BUILD_HOST_TS=ON
+      - name: Build all targets
+        run: cmake --build build --config Release --parallel 2
+      - name: Run restored Windows and discovery fixtures
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release -R '^(host_runtime_tests|host_client_integration_tests)$' --verbose 2>&1 |
+            Tee-Object -FilePath windows-primary-fixtures.log
+          if ($LASTEXITCODE -ne 0) { throw "baseline fixture exit=$LASTEXITCODE" }
+      - name: Prove old behavior mutations fail primary fixtures and restore green
+        shell: pwsh
+        run: .\scripts\test-client-runtime-regression-mutations.ps1
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-client-runtime-regression-mutation-evidence
+          path: |
+            windows-primary-fixtures.log
+            signal-registration-old-behavior.log
+            sid-start-old-behavior.log
+          if-no-files-found: warn
