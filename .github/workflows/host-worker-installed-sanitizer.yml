@@ -1,0 +1,163 @@
+name: Host Worker Installed Consumer Sanitizers
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-worker-installed-sanitizer.yml'
+      - 'CMakeLists.txt'
+      - 'adapters/host_daemon/**'
+      - 'adapters/host_facade/include/px4/control_execution_layout.h'
+      - 'tests/**'
+      - 'cmake/**'
+
+permissions:
+  contents: read
+
+jobs:
+  installed-consumer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 20
+    env:
+      ASAN_OPTIONS: detect_leaks=0:halt_on_error=1
+      UBSAN_OPTIONS: halt_on_error=1
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure current all-on sanitizer build
+        run: >-
+          cmake -S . -B build/current
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+      - name: Build and test current sanitizer targets
+        run: |
+          cmake --build build/current --parallel 2
+          ctest --test-dir build/current --output-on-failure
+      - name: Install current targets
+        run: cmake --install build/current --prefix "$PWD/build/current-install"
+      - name: Check test library stays out of install and export
+        run: |
+          if grep -R -n 'dtv_userland_host_workers_test' build/current-install/lib/cmake; then
+            echo 'host_workers test target leaked into installed exports'
+            exit 1
+          fi
+          if find build/current-install -iname '*host_workers_test*' | grep .; then
+            echo 'host_workers test archive leaked into install tree'
+            exit 1
+          fi
+      - name: Configure testing-off sanitizer build
+        run: >-
+          cmake -S . -B build/testing-off
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DDTV_USERLAND_BUILD_TESTING=OFF
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+      - name: Compare production worker install with testing off
+        run: |
+          cmake --build build/testing-off --parallel 2
+          cmake --install build/testing-off --prefix "$PWD/build/testing-off-install"
+          cmp build/current-install/lib/libdtv_userland_host_workers.a \
+            build/testing-off-install/lib/libdtv_userland_host_workers.a
+          cmp build/current-install/include/dtv/userland/host_daemon/control_workers.h \
+            build/testing-off-install/include/dtv/userland/host_daemon/control_workers.h
+          if test -d build/testing-off/CMakeFiles/dtv_userland_host_workers_test.dir; then
+            echo 'testing-off worker test target unexpectedly exists'
+            exit 1
+          fi
+          if grep -R -n 'dtv_userland_host_workers_test' build/testing-off-install/lib/cmake; then
+            echo 'testing-off worker test target leaked into installed exports'
+            exit 1
+          fi
+      - name: Configure and build installed consumer with sanitizers
+        run: |
+          cmake -S tests/consumer/host_authority_bridge -B build/current-consumer \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer' \
+            -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr' \
+            -DCMAKE_PREFIX_PATH="$PWD/build/current-install"
+          cmake --build build/current-consumer --parallel 2
+      - name: Run installed consumer with sanitizers
+        run: build/current-consumer/host_authority_bridge_consumer
+      - uses: actions/checkout@v4
+        with:
+          ref: 80095f4d5c9f396ec7267b3202115f8df71226ee
+          path: historical-80095f4
+          fetch-depth: 0
+      - name: Configure historical ABI mismatch negative control
+        run: >-
+          cmake -S historical-80095f4 -B build/historical
+          -DCMAKE_CXX_COMPILER=g++
+          -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer'
+          -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DCMAKE_SHARED_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr'
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+      - name: Build and install historical ABI mismatch
+        run: |
+          cmake --build build/historical --parallel 2
+          cmake --install build/historical --prefix "$PWD/build/historical-install"
+      - name: Build historical installed consumer with sanitizers
+        run: |
+          cmake -S historical-80095f4/tests/consumer/host_authority_bridge -B build/historical-consumer \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer' \
+            -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr' \
+            -DCMAKE_PREFIX_PATH="$PWD/build/historical-install"
+          cmake --build build/historical-consumer --parallel 2
+      - name: Detect historical stack buffer overflow
+        run: |
+          set +e
+          build/historical-consumer/host_authority_bridge_consumer \
+            > build/historical-abi-negative-control.log 2>&1
+          consumer_exit=$?
+          set -e
+          cat build/historical-abi-negative-control.log
+          echo "historical_consumer_exit=$consumer_exit"
+          if [ "$consumer_exit" -eq 0 ]; then
+            echo 'historical installed consumer unexpectedly passed'
+            exit 1
+          fi
+          if ! grep -q 'stack-buffer-overflow' build/historical-abi-negative-control.log; then
+            echo 'historical consumer failed without the expected ASan layout diagnostic'
+            exit 1
+          fi
+          echo 'historical_layout_mismatch=detected'
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-worker-installed-sanitizer-logs
+          path: build/historical-abi-negative-control.log
+          if-no-files-found: warn

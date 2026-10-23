@@ -207,6 +207,35 @@ if(DTV_USERLAND_BUILD_HOST_WORKERS)
         target_compile_options(dtv_userland_host_workers PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+    if(DTV_USERLAND_BUILD_TESTING)
+        add_library(dtv_userland_host_workers_test STATIC
+            adapters/host_daemon/src/card_service.cpp
+            adapters/host_daemon/src/control_workers.cpp)
+        set_target_properties(dtv_userland_host_workers_test PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS OFF)
+        target_compile_features(dtv_userland_host_workers_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_workers_test PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>)
+        target_include_directories(dtv_userland_host_workers_test PRIVATE
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include>)
+        target_link_libraries(dtv_userland_host_workers_test PUBLIC
+            Threads::Threads dtv::host_tuner dtv::card dtv::authority)
+        if(WIN32)
+            target_link_libraries(dtv_userland_host_workers_test PUBLIC
+                ws2_32 bcrypt advapi32)
+        endif()
+        if(MSVC)
+            target_compile_options(dtv_userland_host_workers_test PRIVATE /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(dtv_userland_host_workers_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        target_compile_definitions(dtv_userland_host_workers_test PRIVATE
+            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+    endif()
 endif()
 if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
     if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_AUTHORITY)
@@ -661,10 +690,9 @@ if(DTV_USERLAND_BUILD_TESTING)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_WORKERS)
-        target_compile_definitions(dtv_userland_host_workers PRIVATE
-            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
         add_executable(host_worker_closure_tests tests/host_worker_closure_tests.cpp)
-        target_link_libraries(host_worker_closure_tests PRIVATE dtv::host_workers)
+        target_link_libraries(host_worker_closure_tests PRIVATE
+            dtv_userland_host_workers_test)
         target_compile_definitions(host_worker_closure_tests PRIVATE
             PX4_CONTROL_WORKERS_TEST_ACCESS=1)
         add_test(NAME host_worker_closure_tests COMMAND host_worker_closure_tests)
@@ -690,7 +718,7 @@ if(DTV_USERLAND_BUILD_TESTING)
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
             $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>)
         target_link_libraries(dtv_userland_host_authority_bridge_test PUBLIC
-            dtv::host_authority_owner dtv::host_workers)
+            dtv::host_authority_owner dtv_userland_host_workers_test)
         if(MSVC)
             target_compile_options(dtv_userland_host_authority_bridge_test PRIVATE /EHs-c- /GR- /W4)
         else()
