@@ -98,13 +98,7 @@ public:
     virtual IoResult write_some(ConnectionToken connection,
                                 ByteView input) noexcept = 0;
     virtual Error close_connection(ConnectionToken connection) noexcept = 0;
-    // For a pair returned by publish_pair(), attempts to close all owned
-    // connections/listeners and remove only owned paths before returning.
-    // The pair is unpublished on return even when a close reports an error;
-    // callers retain that error while completing owner teardown.
     virtual Error unpublish_pair(ListenerPair pair) noexcept = 0;
-    // Attempts to relinquish the reserved namespace before returning. An
-    // error reports a failed close operation, not retained ownership.
     virtual Error release_namespace() noexcept = 0;
 };
 

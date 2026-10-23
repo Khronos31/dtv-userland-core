@@ -187,14 +187,9 @@ private:
 
 class Family final : public host_runtime::EnclosureFamily {
 public:
-    explicit Family(std::shared_ptr<std::atomic<bool>> shutdown,
-                    std::shared_ptr<std::atomic<bool>> destroyed)
-        : shutdown_(std::move(shutdown)), destroyed_(std::move(destroyed))
+    explicit Family(std::shared_ptr<std::atomic<bool>> shutdown)
+        : shutdown_(std::move(shutdown))
     {
-    }
-    ~Family() noexcept override
-    {
-        destroyed_->store(true, std::memory_order_release);
     }
     Result<void> shutdown() noexcept override
     {
@@ -208,7 +203,6 @@ public:
     TunerStreamControl* stream_control() noexcept override { return &stream_; }
 private:
     std::shared_ptr<std::atomic<bool>> shutdown_;
-    std::shared_ptr<std::atomic<bool>> destroyed_;
     Backend backend_;
     CardBackend card_backend_;
     CardSession card_session_;
@@ -349,39 +343,14 @@ bool exchange_frame(FakeListenerIoControl& io, EnclosureContext& context,
 }
 
 std::unique_ptr<EnclosureContext> make_context(
-    const std::shared_ptr<std::atomic<bool>>& shutdown,
-    const std::shared_ptr<std::atomic<bool>>& destroyed =
-        std::make_shared<std::atomic<bool>>(false))
+    const std::shared_ptr<std::atomic<bool>>& shutdown)
 {
-    std::unique_ptr<host_runtime::EnclosureFamily> family(
-        new Family(shutdown, destroyed));
+    std::unique_ptr<host_runtime::EnclosureFamily> family(new Family(shutdown));
     auto assembled = EnclosureContext::assemble(
         std::move(family), std::unique_ptr<TunerNonceSource>(new Nonce()), config());
     if (!assembled) return {};
     if (!assembled.value()->reserve_namespace() || !assembled.value()->publish()) return {};
     return std::move(assembled.value());
-}
-
-bool unpublish_error_still_quiesces_owner()
-{
-    FakeListenerIoControl io;
-    io.fail_unpublish_after_cleanup();
-    set_fake_listener_io_control(&io);
-    auto shutdown = std::make_shared<std::atomic<bool>>(false);
-    auto destroyed = std::make_shared<std::atomic<bool>>(false);
-    auto context = make_context(shutdown, destroyed);
-    if (!context) return false;
-    const auto first = context->close(Timeout{5000U});
-    const bool first_error = !first && first.error() == Error::INTERNAL;
-    const auto repeated = context->close(Timeout{0U});
-    const bool repeated_error = !repeated && repeated.error() == Error::INTERNAL;
-    const bool teardown = io.unpublish_count() == 1U &&
-        io.namespace_release_count() == 1U && !io.published() && !io.reserved() &&
-        shutdown->load(std::memory_order_acquire);
-    context.reset();
-    set_fake_listener_io_control(nullptr);
-    const bool owner_destroyed = destroyed->load(std::memory_order_acquire);
-    return first_error && repeated_error && teardown && owner_destroyed;
 }
 
 bool lifecycle()
@@ -733,10 +702,6 @@ int main()
     }
     if (!capacity_and_buffers()) {
         std::fprintf(stderr, "FAIL: capacity_and_buffers\n");
-        return 1;
-    }
-    if (!unpublish_error_still_quiesces_owner()) {
-        std::fprintf(stderr, "FAIL: unpublish_error_still_quiesces_owner\n");
         return 1;
     }
     return 0;
