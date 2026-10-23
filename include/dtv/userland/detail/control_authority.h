@@ -48,6 +48,17 @@ public:
     virtual ~ControlAuthorityExecutor() noexcept = default;
     // false means no worker owns the job; true transfers the value to it.
     virtual bool submit(const AuthorityJob& job) noexcept = 0;
+    // Handles only the short metadata STOP entrance; implementations retain
+    // physical cleanup ownership when publication is rejected.
+    virtual Result<StreamStopResult> stop_stream_v1(std::uint64_t client_id,
+                                                    std::uint64_t lease_id,
+                                                    std::uint64_t stream_id) noexcept
+    {
+        (void)client_id;
+        (void)lease_id;
+        (void)stream_id;
+        return Result<StreamStopResult>::failure(Error::UNSUPPORTED);
+    }
 };
 
 struct AuthorityReply final {

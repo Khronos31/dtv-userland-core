@@ -376,7 +376,7 @@ Error finish_fake_send(HostAuthorityBridge& bridge, std::uint8_t slot,
 }
 
 bool acquire(HostAuthorityBridge& bridge, std::uint8_t slot, std::uint16_t receiver,
-             std::uint64_t& lease)
+             std::uint64_t& lease, std::uint32_t request_id = 2U)
 {
     std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
     const auto size = w::encode_acquire_request({make_list().epoch, receiver},
@@ -385,7 +385,7 @@ bool acquire(HostAuthorityBridge& bridge, std::uint8_t slot, std::uint16_t recei
     w::Context context;
     context.state = w::ContextState::ready;
     w::Snapshot snapshot;
-    const auto reply = bridge.accept(slot, frame(w::kOpcodeAcquire, 2U,
+    const auto reply = bridge.accept(slot, frame(w::kOpcodeAcquire, request_id,
         {payload.data(), size.value()}), context, snapshot, 0U);
     if (!reply.queued) return false;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -434,7 +434,8 @@ bool release(HostAuthorityBridge& bridge, std::uint8_t slot,
 }
 
 bool tune(HostAuthorityBridge& bridge, std::uint8_t slot,
-          const w::Uuid& epoch, std::uint64_t lease)
+          const w::Uuid& epoch, std::uint64_t lease,
+          std::uint32_t request_id = 3U)
 {
     std::array<std::uint8_t, 128U> payload{};
     w::TuneRequest request;
@@ -450,7 +451,7 @@ bool tune(HostAuthorityBridge& bridge, std::uint8_t slot,
     context.epoch = epoch;
     context.state = w::ContextState::ready;
     w::Snapshot snapshot;
-    const auto reply = bridge.accept(slot, frame(w::kOpcodeTune, 3U,
+    const auto reply = bridge.accept(slot, frame(w::kOpcodeTune, request_id,
         {payload.data(), size.value()}), context, snapshot, 0U);
     if (!reply.queued) {
         const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
@@ -981,10 +982,15 @@ bool test_authority_stream_prepare_commit_stop()
     HostAuthorityBridge bridge(tuner, *created.value(), server, list);
     if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK) return false;
     const auto control = bridge.open_session();
-    if (!control || !hello(bridge, control.value())) return false;
+    const auto other_control = bridge.open_session();
+    if (!control || !other_control || !hello(bridge, control.value()) ||
+        !hello(bridge, other_control.value())) return false;
     std::uint64_t lease = 0U;
-    if (!acquire(bridge, control.value(), 2U, lease) ||
-        !tune(bridge, control.value(), list.epoch, lease)) return false;
+    if (!acquire(bridge, control.value(), 2U, lease, 3U) ||
+        !tune(bridge, control.value(), list.epoch, lease, 4U)) return false;
+    std::uint64_t other_lease = 0U;
+    if (!acquire(bridge, other_control.value(), 3U, other_lease) ||
+        !tune(bridge, other_control.value(), list.epoch, other_lease)) return false;
     const auto status = tuner.engine_status();
     if (!status) return false;
     const std::uint64_t revision = status.value().tune_metadata[2U].current_revision;
@@ -1002,7 +1008,7 @@ bool test_authority_stream_prepare_commit_stop()
     start_context.state = w::ContextState::ready;
     w::Snapshot start_snapshot;
     const auto start_reply = bridge.accept(control.value(), frame(w::kOpcodeStartStream,
-        5U, {start_payload.data(), start_size.value()}), start_context,
+        7U, {start_payload.data(), start_size.value()}), start_context,
         start_snapshot, 100U);
     if (start_reply.action != w::InboundAction::respond ||
         bridge.response_sent(control.value(), true) != Error::OK) return false;
@@ -1043,10 +1049,135 @@ bool test_authority_stream_prepare_commit_stop()
         data_read.data.stream_id != started.value().stream_id ||
         data_read.data.sequence != 0U || data_read.data.packets.size != packet.size() ||
         packet[0U] != 0U || packet[187U] != 187U) return false;
-    const auto stopped = bridge.stop_stream(control.value(), lease,
-                                              started.value().stream_id);
-    if (stopped || stopped.error() != Error::RESOURCE_LIMIT ||
-        bridge.data_counts().tombstone != 1U) return false;
+    const auto send_stop = [&bridge](std::uint8_t slot, std::uint32_t request_id,
+                                     const w::Uuid& epoch, std::uint64_t stop_lease,
+                                     std::uint64_t stream_id) {
+        w::StopRequest stop_request;
+        stop_request.epoch = epoch;
+        stop_request.lease_id = stop_lease;
+        stop_request.stream_id = stream_id;
+        std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+        const auto size = w::encode_stop_request(stop_request,
+            {payload.data(), payload.size()});
+        if (!size) return dtv::userland::detail::AuthorityReply{};
+        w::Context context;
+        context.epoch = epoch;
+        context.state = w::ContextState::ready;
+        w::Snapshot snapshot;
+        return bridge.accept(slot, frame(w::kOpcodeStopStream, request_id,
+            {payload.data(), size.value()}), context, snapshot, 150U);
+    };
+    const auto unhello = bridge.open_session();
+    if (!unhello) return false;
+    const auto unhello_stop = send_stop(unhello.value(), 1U, list.epoch, lease,
+                                        started.value().stream_id);
+    if (unhello_stop.action != w::InboundAction::close ||
+        bridge.counts().fatal_unresolved != 0U || backend.capture_stops != 0U ||
+        !wait_free(bridge, unhello.value())) return false;
+    w::Uuid wrong_epoch = list.epoch;
+    wrong_epoch[0U] ^= 0xffU;
+    auto rejected = send_stop(control.value(), 8U, wrong_epoch, lease,
+                              started.value().stream_id);
+    auto rejected_header = w::decode_header({rejected.frame.data, w::kHeaderSize});
+    if (rejected.action != w::InboundAction::respond || !rejected_header ||
+        rejected_header.value().kind != w::Kind::error_response ||
+        bridge.response_sent(control.value(), true) != Error::OK) return false;
+    auto decoded_error = w::decode_error_response(
+        {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
+    if (!decoded_error || decoded_error.value().error.code != w::kWireErrorStaleHandle ||
+        bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U) {
+        std::cerr << "wrong epoch reply action=" << static_cast<unsigned>(rejected.action)
+                  << " error=" << (decoded_error ? decoded_error.value().error.code : 0U)
+                  << " active=" << bridge.data_counts().active
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
+        return false;
+    }
+    rejected = send_stop(control.value(), 9U, list.epoch, lease,
+                         started.value().stream_id + 1U);
+    rejected_header = w::decode_header({rejected.frame.data, w::kHeaderSize});
+    if (rejected.action != w::InboundAction::respond || !rejected_header ||
+        rejected_header.value().kind != w::Kind::error_response ||
+        bridge.response_sent(control.value(), true) != Error::OK) return false;
+    decoded_error = w::decode_error_response(
+        {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
+    if (!decoded_error || decoded_error.value().error.code !=
+            static_cast<std::uint32_t>(Error::NOT_FOUND) ||
+        bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U)
+        return false;
+    rejected = send_stop(control.value(), 10U, list.epoch, lease + 1U,
+                         started.value().stream_id);
+    rejected_header = w::decode_header({rejected.frame.data, w::kHeaderSize});
+    if (rejected.action != w::InboundAction::respond || !rejected_header ||
+        rejected_header.value().kind != w::Kind::error_response ||
+        bridge.response_sent(control.value(), true) != Error::OK) return false;
+    decoded_error = w::decode_error_response(
+        {rejected.frame.data + w::kHeaderSize, rejected_header.value().payload_length});
+    if (!decoded_error || decoded_error.value().error.code !=
+            static_cast<std::uint32_t>(Error::NOT_FOUND) ||
+        bridge.data_counts().active != 1U || bridge.counts().fatal_unresolved != 0U)
+        return false;
+    const auto stop_reply = send_stop(control.value(), 12U, list.epoch, lease,
+                                      started.value().stream_id);
+    const auto stop_header = w::decode_header({stop_reply.frame.data, w::kHeaderSize});
+    const auto stop_response = w::decode_stop_response(
+        {stop_reply.frame.data + w::kHeaderSize,
+         stop_reply.frame.size - w::kHeaderSize});
+    const auto pending_stop = tuner.authority_stop_stream_v1(
+        bridge.client_id(control.value()), lease, started.value().stream_id);
+    const auto queue_rejected = bridge.data_counts();
+    if (stop_reply.action != w::InboundAction::respond || !stop_header ||
+        stop_header.value().kind != w::Kind::response ||
+        stop_header.value().request_id != 12U || !stop_response ||
+        stop_response.value().epoch != list.epoch ||
+        stop_response.value().final.id != started.value().stream_id ||
+        stop_response.value().final.tune_revision != revision ||
+        stop_response.value().quiesced || !stop_response.value().final.error.present ||
+        stop_response.value().final.error.value.code !=
+            static_cast<std::uint32_t>(Error::BUSY) ||
+        !pending_stop || pending_stop.value().stream_id != started.value().stream_id ||
+        pending_stop.value().quiesced || pending_stop.value().cleanup_owner ||
+        queue_rejected.tombstone != 1U ||
+        queue_rejected.fatal_unresolved != 0U || bridge.counts().fatal_unresolved != 0U ||
+        backend.capture_stops != 0U ||
+        bridge.response_sent(control.value(), true) != Error::OK) {
+        std::cerr << "wire STOP queue rejection mismatch action="
+                  << static_cast<unsigned>(stop_reply.action)
+                  << " response=" << static_cast<bool>(stop_response)
+                  << " quiesced=" << (stop_response && stop_response.value().quiesced)
+                  << " id=" << (stop_response ? stop_response.value().final.id : 0U)
+                  << " expected=" << started.value().stream_id
+                  << " revision=" << (stop_response ? stop_response.value().final.tune_revision : 0U)
+                  << " expected_revision=" << revision
+                  << " err_present=" << (stop_response && stop_response.value().final.error.present)
+                  << " err=" << (stop_response && stop_response.value().final.error.present
+                        ? stop_response.value().final.error.value.code : 0U)
+                  << " capstops=" << backend.capture_stops
+                  << " tombstone=" << queue_rejected.tombstone
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
+        return false;
+    }
+    w::ListRequest list_request;
+    list_request.epoch = list.epoch;
+    std::array<std::uint8_t, w::kMaxControlPayload> list_payload{};
+    const auto list_size = w::encode_list_request(list_request,
+        {list_payload.data(), list_payload.size()});
+    if (!list_size) return false;
+    const auto list_reply = bridge.accept(control.value(), frame(w::kOpcodeList, 15U,
+        {list_payload.data(), list_size.value()}), start_context, start_snapshot, 151U);
+    const auto list_header = w::decode_header({list_reply.frame.data, w::kHeaderSize});
+    const auto list_sent = bridge.response_sent(control.value(), true);
+    if (list_reply.action != w::InboundAction::respond || !list_header ||
+        list_header.value().kind != w::Kind::response ||
+        list_header.value().request_id != 15U ||
+        list_sent != Error::OK) {
+        std::cerr << "LIST after STOP mismatch action="
+                  << static_cast<unsigned>(list_reply.action)
+                  << " header=" << static_cast<bool>(list_header)
+                  << " kind=" << (list_header ? static_cast<unsigned>(list_header.value().kind) : 0U)
+                  << " id=" << (list_header ? list_header.value().request_id : 0U)
+                  << " sent=" << static_cast<unsigned>(list_sent) << "\n";
+        return false;
+    }
     const auto cleanup_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     HostAuthorityStreamEndResult stream_end{};
     bool drained_packet_seen = false;
@@ -1083,6 +1214,140 @@ bool test_authority_stream_prepare_commit_stop()
     }
     if (bridge.data_stream_end_sent(data.value(), true) != Error::OK ||
         bridge.data_counts().tombstone != 0U || !stream.final_released) return false;
+    const auto other_start = bridge.start_stream(other_control.value(), other_lease,
+                                                  revision, 160U, 5000U);
+    if (!other_start) { std::cerr << "other typed START failed\n"; return false; }
+    const auto other_stop = send_stop(other_control.value(), 12U, list.epoch,
+                                      other_lease, other_start.value().stream_id);
+    const auto other_stop_header = w::decode_header(
+        {other_stop.frame.data, w::kHeaderSize});
+    const auto other_stop_response = w::decode_stop_response(
+        {other_stop.frame.data + w::kHeaderSize,
+         other_stop.frame.size - w::kHeaderSize});
+    const auto other_stopped = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(other_control.value()), other_lease);
+    if (other_stop.action != w::InboundAction::respond || !other_stop_header ||
+        other_stop_header.value().kind != w::Kind::response ||
+        other_stop_header.value().request_id != 12U || !other_stop_response ||
+        !other_stop_response.value().quiesced || !other_stopped ||
+        other_stopped.value().stream_id != other_start.value().stream_id ||
+        !other_stopped.value().quiesced ||
+        bridge.response_sent(other_control.value(), true) != Error::OK) {
+        std::cerr << "other wire STOP response mismatch action="
+                  << static_cast<unsigned>(other_stop.action)
+                  << " header=" << static_cast<bool>(other_stop_header)
+                  << " decoded=" << static_cast<bool>(other_stop_response)
+                  << " quiesced=" << (other_stop_response && other_stop_response.value().quiesced)
+                  << " terminal=" << static_cast<bool>(other_stopped) << "\n";
+        return false;
+    }
+    const auto duplicate_other_stop = send_stop(other_control.value(), 12U, list.epoch,
+                                      other_lease, other_start.value().stream_id);
+    const auto other_after_duplicate = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(other_control.value()), other_lease);
+    const bool other_free = wait_free(bridge, other_control.value());
+    if (duplicate_other_stop.action != w::InboundAction::close || !other_after_duplicate ||
+        other_after_duplicate.value().stream_id != other_start.value().stream_id ||
+        !other_after_duplicate.value().quiesced || backend.capture_stops != 1U ||
+        !other_free) {
+        std::cerr << "duplicate STOP did not isolate or alter terminal action="
+                  << static_cast<unsigned>(duplicate_other_stop.action)
+                  << " terminal=" << static_cast<bool>(other_after_duplicate)
+                  << " terminal_id=" << (other_after_duplicate ? other_after_duplicate.value().stream_id : 0U)
+                  << " expected=" << other_start.value().stream_id
+                  << " quiesced=" << (other_after_duplicate && other_after_duplicate.value().quiesced)
+                  << " stops=" << backend.capture_stops
+                  << " free=" << other_free << "\n";
+        return false;
+    }
+    const auto pending_control = bridge.open_session();
+    if (!pending_control || !hello(bridge, pending_control.value())) return false;
+    backend.block_open(3U);
+    std::array<std::uint8_t, w::kAcquireRequestSize> pending_payload{};
+    const auto pending_size = w::encode_acquire_request({list.epoch, 3U},
+        {pending_payload.data(), pending_payload.size()});
+    if (!pending_size) return false;
+    const auto pending_acquire = bridge.accept(pending_control.value(),
+        frame(w::kOpcodeAcquire, 2U, {pending_payload.data(), pending_size.value()}),
+        start_context, start_snapshot, 170U);
+    if (!pending_acquire.queued || !backend.wait_open()) {
+        backend.release_open();
+        return false;
+    }
+    const auto stop_while_pending = send_stop(pending_control.value(), 3U,
+        list.epoch, 1U, 1U);
+    if (stop_while_pending.action != w::InboundAction::close ||
+        bridge.counts().fatal_unresolved != 0U) {
+        backend.release_open();
+        return false;
+    }
+    w::ListRequest progress_request;
+    progress_request.epoch = list.epoch;
+    std::array<std::uint8_t, w::kMaxControlPayload> progress_payload{};
+    const auto progress_size = w::encode_list_request(progress_request,
+        {progress_payload.data(), progress_payload.size()});
+    if (!progress_size) {
+        backend.release_open();
+        return false;
+    }
+    const auto progress = bridge.accept(control.value(), frame(w::kOpcodeList, 16U,
+        {progress_payload.data(), progress_size.value()}), start_context,
+        start_snapshot, 171U);
+    const auto progress_header = w::decode_header({progress.frame.data, w::kHeaderSize});
+    const auto progress_sent = bridge.response_sent(control.value(), true);
+    if (progress.action != w::InboundAction::respond || !progress_header ||
+        progress_header.value().kind != w::Kind::response ||
+        progress_header.value().request_id != 16U || progress_sent != Error::OK) {
+        backend.release_open();
+        return false;
+    }
+    backend.release_open();
+    if (!wait_free(bridge, pending_control.value())) return false;
+    const auto older_control = bridge.open_session();
+    if (!older_control || !hello(bridge, older_control.value())) return false;
+    std::uint64_t older_lease = 0U;
+    if (!acquire(bridge, older_control.value(), 3U, older_lease) ||
+        !tune(bridge, older_control.value(), list.epoch, older_lease)) return false;
+    const auto older_status = tuner.engine_status();
+    if (!older_status) return false;
+    const auto older_start = bridge.start_stream(older_control.value(), older_lease,
+        older_status.value().tune_metadata[3U].current_revision, 172U, 5000U);
+    if (!older_start) return false;
+    const auto accepted_older_stream = send_stop(older_control.value(), 12U,
+        list.epoch, older_lease, older_start.value().stream_id);
+    if (accepted_older_stream.action != w::InboundAction::respond ||
+        bridge.response_sent(older_control.value(), true) != Error::OK) return false;
+    const auto before_older_stop = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(older_control.value()), older_lease);
+    const auto older_stop = send_stop(older_control.value(), 11U, list.epoch,
+        older_lease, older_start.value().stream_id);
+    const auto after_older_stop = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(older_control.value()), older_lease);
+    if (older_stop.action != w::InboundAction::close || !before_older_stop ||
+        !after_older_stop ||
+        before_older_stop.value().stream_id != after_older_stop.value().stream_id ||
+        !after_older_stop.value().quiesced || backend.capture_stops != 1U ||
+        !wait_free(bridge, older_control.value())) return false;
+    const auto partial_control = bridge.open_session();
+    if (!partial_control || !hello(bridge, partial_control.value())) return false;
+    std::uint64_t partial_lease = 0U;
+    if (!acquire(bridge, partial_control.value(), 3U, partial_lease) ||
+        !tune(bridge, partial_control.value(), list.epoch, partial_lease)) return false;
+    const auto partial_status = tuner.engine_status();
+    if (!partial_status) return false;
+    const auto partial_start = bridge.start_stream(partial_control.value(), partial_lease,
+        partial_status.value().tune_metadata[3U].current_revision, 173U, 5000U);
+    if (!partial_start) return false;
+    const auto partial_stop = send_stop(partial_control.value(), 12U, list.epoch,
+        partial_lease, partial_start.value().stream_id);
+    const auto partial_terminal = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(partial_control.value()), partial_lease);
+    if (partial_stop.action != w::InboundAction::respond ||
+        !partial_terminal || partial_terminal.value().stream_id != partial_start.value().stream_id ||
+        !partial_terminal.value().quiesced ||
+        bridge.response_sent(partial_control.value(), false) != Error::OK ||
+        !wait_free(bridge, partial_control.value())) return false;
+    if (backend.capture_stops != 1U) return false;
     const auto second_start = bridge.start_stream(control.value(), lease, revision,
                                                    200U, 5000U);
     const auto second_data = bridge.open_data_session();
@@ -1152,8 +1417,24 @@ bool test_authority_stream_prepare_commit_stop()
     if (!stream_end.ready || !raced_final || !raced_final.value().quiesced ||
         backend.capture_starts != 3U || backend.capture_stops != 3U ||
         bridge.data_stream_end_sent(third_data.value(), true) != Error::OK) return false;
-    if (bridge.close_session(control.value()) != Error::OK ||
-        !wait_free(bridge, control.value())) return false;
+    const auto before_duplicate = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(control.value()), lease);
+    const auto duplicate_stop = send_stop(control.value(), 12U, list.epoch, lease,
+                                          started.value().stream_id);
+    const auto after_duplicate = tuner.authority_stream_last_terminal_v1(
+        bridge.client_id(control.value()), lease);
+    if (duplicate_stop.action != w::InboundAction::close || !before_duplicate ||
+        !after_duplicate ||
+        after_duplicate.value().stream_id != before_duplicate.value().stream_id ||
+        !after_duplicate.value().quiesced || backend.capture_stops != 3U ||
+        bridge.counts().fatal_unresolved != 0U) {
+        std::cerr << "duplicate STOP changed stream state action="
+                  << static_cast<unsigned>(duplicate_stop.action)
+                  << " terminal=" << static_cast<bool>(after_duplicate)
+                  << " stops=" << backend.capture_stops << "\n";
+        return false;
+    }
+    if (!wait_free(bridge, control.value())) return false;
     if (bridge.begin_shutdown() != Error::OK) return false;
     const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!bridge.stopped() && std::chrono::steady_clock::now() < stop_until) {

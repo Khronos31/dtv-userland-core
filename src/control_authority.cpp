@@ -391,8 +391,80 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
                                   size.error(), "start_stream");
     }
     case wire::ControlRequestKind::stop_stream:
-        return error_reply(session, request.opcode, request.request_id,
-                           Error::UNSUPPORTED, "control");
+    {
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, "stop_stream");
+        if (stream_engine_epoch_ == 0U || request.stop_stream.epoch != server_.epoch)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::INVALID_ARGUMENT, "stop_stream");
+        std::size_t lease_slot = 0U;
+        while (lease_slot < session.lease_count_ &&
+               session.lease_ids_[lease_slot] != request.stop_stream.lease_id)
+            ++lease_slot;
+        if (lease_slot == session.lease_count_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::NOT_FOUND, "stop_stream");
+        const auto stopped = executor.stop_stream_v1(session.client_id_,
+            request.stop_stream.lease_id, request.stop_stream.stream_id);
+        if (!stopped)
+            return error_reply(session, request.opcode, request.request_id,
+                               stopped.error(), "stop_stream");
+        if (!stopped.value().final_valid ||
+            stopped.value().stream_id != request.stop_stream.stream_id ||
+            stopped.value().revision == 0U)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::INTERNAL, "stop_stream");
+
+        wire::StopResponse response;
+        response.epoch = server_.epoch;
+        response.final.id = stopped.value().stream_id;
+        response.final.tune_revision = stopped.value().revision;
+        switch (static_cast<StreamTerminal>(stopped.value().terminal)) {
+        case StreamTerminal::slow_consumer:
+            response.final.reason = wire::StreamEndReason::slow_consumer;
+            break;
+        case StreamTerminal::usb_error:
+            response.final.reason = wire::StreamEndReason::device_lost;
+            break;
+        case StreamTerminal::sync_error:
+        case StreamTerminal::bridge_fatal:
+            response.final.reason = wire::StreamEndReason::backend_error;
+            break;
+        case StreamTerminal::disconnected:
+            response.final.reason = wire::StreamEndReason::owner_closed;
+            break;
+        case StreamTerminal::none:
+        case StreamTerminal::stopped:
+            response.final.reason = wire::StreamEndReason::stopped;
+            break;
+        }
+        response.quiesced = stopped.value().quiesced;
+        if (stopped.value().cleanup_error != Error::OK || !response.quiesced) {
+            response.final.error.present = true;
+            response.final.error.value.code = static_cast<std::uint32_t>(
+                stopped.value().cleanup_error != Error::OK
+                    ? stopped.value().cleanup_error : Error::BUSY);
+            response.final.error.value.operation = wire::WString<32>{};
+            constexpr char operation[] = "stop_stream";
+            response.final.error.value.operation.length = sizeof(operation) - 1U;
+            for (std::size_t i = 0U; i < sizeof(operation) - 1U; ++i)
+                response.final.error.value.operation.bytes[i] = operation[i];
+            if (!response.quiesced && stopped.value().cleanup_error == Error::OK) {
+                response.final.error.value.detail = wire::WString<256>{};
+                constexpr char detail[] = "cleanup pending";
+                response.final.error.value.detail.length = sizeof(detail) - 1U;
+                for (std::size_t i = 0U; i < sizeof(detail) - 1U; ++i)
+                    response.final.error.value.detail.bytes[i] = detail[i];
+            }
+        }
+        const auto size = wire::encode_record_frame(wire::Kind::response,
+            request.opcode, request.request_id, response,
+            &wire::encode_stop_response, output);
+        return size ? reply(session, size.value())
+                    : error_reply(session, request.opcode, request.request_id,
+                                  size.error(), "stop_stream");
+    }
     }
     return error_reply(session, request.opcode, request.request_id,
                        Error::UNSUPPORTED, "control");

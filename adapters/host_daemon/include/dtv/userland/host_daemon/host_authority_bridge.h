@@ -115,6 +115,9 @@ public:
     Result<dtv::userland::detail::StreamStopResult> stop_stream(
         std::uint8_t control_slot, std::uint64_t lease_id,
         std::uint64_t stream_id) noexcept;
+    Result<dtv::userland::detail::StreamStopResult> stop_stream_v1(
+        std::uint64_t client_id, std::uint64_t lease_id,
+        std::uint64_t stream_id) noexcept override;
     HostAuthorityDataCounts data_counts() const noexcept;
     Error set_legacy_completion_sink(LegacyCompletionSink sink,
                                      void* context) noexcept;
@@ -237,6 +240,9 @@ private:
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;
+    Result<dtv::userland::detail::StreamStopResult> stop_stream_impl(
+        std::uint8_t control_slot, std::uint64_t lease_id,
+        std::uint64_t stream_id, bool retain_submit_rejection) noexcept;
     void close_owned_streams(std::size_t slot) noexcept;
     bool has_owned_streams(std::size_t slot) const noexcept;
     void finish_control_close(std::size_t slot) noexcept;

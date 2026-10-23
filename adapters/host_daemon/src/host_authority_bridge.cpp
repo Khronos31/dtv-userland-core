@@ -441,26 +441,62 @@ Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream
     std::uint8_t control_slot, std::uint64_t lease_id,
     std::uint64_t stream_id) noexcept
 {
+    return stop_stream_impl(control_slot, lease_id, stream_id, false);
+}
+
+Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream_v1(
+    std::uint64_t client_id, std::uint64_t lease_id,
+    std::uint64_t stream_id) noexcept
+{
+    const std::size_t index = find_slot(client_id);
+    if (index == kHostAuthoritySessionCapacity)
+        return Result<dtv::userland::detail::StreamStopResult>::failure(Error::NOT_FOUND);
+    return stop_stream_impl(static_cast<std::uint8_t>(index), lease_id,
+                            stream_id, true);
+}
+
+Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream_impl(
+    std::uint8_t control_slot, std::uint64_t lease_id,
+    std::uint64_t stream_id, bool retain_submit_rejection) noexcept
+{
     if (!slots_ || control_slot >= kHostAuthoritySessionCapacity)
         return Result<dtv::userland::detail::StreamStopResult>::failure(
             Error::INVALID_ARGUMENT);
     Slot& owner = slots_[control_slot];
     if (owner.state != SlotState::active || !owner.session)
         return Result<dtv::userland::detail::StreamStopResult>::failure(Error::NOT_FOUND);
-    const auto stopped = tuner_service_.authority_stop_stream_v1(
+    auto stopped = tuner_service_.authority_stop_stream_v1(
         owner.client_id, lease_id, stream_id);
     if (!stopped) return stopped;
+    bool found_data = false;
     for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
         DataSlot& data = data_slots_[i];
         if (data.ticket.client_id != owner.client_id ||
             data.lease_id != lease_id || data.ticket.stream_id != stream_id)
             continue;
+        found_data = true;
         data.state = DataSlotState::tombstone;
         if (stopped.value().cleanup_owner && !data.attach_pending &&
-            !queue_stream_cleanup(i))
-            return Result<dtv::userland::detail::StreamStopResult>::failure(
-                Error::RESOURCE_LIMIT);
+            (!retain_submit_rejection ||
+             (!data.cleanup_inflight && !data.stream_end.ready)) &&
+            !queue_stream_cleanup(i)) {
+            if (retain_submit_rejection && workers_.error() != Error::OK) {
+                enter_fatal();
+                stopped.value().cleanup_error = workers_.error();
+            }
+            if (!retain_submit_rejection)
+                return Result<dtv::userland::detail::StreamStopResult>::failure(
+                    Error::RESOURCE_LIMIT);
+        }
         break;
+    }
+    if (retain_submit_rejection && !found_data) {
+        if (stopped.value().quiesced) {
+            forget_stream(owner.client_id, stream_id);
+        } else {
+            enter_fatal();
+            stopped.value().cleanup_error = Error::INTERNAL;
+        }
     }
     return stopped;
 }
