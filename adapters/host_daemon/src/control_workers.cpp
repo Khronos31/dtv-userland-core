@@ -644,6 +644,14 @@ struct ControlWorkerLanes::Impl final {
                 if (!pop_task(task)) break;
                 ControlWorkerCompletion completion = owner.execute(task);
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+                if (task.operation == ControlWorkerOperation::tuner_authority_job &&
+                    task.authority_job.kind ==
+                        dtv::userland::detail::AuthorityJobKind::acquire &&
+                    owner.mismatch_next_authority_acquire_receiver.exchange(false)) {
+                    ++completion.authority_completion.receiver;
+                }
+#endif
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
                 if ((task.operation == ControlWorkerOperation::tuner_attach_stream ||
                      task.operation == ControlWorkerOperation::tuner_prepare_attach_v1) &&
                     owner.before_tuner_attach_completion != nullptr) {
@@ -652,6 +660,13 @@ struct ControlWorkerLanes::Impl final {
                 }
 #endif
                 (void)push_completion(completion);
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+                if (task.operation == ControlWorkerOperation::tuner_authority_job &&
+                    owner.fatal_after_authority_lane.load() == static_cast<int>(lane)) {
+                    owner.worker_error.store(Error::INTERNAL);
+                    owner.fatal_after_authority_lane.store(-1);
+                }
+#endif
                 active_tasks.fetch_sub(1U);
             }
             owner.live_threads.fetch_sub(1U);
@@ -712,6 +727,11 @@ struct ControlWorkerLanes::Impl final {
             if (owner.fail_tuner_attach_submit &&
                 (task.operation == ControlWorkerOperation::tuner_attach_stream ||
                  task.operation == ControlWorkerOperation::tuner_prepare_attach_v1)) {
+                return Result<void>::failure(Error::BUSY);
+            }
+            if (task.operation == ControlWorkerOperation::tuner_authority_job &&
+                task.kind == ControlWorkerTaskKind::authority_cleanup &&
+                owner.reject_next_authority_cleanup_submit.exchange(false)) {
                 return Result<void>::failure(Error::BUSY);
             }
 #endif
@@ -855,6 +875,9 @@ struct ControlWorkerLanes::Impl final {
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     bool fail_tuner_attach_submit = false;
     bool fail_tune_signal = false;
+    std::atomic<int> fatal_after_authority_lane{-1};
+    std::atomic<bool> mismatch_next_authority_acquire_receiver{false};
+    std::atomic<bool> reject_next_authority_cleanup_submit{false};
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
 #endif
@@ -870,6 +893,11 @@ struct ControlWorkerLanes::Impl final {
         if (options != nullptr) {
             fail_tuner_attach_submit = options->fail_tuner_attach_submit;
             fail_tune_signal = options->fail_tune_signal;
+            fatal_after_authority_lane.store(options->fatal_after_authority_lane);
+            mismatch_next_authority_acquire_receiver.store(
+                options->mismatch_next_authority_acquire_receiver);
+            reject_next_authority_cleanup_submit.store(
+                options->reject_next_authority_cleanup_submit);
             before_tuner_attach_completion =
                 options->before_tuner_attach_completion;
             before_tuner_attach_completion_context =
@@ -1404,6 +1432,21 @@ bool ControlWorkerLanes::try_pop(ControlWorkerLane lane,
     const std::size_t index = static_cast<std::size_t>(lane);
     return index < impl_->lanes.size() && impl_->lanes[index] != nullptr &&
            impl_->lanes[index]->try_pop(completion);
+}
+
+Result<ControlWorkerLane> ControlWorkerLanes::authority_lane(
+    std::uint8_t receiver, bool cleanup) const noexcept
+{
+    if (!impl_) return Result<ControlWorkerLane>::failure(Error::NOT_READY);
+    if (cleanup) {
+        return Result<ControlWorkerLane>::success(
+            impl_->execution.tuner_shutdown_lane);
+    }
+    if (receiver >= impl_->execution.receiver_count ||
+        receiver >= impl_->execution.receiver_lane.size())
+        return Result<ControlWorkerLane>::failure(Error::INVALID_ARGUMENT);
+    return Result<ControlWorkerLane>::success(
+        impl_->execution.receiver_lane[receiver]);
 }
 
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)

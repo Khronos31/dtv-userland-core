@@ -21,6 +21,7 @@ option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority servic
 option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
 option(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER "Build the host authority owner seam" OFF)
 option(DTV_USERLAND_BUILD_HOST_WORKERS "Build the host control worker lanes" OFF)
+option(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE "Build the bounded host authority bridge" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -229,6 +230,34 @@ if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
+if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER OR
+       NOT DTV_USERLAND_BUILD_HOST_WORKERS)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE requires DTV_USERLAND_BUILD_HOST_TUNER, DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER, and DTV_USERLAND_BUILD_HOST_WORKERS")
+    endif()
+    add_library(dtv_userland_host_authority_bridge STATIC
+        adapters/host_daemon/src/host_authority_bridge.cpp)
+    add_library(dtv::host_authority_bridge ALIAS dtv_userland_host_authority_bridge)
+    set_target_properties(dtv_userland_host_authority_bridge PROPERTIES
+        EXPORT_NAME host_authority_bridge
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_authority_bridge PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_authority_bridge PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_authority_bridge PUBLIC
+        dtv::host_authority_owner dtv::host_workers)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_authority_bridge PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_authority_bridge PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
     if(NOT DTV_USERLAND_BUILD_CONTROL OR NOT DTV_USERLAND_BUILD_RECEIVER)
         message(FATAL_ERROR
@@ -413,6 +442,22 @@ if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
         adapters/host_daemon/COPYING
         adapters/host_daemon/HOST_AUTHORITY_OWNER_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_authority_owner)
+endif()
+if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
+    install(TARGETS dtv_userland_host_authority_bridge
+        EXPORT dtv_userland_host_authority_bridgeTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_authority_bridgeTargets
+        FILE dtv_userland_host_authority_bridgeTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_daemon/include/dtv/userland/host_daemon/host_authority_bridge.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_daemon)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/HOST_AUTHORITY_BRIDGE_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_authority_bridge)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
@@ -626,6 +671,15 @@ if(DTV_USERLAND_BUILD_TESTING)
             add_test(NAME host_authority_worker_tests
                 COMMAND host_authority_worker_tests)
         endif()
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
+        add_executable(host_authority_bridge_tests tests/host_authority_bridge_tests.cpp)
+        target_link_libraries(host_authority_bridge_tests PRIVATE dtv::host_authority_bridge)
+        target_compile_definitions(host_authority_bridge_tests PRIVATE
+            PX4_CONTROL_WORKERS_TEST_ACCESS=1)
+        add_test(NAME host_authority_bridge_tests COMMAND host_authority_bridge_tests)
+        set_tests_properties(host_authority_bridge_tests PROPERTIES TIMEOUT 120)
     endif()
 
     if(DTV_USERLAND_BUILD_CAPTURE)
