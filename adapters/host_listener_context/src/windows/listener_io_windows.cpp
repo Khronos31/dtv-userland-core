@@ -104,12 +104,32 @@ bool file_identity(const wchar_t* path, PathIdentity& output,
         FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
         FILE_FLAG_OPEN_REPARSE_POINT | (require_file ? 0U : FILE_FLAG_BACKUP_SEMANTICS),
         nullptr);
-    if (file == INVALID_HANDLE_VALUE) return false;
+    if (file == INVALID_HANDLE_VALUE) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        std::fprintf(stderr, "Windows identity stage=open path=%ls win32=%lu\n", path,
+            static_cast<unsigned long>(::GetLastError()));
+#endif
+        return false;
+    }
     BY_HANDLE_FILE_INFORMATION info{};
     const BOOL ok = ::GetFileInformationByHandle(file, &info);
+    const DWORD info_error = ok == 0 ? ::GetLastError() : ERROR_SUCCESS;
     (void)::CloseHandle(file);
-    if (ok == 0 || (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
-        (require_file && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)) return false;
+    if (ok == 0) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        std::fprintf(stderr, "Windows identity stage=query path=%ls win32=%lu\n", path,
+            static_cast<unsigned long>(info_error));
+#endif
+        return false;
+    }
+    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+        (require_file && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        std::fprintf(stderr, "Windows identity stage=attributes path=%ls attrs=%lu\n", path,
+            static_cast<unsigned long>(info.dwFileAttributes));
+#endif
+        return false;
+    }
     output = PathIdentity{info.dwVolumeSerialNumber,
         (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow, true};
     return true;
