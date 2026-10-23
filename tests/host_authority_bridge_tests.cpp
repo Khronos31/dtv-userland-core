@@ -1241,23 +1241,23 @@ bool test_authority_stream_prepare_commit_stop()
                   << " terminal=" << static_cast<bool>(other_stopped) << "\n";
         return false;
     }
+    if (other_stopped.value().stream_id != other_start.value().stream_id ||
+        !other_stopped.value().quiesced || backend.capture_stops != 1U) {
+        std::cerr << "duplicate STOP precondition stream=" << other_stopped.value().stream_id
+                  << " expected=" << other_start.value().stream_id
+                  << " quiesced=" << other_stopped.value().quiesced
+                  << " stops=" << backend.capture_stops << "\n";
+        return false;
+    }
     const auto duplicate_other_stop = send_stop(other_control.value(), 12U, list.epoch,
                                       other_lease, other_start.value().stream_id);
-    const auto other_after_duplicate = tuner.authority_stream_last_terminal_v1(
-        bridge.client_id(other_control.value()), other_lease);
     const bool other_free = wait_free(bridge, other_control.value());
-    if (duplicate_other_stop.action != w::InboundAction::close || !other_after_duplicate ||
-        other_after_duplicate.value().stream_id != other_start.value().stream_id ||
-        !other_after_duplicate.value().quiesced || backend.capture_stops != 1U ||
-        !other_free) {
-        std::cerr << "duplicate STOP did not isolate or alter terminal action="
+    if (duplicate_other_stop.action != w::InboundAction::close || !other_free ||
+        bridge.counts().fatal_unresolved != 0U) {
+        std::cerr << "duplicate STOP was not rejected or released action="
                   << static_cast<unsigned>(duplicate_other_stop.action)
-                  << " terminal=" << static_cast<bool>(other_after_duplicate)
-                  << " terminal_id=" << (other_after_duplicate ? other_after_duplicate.value().stream_id : 0U)
-                  << " expected=" << other_start.value().stream_id
-                  << " quiesced=" << (other_after_duplicate && other_after_duplicate.value().quiesced)
-                  << " stops=" << backend.capture_stops
-                  << " free=" << other_free << "\n";
+                  << " free=" << other_free
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
         return false;
     }
     const auto pending_control = bridge.open_session();
@@ -1319,15 +1319,13 @@ bool test_authority_stream_prepare_commit_stop()
         bridge.response_sent(older_control.value(), true) != Error::OK) return false;
     const auto before_older_stop = tuner.authority_stream_last_terminal_v1(
         bridge.client_id(older_control.value()), older_lease);
+    if (!before_older_stop || before_older_stop.value().stream_id != older_start.value().stream_id ||
+        !before_older_stop.value().quiesced || backend.capture_stops != 1U) return false;
     const auto older_stop = send_stop(older_control.value(), 11U, list.epoch,
         older_lease, older_start.value().stream_id);
-    const auto after_older_stop = tuner.authority_stream_last_terminal_v1(
-        bridge.client_id(older_control.value()), older_lease);
-    if (older_stop.action != w::InboundAction::close || !before_older_stop ||
-        !after_older_stop ||
-        before_older_stop.value().stream_id != after_older_stop.value().stream_id ||
-        !after_older_stop.value().quiesced || backend.capture_stops != 1U ||
-        !wait_free(bridge, older_control.value())) return false;
+    if (older_stop.action != w::InboundAction::close ||
+        !wait_free(bridge, older_control.value()) ||
+        bridge.counts().fatal_unresolved != 0U) return false;
     const auto partial_control = bridge.open_session();
     if (!partial_control || !hello(bridge, partial_control.value())) return false;
     std::uint64_t partial_lease = 0U;
@@ -1419,22 +1417,27 @@ bool test_authority_stream_prepare_commit_stop()
         bridge.data_stream_end_sent(third_data.value(), true) != Error::OK) return false;
     const auto before_duplicate = tuner.authority_stream_last_terminal_v1(
         bridge.client_id(control.value()), lease);
-    const auto duplicate_stop = send_stop(control.value(), 12U, list.epoch, lease,
-                                          started.value().stream_id);
-    const auto after_duplicate = tuner.authority_stream_last_terminal_v1(
-        bridge.client_id(control.value()), lease);
-    if (duplicate_stop.action != w::InboundAction::close || !before_duplicate ||
-        !after_duplicate ||
-        after_duplicate.value().stream_id != before_duplicate.value().stream_id ||
-        !after_duplicate.value().quiesced || backend.capture_stops != 3U ||
+    if (!before_duplicate ||
+        before_duplicate.value().stream_id != third_start.value().stream_id ||
+        !before_duplicate.value().quiesced || backend.capture_stops != 3U ||
         bridge.counts().fatal_unresolved != 0U) {
-        std::cerr << "duplicate STOP changed stream state action="
-                  << static_cast<unsigned>(duplicate_stop.action)
-                  << " terminal=" << static_cast<bool>(after_duplicate)
-                  << " stops=" << backend.capture_stops << "\n";
+        std::cerr << "duplicate STOP precondition final=" << static_cast<bool>(before_duplicate)
+                  << " id=" << (before_duplicate ? before_duplicate.value().stream_id : 0U)
+                  << " expected=" << third_start.value().stream_id
+                  << " quiesced=" << (before_duplicate && before_duplicate.value().quiesced)
+                  << " stops=" << backend.capture_stops
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
         return false;
     }
-    if (!wait_free(bridge, control.value())) return false;
+    const auto duplicate_stop = send_stop(control.value(), 12U, list.epoch, lease,
+                                          started.value().stream_id);
+    if (duplicate_stop.action != w::InboundAction::close ||
+        !wait_free(bridge, control.value()) || bridge.counts().fatal_unresolved != 0U) {
+        std::cerr << "duplicate STOP was not rejected or released action="
+                  << static_cast<unsigned>(duplicate_stop.action)
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
+        return false;
+    }
     if (bridge.begin_shutdown() != Error::OK) return false;
     const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!bridge.stopped() && std::chrono::steady_clock::now() < stop_until) {
