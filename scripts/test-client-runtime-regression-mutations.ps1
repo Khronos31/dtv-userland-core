@@ -46,11 +46,16 @@ finally {
 }
 
 try {
-    $apiCall = '    const BOOL result = ::SetConsoleCtrlHandler(handler, add);'
+    $apiBlock = '    const BOOL result = ::SetConsoleCtrlHandler(handler, add);' +
+        [Environment]::NewLine + '#if defined(DTV_USERLAND_SIGNAL_TESTING)' +
+        [Environment]::NewLine + '    if (result != FALSE)' +
+        [Environment]::NewLine +
+        '        successful_registrations_for_test.fetch_add(1U, std::memory_order_relaxed);' +
+        [Environment]::NewLine + '#endif' + [Environment]::NewLine + '    return result;'
     $apiOmitted = '    (void)handler;' + [Environment]::NewLine +
         '    (void)add;' + [Environment]::NewLine +
         '    return TRUE;'
-    $signalApiOmitted = $signalOriginal.Replace($apiCall, $apiOmitted)
+    $signalApiOmitted = $signalOriginal.Replace($apiBlock, $apiOmitted)
     if ($signalApiOmitted -eq $signalOriginal) {
         throw 'Signal API-call-omitted mutation source anchor was not found'
     }
