@@ -60,10 +60,25 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     if (slot.state != SlotState::active || !slot.session) return {};
     const auto reply = authority_owner_.authority().accept(
         *slot.session, frame, context, snapshot, accepted_at_ms, *this);
+    if (frame.header.opcode == dtv::userland::wire::kOpcodeStartStream &&
+        reply.action == dtv::userland::wire::InboundAction::respond &&
+        reply.frame.size >= dtv::userland::wire::kHeaderSize) {
+        const auto request = dtv::userland::wire::decode_start_request(frame.payload);
+        const auto response = dtv::userland::wire::decode_start_response(
+            {reply.frame.data + dtv::userland::wire::kHeaderSize,
+             reply.frame.size - dtv::userland::wire::kHeaderSize});
+        if (!request || !response ||
+            !remember_stream(index, request.value().lease_id,
+                             response.value().stream_id))
+            enter_fatal();
+    }
     if (reply.action == dtv::userland::wire::InboundAction::close) {
         slot.state = SlotState::tombstone;
+        slot.close_pending = reply.cleanup_required &&
+            reply.cleanup.kind == AuthorityJobKind::disconnect;
         if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
         if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
+        if (slot.close_pending) close_owned_streams(index);
     }
     return reply;
 }
@@ -112,15 +127,9 @@ Error HostAuthorityBridge::close_session(std::uint8_t index) noexcept
     if (!slots_ || index >= kHostAuthoritySessionCapacity) return Error::INVALID_ARGUMENT;
     Slot& slot = slots_[index];
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
-    const AuthorityJob cleanup = authority_owner_.authority().close(*slot.session);
-    if (cleanup.kind != AuthorityJobKind::disconnect) return Error::OK;
     slot.state = SlotState::tombstone;
-    if (cleanup.deferred) {
-        slot.deferred_session = true;
-        return Error::OK;
-    }
-    slot.session.reset();
-    retain_cleanup(cleanup, index);
+    slot.close_pending = true;
+    close_owned_streams(index);
     advance();
     return Error::OK;
 }
@@ -220,11 +229,15 @@ Result<dtv::userland::detail::StreamStartResult> HostAuthorityBridge::start_stre
     if (!slots_ || control_slot >= kHostAuthoritySessionCapacity)
         return Result<dtv::userland::detail::StreamStartResult>::failure(
             Error::INVALID_ARGUMENT);
-    const Slot& slot = slots_[control_slot];
+    Slot& slot = slots_[control_slot];
     if (slot.state != SlotState::active || !slot.session)
         return Result<dtv::userland::detail::StreamStartResult>::failure(Error::NOT_FOUND);
-    return tuner_service_.authority_start_stream_v1(slot.client_id, lease_id,
+    const auto started = tuner_service_.authority_start_stream_v1(slot.client_id, lease_id,
         tune_revision, now_ms, arm_budget_ms);
+    if (!started) return started;
+    if (!remember_stream(control_slot, lease_id, started.value().stream_id))
+        return Result<dtv::userland::detail::StreamStartResult>::failure(Error::RESOURCE_LIMIT);
+    return started;
 }
 
 Error HostAuthorityBridge::prepare_data_attach(
@@ -387,6 +400,7 @@ Error HostAuthorityBridge::data_stream_end_sent(
         enter_fatal();
         return released.error();
     }
+    forget_stream(slot.ticket.client_id, slot.ticket.stream_id);
     slot = DataSlot{slot.generation, DataSlotState::free};
     return Error::OK;
 }
@@ -560,7 +574,7 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 data.drained = true;
                 (void)tuner_service_.authority_abort_attach_v1(
                     data.ticket, completion.error == Error::OK
-                        ? Error::NOT_FOUND : completion.error);
+                        ? Error::OK : completion.error);
                 data.state = DataSlotState::tombstone;
                 if (!queue_stream_cleanup(completion.data_slot) &&
                     workers_.error() != Error::OK) enter_fatal();
@@ -629,6 +643,7 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                             enter_fatal();
                             return;
                         }
+                        forget_stream(data.ticket.client_id, data.ticket.stream_id);
                         data = DataSlot{data.generation, DataSlotState::free};
                     }
                 } else {
@@ -754,6 +769,7 @@ void HostAuthorityBridge::finish_slot(std::size_t index) noexcept
 {
     Slot& slot = slots_[index];
     slot.session.reset();
+    slot.streams = {};
     slot.cleanup = AuthorityJob{};
     slot.response = {};
     slot.client_id = 0U;
@@ -769,6 +785,7 @@ void HostAuthorityBridge::finish_slot(std::size_t index) noexcept
     slot.cleanup_accepted = false;
     slot.cleanup_inflight = false;
     slot.deferred_session = false;
+    slot.close_pending = false;
     slot.response_ready = false;
 }
 
@@ -796,6 +813,161 @@ void HostAuthorityBridge::close_all_data() noexcept
             !queue_stream_cleanup(i) && workers_.error() != Error::OK)
             enter_fatal();
     }
+}
+
+void HostAuthorityBridge::close_owned_streams(std::size_t index) noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return;
+    Slot& owner = slots_[index];
+    for (std::size_t data_index = 0U; data_index < data_slots_.size(); ++data_index) {
+        DataSlot& data = data_slots_[data_index];
+        if (data.ticket.stream_id == 0U || data.ticket.client_id != owner.client_id)
+            continue;
+        data.connection_open = false;
+        data.state = DataSlotState::tombstone;
+        data.attach_result = HostAuthorityAttachResult{};
+        if (data.attach_pending || data.cleanup_pending || data.cleanup_inflight) continue;
+        if (data.prepared) {
+            if (!queue_stream_cleanup(data_index) && workers_.error() != Error::OK)
+                enter_fatal();
+            continue;
+        }
+        if (data.stream_end.ready) {
+            const auto released = tuner_service_.authority_release_stream_final_v1(
+                data.ticket);
+            if (!released) {
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+                return;
+            }
+            forget_stream(data.ticket.client_id, data.ticket.stream_id);
+            data = DataSlot{data.generation, DataSlotState::free};
+            continue;
+        }
+        const auto aborted = tuner_service_.authority_abort_attach_v1(
+            data.ticket, Error::OK);
+        if (!aborted && aborted.error() != Error::NOT_FOUND) {
+            data.state = DataSlotState::fatal_unresolved;
+            enter_fatal();
+            return;
+        }
+        if (!queue_stream_cleanup(data_index) && workers_.error() != Error::OK)
+            enter_fatal();
+    }
+    for (std::size_t stream_index = 0U; stream_index < owner.streams.size();
+         ++stream_index) {
+        auto& stream = owner.streams[stream_index];
+        if (!stream.active) continue;
+        bool found_data = false;
+        for (std::size_t data_index = 0U; data_index < data_slots_.size(); ++data_index) {
+            DataSlot& data = data_slots_[data_index];
+            if (data.ticket.client_id != owner.client_id ||
+                data.ticket.stream_id != stream.stream_id) continue;
+            found_data = true;
+            data.connection_open = false;
+            data.state = DataSlotState::tombstone;
+            data.attach_result = HostAuthorityAttachResult{};
+            if (!data.attach_pending && data.prepared &&
+                !queue_stream_cleanup(data_index) && workers_.error() != Error::OK)
+                enter_fatal();
+            break;
+        }
+        if (found_data) continue;
+
+        const auto stopped = tuner_service_.authority_stop_stream_v1(
+            owner.client_id, stream.lease_id, stream.stream_id);
+        if (stopped && stopped.value().quiesced) {
+            stream = Slot::StreamOwner{};
+            continue;
+        }
+        if (!stopped && stopped.error() == Error::NOT_FOUND) {
+            const auto last = tuner_service_.authority_stream_last_terminal_v1(
+                owner.client_id, stream.lease_id);
+            if (last && last.value().stream_id == stream.stream_id &&
+                last.value().quiesced) {
+                stream = Slot::StreamOwner{};
+                continue;
+            }
+        }
+        enter_fatal();
+        return;
+    }
+}
+
+bool HostAuthorityBridge::has_owned_streams(std::size_t index) const noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return false;
+    for (const auto& stream : slots_[index].streams)
+        if (stream.active) return true;
+    const std::uint64_t client_id = slots_[index].client_id;
+    for (const DataSlot& data : data_slots_)
+        if (data.ticket.stream_id != 0U && data.ticket.client_id == client_id)
+            return true;
+    return false;
+}
+
+void HostAuthorityBridge::finish_control_close(std::size_t index) noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return;
+    Slot& slot = slots_[index];
+    if (!slot.close_pending || has_owned_streams(index)) return;
+    if (slot.cleanup.kind == AuthorityJobKind::disconnect && slot.cleanup_pending) {
+        slot.close_pending = false;
+        return;
+    }
+    if (!slot.session) {
+        slot.state = SlotState::fatal_unresolved;
+        enter_fatal();
+        return;
+    }
+    const AuthorityJob cleanup = authority_owner_.authority().close(*slot.session);
+    if (cleanup.kind != AuthorityJobKind::disconnect) {
+        slot.state = SlotState::fatal_unresolved;
+        enter_fatal();
+        return;
+    }
+    slot.close_pending = false;
+    if (cleanup.deferred) {
+        slot.deferred_session = true;
+        return;
+    }
+    slot.session.reset();
+    retain_cleanup(cleanup, index);
+}
+
+void HostAuthorityBridge::forget_stream(std::uint64_t client_id,
+                                        std::uint64_t stream_id) noexcept
+{
+    if (!slots_ || client_id == 0U || stream_id == 0U) return;
+    const std::size_t index = find_slot(client_id);
+    if (index == kHostAuthoritySessionCapacity) return;
+    for (auto& stream : slots_[index].streams) {
+        if (stream.active && stream.stream_id == stream_id)
+            stream = Slot::StreamOwner{};
+    }
+}
+
+bool HostAuthorityBridge::remember_stream(std::size_t index,
+                                          std::uint64_t lease_id,
+                                          std::uint64_t stream_id) noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity ||
+        lease_id == 0U || stream_id == 0U) return false;
+    Slot& slot = slots_[index];
+    for (auto& stream : slot.streams) {
+        if (stream.active && stream.lease_id == lease_id) {
+            stream.stream_id = stream_id;
+            return true;
+        }
+    }
+    for (auto& stream : slot.streams) {
+        if (stream.active) continue;
+        stream.lease_id = lease_id;
+        stream.stream_id = stream_id;
+        stream.active = true;
+        return true;
+    }
+    return false;
 }
 
 bool HostAuthorityBridge::queue_stream_cleanup(std::size_t index) noexcept
@@ -911,7 +1083,7 @@ void HostAuthorityBridge::advance() noexcept
 {
     if (slots_) for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
         Slot& slot = slots_[i];
-        if (slot.state != SlotState::free && slot.inflight == 0U &&
+        if (slot.state != SlotState::free && !slot.close_pending && slot.inflight == 0U &&
             slot.cleanup_pending && !fatal_) {
             if (!queue_job(slot.cleanup, i)) {
                 if (workers_.error() != Error::OK) enter_fatal();
@@ -924,6 +1096,14 @@ void HostAuthorityBridge::advance() noexcept
             !slot.attach_pending && !slot.cleanup_inflight && !fatal_) {
             if (!queue_stream_cleanup(i) && workers_.error() != Error::OK)
                 enter_fatal();
+        }
+    }
+    if (slots_ && !fatal_) {
+        for (std::size_t i = 0U; i < kHostAuthoritySessionCapacity; ++i) {
+            Slot& slot = slots_[i];
+            if (!slot.close_pending) continue;
+            close_owned_streams(i);
+            finish_control_close(i);
         }
     }
     if (fatal_) {

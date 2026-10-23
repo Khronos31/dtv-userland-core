@@ -924,6 +924,192 @@ bool test_authority_stream_prepare_commit_stop()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool test_control_close_cleans_owned_stream_before_disconnect()
+{
+    for (unsigned scenario = 0U; scenario < 4U; ++scenario) {
+        const auto fail = [scenario](const char* step) {
+            std::cerr << "stream close setup scenario=" << scenario << " step="
+                      << step << "\n";
+            return false;
+        };
+        Backend backend;
+        Nonce nonce;
+        Time time;
+        Stream stream;
+        TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
+        if (!tuner.configure_strict_capabilities()) return false;
+        if (!tuner.configure_stream_contract(
+                dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL)) return fail("contract");
+        CardBackend card_backend;
+        CardSession card_session;
+        CardService card(card_backend, card_session);
+        auto created = ControlWorkerLanes::create(card, tuner);
+        if (!created) return fail("workers");
+        const auto list = make_list();
+        w::ServerHello server{list.epoch, list.producer, 0U};
+        HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+        if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+            return fail("configure");
+        const auto control = bridge.open_session();
+        if (!control || !hello(bridge, control.value())) return fail("hello");
+        const auto other_control = bridge.open_session();
+        if (!other_control || !hello(bridge, other_control.value())) return fail("other-hello");
+        std::uint64_t lease = 0U;
+        if (!acquire(bridge, control.value(), 2U, lease) ||
+            !tune(bridge, control.value(), list.epoch, lease)) return fail("acquire-tune");
+        std::uint64_t other_lease = 0U;
+        if (!acquire(bridge, other_control.value(), 3U, other_lease))
+            return fail("other-acquire");
+        const auto status = tuner.engine_status();
+        if (!status) return fail("status");
+        const std::uint64_t revision = status.value().tune_metadata[2U].current_revision;
+        w::StartRequest start_request;
+        start_request.epoch = list.epoch;
+        start_request.lease_id = lease;
+        start_request.tune_revision = revision;
+        std::array<std::uint8_t, w::kMaxControlPayload> start_payload{};
+        const auto start_size = w::encode_start_request(start_request,
+            {start_payload.data(), start_payload.size()});
+        w::Context start_context;
+        start_context.epoch = list.epoch;
+        start_context.state = w::ContextState::ready;
+        w::Snapshot start_snapshot;
+        const auto start_reply = start_size ? bridge.accept(control.value(),
+            frame(w::kOpcodeStartStream, 5U,
+                  {start_payload.data(), start_size.value()}), start_context,
+            start_snapshot, 100U) : dtv::userland::detail::AuthorityReply{};
+        if (start_reply.action != w::InboundAction::respond ||
+            bridge.response_sent(control.value(), true) != Error::OK) return fail("start");
+        const auto started = w::decode_start_response(
+            {start_reply.frame.data + w::kHeaderSize,
+             start_reply.frame.size - w::kHeaderSize});
+        if (!started) return fail("start-decode");
+        if (scenario == 3U) {
+            const auto stopped = bridge.stop_stream(control.value(), lease,
+                                                     started.value().stream_id);
+            const auto restarted = bridge.start_stream(control.value(), lease, revision,
+                                                        102U, 5000U);
+            if (!stopped || !stopped.value().quiesced || !restarted)
+                return fail("stop-restart-armed");
+        }
+        const auto data = scenario == 3U
+            ? Result<HostAuthorityDataConnection>::failure(Error::NOT_FOUND)
+            : bridge.open_data_session();
+        if (scenario != 3U && !data) return fail("start-data");
+        w::AttachRequest request;
+        request.epoch = list.epoch;
+        request.lease_id = lease;
+        request.stream_id = started.value().stream_id;
+        request.attach_token = started.value().attach_token;
+        HostAuthorityAttachResult attached{};
+        if (scenario != 3U) {
+            if (scenario == 2U) backend.block_capture(2U);
+            if (bridge.prepare_data_attach(data.value(), control.value(), request, 101U) !=
+                Error::OK) return fail("prepare");
+            if (scenario == 2U && !backend.wait_capture()) {
+                backend.release_capture();
+                return fail("wait-capture");
+            }
+            const auto attach_until = std::chrono::steady_clock::now() +
+                std::chrono::seconds(5);
+            while (!attached.ready && std::chrono::steady_clock::now() < attach_until) {
+                (void)bridge.poll();
+                attached = bridge.take_data_attach_result(data.value());
+                if (!attached.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+        }
+        if (scenario == 2U) {
+            if (attached.ready || bridge.close_data_session(data.value()) != Error::OK ||
+                bridge.data_counts().tombstone != 1U) {
+                backend.release_capture();
+                return fail("P7-close");
+            }
+            backend.release_capture();
+            const auto late_until = std::chrono::steady_clock::now() +
+                std::chrono::seconds(5);
+            while (bridge.data_counts().free != kHostAuthoritySessionCapacity &&
+                   std::chrono::steady_clock::now() < late_until) {
+                (void)bridge.poll();
+                std::this_thread::sleep_for(std::chrono::milliseconds(1));
+            }
+            const auto late_final = tuner.authority_stream_last_terminal_v1(
+                bridge.client_id(control.value()), lease);
+            if (bridge.data_counts().free != kHostAuthoritySessionCapacity ||
+                !late_final || !late_final.value().quiesced ||
+                backend.capture_starts != 1U || backend.capture_stops != 1U)
+                return fail("P7-late-cleanup");
+            if (bridge.close_session(control.value()) != Error::OK)
+                return fail("P7-control-close");
+        } else if (scenario != 3U && (!attached.ready || attached.error != Error::OK ||
+                   bridge.data_attach_response_sent(data.value(), true) != Error::OK)) {
+            return fail("attach-commit");
+        }
+        if (scenario == 0U) {
+            std::array<std::uint8_t, 188U> packet{};
+            const auto read = bridge.read_data(data.value(),
+                {packet.data(), packet.size()}, Timeout{0U});
+            if (read.error != Error::OK || read.data.packets.size != packet.size()) return fail("read");
+            if (bridge.close_session(control.value()) != Error::OK) return fail("close-control");
+        } else if (scenario == 1U && bridge.begin_shutdown() != Error::OK) {
+            return fail("shutdown");
+        } else if (scenario == 3U &&
+                   bridge.close_session(control.value()) != Error::OK) {
+            return fail("close-armed-stream");
+        }
+
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < until) {
+            (void)bridge.poll();
+            if (scenario != 2U && scenario != 3U) {
+                std::array<std::uint8_t, 188U> packet{};
+                (void)bridge.read_data(data.value(),
+                    {packet.data(), packet.size()}, Timeout{0U});
+            }
+            if (bridge.client_id(control.value()) == 0U &&
+                bridge.data_counts().free == kHostAuthoritySessionCapacity) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto final_status = tuner.engine_status();
+        const unsigned expected_capture = scenario == 3U ? 0U : 1U;
+        if (!final_status || final_status.value().leased[2U] ||
+            backend.capture_starts != expected_capture ||
+            backend.capture_stops != expected_capture ||
+            bridge.client_id(control.value()) != 0U ||
+            bridge.counts().fatal_unresolved != 0U ||
+            (scenario != 1U && !final_status.value().leased[3U]) ||
+            bridge.data_counts().free != kHostAuthoritySessionCapacity) {
+            std::cerr << "stream close ordering scenario=" << scenario
+                      << " lease=" << (final_status && final_status.value().leased[2U])
+                      << " capture=" << backend.capture_starts << "/"
+                      << backend.capture_stops << " bridge="
+                      << bridge.counts().free << "/" << bridge.counts().active << "/"
+                      << bridge.counts().tombstone << "/"
+                      << bridge.counts().fatal_unresolved << " data-free="
+                      << bridge.data_counts().free << " phase="
+                      << static_cast<unsigned>(final_status.value().stream_phases[2U])
+                      << " state="
+                      << static_cast<unsigned>(final_status.value().states[2U])
+                      << "\n";
+            return false;
+        }
+        if (scenario != 1U) {
+            if (!tune(bridge, other_control.value(), list.epoch, other_lease) ||
+                bridge.close_session(other_control.value()) != Error::OK ||
+                !wait_free(bridge, other_control.value())) return fail("other-progress");
+            if (bridge.begin_shutdown() != Error::OK) return fail("postclose-shutdown");
+        } else if (final_status.value().leased[3U]) {
+            return fail("shutdown-other-lease");
+        }
+        const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!bridge.stopped() && std::chrono::steady_clock::now() < stop_until) {
+            (void)bridge.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!bridge.stopped() || bridge.shutdown_result() != Error::OK) return fail("final-shutdown");
+    }
+    return true;
+}
+
 bool test_duplicate_completion_is_ignored()
 {
     Backend backend;
@@ -1517,6 +1703,10 @@ int main()
     }
     if (!test_authority_stream_prepare_commit_stop()) {
         std::cerr << "Authority stream prepare/commit/STOP fixture failed\n";
+        return 1;
+    }
+    if (!test_control_close_cleans_owned_stream_before_disconnect()) {
+        std::cerr << "control close stream cleanup ordering fixture failed\n";
         return 1;
     }
     if (!test_duplicate_completion_is_ignored()) {

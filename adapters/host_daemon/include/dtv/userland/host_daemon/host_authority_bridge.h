@@ -149,7 +149,13 @@ private:
         free, active, tombstone, fatal_unresolved, retired
     };
     struct Slot final {
+        struct StreamOwner final {
+            std::uint64_t lease_id = 0U;
+            std::uint64_t stream_id = 0U;
+            bool active = false;
+        };
         std::optional<dtv::userland::detail::ControlServiceSession> session{};
+        std::array<StreamOwner, dtv::userland::detail::kReceiverEngineCapacity> streams{};
         dtv::userland::detail::AuthorityJob cleanup{};
         dtv::userland::detail::AuthorityReply response{};
         std::uint64_t client_id = 0U;
@@ -167,6 +173,7 @@ private:
         bool cleanup_accepted = false;
         bool cleanup_inflight = false;
         bool deferred_session = false;
+        bool close_pending = false;
         bool response_ready = false;
     };
     struct DataSlot final {
@@ -193,6 +200,12 @@ private:
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;
+    void close_owned_streams(std::size_t slot) noexcept;
+    bool has_owned_streams(std::size_t slot) const noexcept;
+    void finish_control_close(std::size_t slot) noexcept;
+    void forget_stream(std::uint64_t client_id, std::uint64_t stream_id) noexcept;
+    bool remember_stream(std::size_t slot, std::uint64_t lease_id,
+                         std::uint64_t stream_id) noexcept;
     void stop_ingresses() noexcept;
     void enter_fatal() noexcept;
     void advance() noexcept;
