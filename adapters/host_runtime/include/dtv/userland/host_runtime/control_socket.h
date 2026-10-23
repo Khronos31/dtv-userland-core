@@ -1,0 +1,43 @@
+// SPDX-License-Identifier: GPL-2.0-only
+#ifndef DTV_USERLAND_HOST_RUNTIME_CONTROL_SOCKET_H
+#define DTV_USERLAND_HOST_RUNTIME_CONTROL_SOCKET_H
+
+#include <dtv/userland/control_client.h>
+#include <dtv/userland/error.h>
+
+#include <cstdint>
+#include <memory>
+#include <string>
+#include <string_view>
+
+namespace dtv::userland::host_runtime {
+
+enum class EndpointAccess : std::uint8_t {
+    private_user,
+    shared_group,
+};
+
+struct EndpointConfig final {
+    std::string_view runtime_directory;
+    std::string_view product;
+    std::string_view instance;
+    EndpointAccess access = EndpointAccess::private_user;
+    // Tests and tightly managed deployments may pin the expected server uid.
+    // A negative value selects the current effective uid.
+    std::int64_t expected_peer_uid = -1;
+    std::string_view endpoint_name = "control.sock";
+};
+
+Result<std::string> control_endpoint_path(const EndpointConfig& config) noexcept;
+Result<std::string> endpoint_path(const EndpointConfig& config) noexcept;
+
+// Connects to the local control endpoint after checking its namespace owner,
+// permissions, and peer identity. The returned transport owns its socket.
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
+    const EndpointConfig& config, Timeout timeout) noexcept;
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
+    const EndpointConfig& config, Timeout timeout) noexcept;
+
+}  // namespace dtv::userland::host_runtime
+
+#endif  // DTV_USERLAND_HOST_RUNTIME_CONTROL_SOCKET_H

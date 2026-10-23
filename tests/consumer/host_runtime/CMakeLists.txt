@@ -1,0 +1,6 @@
+cmake_minimum_required(VERSION 3.16)
+project(dtv_userland_host_runtime_consumer LANGUAGES CXX)
+find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS host_runtime host_facade)
+add_executable(host_runtime_consumer main.cpp)
+target_compile_features(host_runtime_consumer PRIVATE cxx_std_17)
+target_link_libraries(host_runtime_consumer PRIVATE dtv::host_runtime dtv::host_facade)

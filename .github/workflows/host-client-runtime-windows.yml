@@ -1,0 +1,65 @@
+name: Host Client Runtime Windows
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-client-runtime-windows.yml'
+      - 'adapters/host_facade/**'
+      - 'adapters/host_runtime/**'
+      - 'adapters/host_ctl/**'
+      - 'adapters/host_ts/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+
+permissions:
+  contents: read
+
+jobs:
+  msvc:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build -A x64
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_FACADE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_CTL=ON
+          -DDTV_USERLAND_BUILD_HOST_TS=ON
+      - name: Build all targets
+        run: cmake --build build --config Release --parallel 2
+      - name: Run host client/runtime tests
+        shell: pwsh
+        run: |
+          ctest --test-dir build -C Release -R '^(host_runtime_tests|host_runtime_discovery_windows_tests|host_ctl_tests|host_ts_tests|host_client_integration_tests)$' --verbose 2>&1 |
+            Tee-Object -FilePath host-client-runtime-tests.log
+          if ($LASTEXITCODE -ne 0) { throw "client/runtime test exit=$LASTEXITCODE" }
+      - name: Install
+        run: cmake --install build --config Release --prefix '${{ runner.temp }}\dtv-client-runtime-install'
+      - name: Configure installed consumer
+        run: cmake -S tests/consumer/host_ts -B consumer-build -A x64 -DCMAKE_PREFIX_PATH='${{ runner.temp }}\dtv-client-runtime-install'
+      - name: Build installed consumer
+        run: cmake --build consumer-build --config Release
+      - name: Run installed consumer
+        run: .\consumer-build\Release\host_ts_consumer.exe
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: host-client-runtime-windows-evidence
+          path: host-client-runtime-tests.log
+          if-no-files-found: warn

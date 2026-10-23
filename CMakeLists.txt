@@ -22,6 +22,10 @@ option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter"
 option(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER "Build the host authority owner seam" OFF)
 option(DTV_USERLAND_BUILD_HOST_WORKERS "Build the host control worker lanes" OFF)
 option(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE "Build the bounded host authority bridge" OFF)
+option(DTV_USERLAND_BUILD_HOST_FACADE "Build the host process facade" OFF)
+option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build platform client/runtime helpers" OFF)
+option(DTV_USERLAND_BUILD_HOST_CTL "Build the host control CLI" OFF)
+option(DTV_USERLAND_BUILD_HOST_TS "Build the shared host TS client" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -292,6 +296,121 @@ if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
 endif()
+
+if(DTV_USERLAND_BUILD_HOST_FACADE)
+    add_library(dtv_userland_host_facade STATIC
+        adapters/host_facade/src/px4d_signals.cpp)
+    add_library(dtv::host_facade ALIAS dtv_userland_host_facade)
+    set_target_properties(dtv_userland_host_facade PROPERTIES
+        EXPORT_NAME host_facade
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_facade PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_facade PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_facade PRIVATE /EHs-c- /GR- /W4)
+        target_link_libraries(dtv_userland_host_facade PUBLIC shell32)
+    else()
+        target_compile_options(dtv_userland_host_facade PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_RUNTIME)
+    if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_HOST_WORKERS)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_RUNTIME requires DTV_USERLAND_BUILD_HOST_TUNER and DTV_USERLAND_BUILD_HOST_WORKERS")
+    endif()
+    add_library(dtv_userland_host_runtime STATIC
+        adapters/host_runtime/src/control_socket.cpp
+        adapters/host_runtime/src/posix_client_compat.cpp
+        adapters/host_runtime/src/posix_tuner_nonce.cpp
+        adapters/host_runtime/src/windows_tuner_nonce.cpp)
+    add_library(dtv::host_runtime ALIAS dtv_userland_host_runtime)
+    set_target_properties(dtv_userland_host_runtime PROPERTIES
+        EXPORT_NAME host_runtime
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_runtime PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_runtime PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_runtime PUBLIC
+        dtv::host_tuner dtv::host_workers)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_runtime PRIVATE /EHs-c- /GR- /W4)
+        target_link_libraries(dtv_userland_host_runtime PUBLIC bcrypt ws2_32 advapi32)
+    else()
+        target_compile_options(dtv_userland_host_runtime PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_TS)
+    if(NOT DTV_USERLAND_BUILD_HOST_RUNTIME OR NOT DTV_USERLAND_BUILD_CONTROL)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_TS requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_CONTROL")
+    endif()
+    set(_dtv_userland_host_ts_sources adapters/host_ts/px4_ts_core.cpp)
+    if(WIN32)
+        list(APPEND _dtv_userland_host_ts_sources
+            adapters/host_ts/windows/px4_ts_windows_output.cpp)
+    else()
+        list(APPEND _dtv_userland_host_ts_sources
+            adapters/host_ts/posix/px4_ts_posix.cpp)
+    endif()
+    add_library(dtv_userland_host_ts STATIC ${_dtv_userland_host_ts_sources})
+    add_library(dtv::host_ts ALIAS dtv_userland_host_ts)
+    set_target_properties(dtv_userland_host_ts PROPERTIES
+        EXPORT_NAME host_ts
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_ts PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_ts PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ts/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_ts PUBLIC
+        dtv::host_runtime dtv::control dtv::identity dtv::tuning)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_ts PRIVATE /EHs-c- /GR- /W4)
+        target_link_libraries(dtv_userland_host_ts PUBLIC shell32)
+    else()
+        target_compile_options(dtv_userland_host_ts PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+
+if(DTV_USERLAND_BUILD_HOST_CTL)
+    if(NOT DTV_USERLAND_BUILD_HOST_RUNTIME OR NOT DTV_USERLAND_BUILD_CONTROL)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_CTL requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_CONTROL")
+    endif()
+    add_library(dtv_userland_host_ctl STATIC adapters/host_ctl/src/host_ctl.cpp)
+    add_library(dtv::host_ctl ALIAS dtv_userland_host_ctl)
+    set_target_properties(dtv_userland_host_ctl PROPERTIES
+        EXPORT_NAME host_ctl
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_ctl PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_ctl PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ctl/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_ctl PUBLIC
+        dtv::host_runtime dtv::control dtv::identity dtv::json)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_ctl PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_ctl PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
 if(DTV_USERLAND_BUILD_STATUS_PROJECTION)
     if(NOT DTV_USERLAND_BUILD_CONTROL OR NOT DTV_USERLAND_BUILD_RECEIVER)
         message(FATAL_ERROR
@@ -492,6 +611,65 @@ if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
         adapters/host_daemon/COPYING
         adapters/host_daemon/HOST_AUTHORITY_BRIDGE_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_authority_bridge)
+endif()
+if(DTV_USERLAND_BUILD_HOST_FACADE)
+    install(TARGETS dtv_userland_host_facade
+        EXPORT dtv_userland_host_facadeTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_facadeTargets
+        FILE dtv_userland_host_facadeTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(DIRECTORY adapters/host_facade/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES adapters/host_daemon/COPYING
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_facade)
+endif()
+if(DTV_USERLAND_BUILD_HOST_RUNTIME)
+    install(TARGETS dtv_userland_host_runtime
+        EXPORT dtv_userland_host_runtimeTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_runtimeTargets
+        FILE dtv_userland_host_runtimeTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_runtime/include/dtv/userland/host_runtime/control_socket.h
+        adapters/host_runtime/include/dtv/userland/host_runtime/family.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_runtime)
+    install(FILES
+        adapters/host_runtime/include/px4/posix_ipc.h
+        adapters/host_runtime/include/px4/posix_tuner_nonce.h
+        adapters/host_runtime/include/px4/windows_tuner_nonce.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/px4)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_runtime/CLIENT_RUNTIME_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_runtime)
+endif()
+if(DTV_USERLAND_BUILD_HOST_TS)
+    install(TARGETS dtv_userland_host_ts
+        EXPORT dtv_userland_host_tsTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_tsTargets
+        FILE dtv_userland_host_tsTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(DIRECTORY adapters/host_ts/include/ DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES adapters/host_ts/COPYING
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_ts)
+endif()
+if(DTV_USERLAND_BUILD_HOST_CTL)
+    install(TARGETS dtv_userland_host_ctl
+        EXPORT dtv_userland_host_ctlTargets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_ctlTargets
+        FILE dtv_userland_host_ctlTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES adapters/host_ctl/include/host_ctl.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR})
+    install(FILES adapters/host_daemon/COPYING
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_ctl)
 endif()
 if(DTV_USERLAND_BUILD_CAPTURE)
     install(FILES include/dtv/userland/detail/packet_stream_session.h
@@ -704,6 +882,70 @@ if(DTV_USERLAND_BUILD_TESTING)
             add_test(NAME host_authority_worker_tests
                 COMMAND host_authority_worker_tests)
         endif()
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_RUNTIME AND DTV_USERLAND_BUILD_HOST_FACADE)
+        set(_dtv_userland_host_facade_test_target dtv::host_facade)
+        if(WIN32)
+            add_library(dtv_userland_host_facade_test STATIC
+                adapters/host_facade/src/px4d_signals.cpp)
+            target_compile_features(dtv_userland_host_facade_test PUBLIC cxx_std_17)
+            target_include_directories(dtv_userland_host_facade_test PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>)
+            target_compile_definitions(dtv_userland_host_facade_test PUBLIC
+                DTV_USERLAND_SIGNAL_TESTING=1)
+            target_link_libraries(dtv_userland_host_facade_test PUBLIC shell32)
+            target_compile_options(dtv_userland_host_facade_test PRIVATE /EHs-c- /GR- /W4)
+            set(_dtv_userland_host_facade_test_target dtv_userland_host_facade_test)
+        endif()
+        add_executable(host_runtime_tests tests/host_runtime_tests.cpp)
+        target_link_libraries(host_runtime_tests PRIVATE
+            dtv::host_runtime ${_dtv_userland_host_facade_test_target})
+        add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
+    endif()
+    if(WIN32 AND DTV_USERLAND_BUILD_HOST_RUNTIME)
+        add_executable(host_runtime_discovery_windows_tests
+            tests/host_runtime_discovery_windows_tests.cpp)
+        target_link_libraries(host_runtime_discovery_windows_tests PRIVATE
+            dtv::host_runtime)
+        add_test(NAME host_runtime_discovery_windows_tests
+            COMMAND host_runtime_discovery_windows_tests)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_CTL)
+        add_executable(host_ctl_tests tests/host_ctl_tests.cpp)
+        target_link_libraries(host_ctl_tests PRIVATE dtv::host_ctl)
+        add_test(NAME host_ctl_tests COMMAND host_ctl_tests)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_TS)
+        add_executable(host_ts_tests tests/host_ts_tests.cpp)
+        target_link_libraries(host_ts_tests PRIVATE dtv::host_ts)
+        add_test(NAME host_ts_tests COMMAND host_ts_tests)
+    endif()
+    if(DTV_USERLAND_BUILD_HOST_TS AND DTV_USERLAND_BUILD_HOST_CTL AND
+       DTV_USERLAND_BUILD_HOST_RUNTIME)
+        find_package(Threads REQUIRED)
+        add_library(dtv_userland_host_ts_test STATIC ${_dtv_userland_host_ts_sources})
+        target_compile_features(dtv_userland_host_ts_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_ts_test PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_ts/include>)
+        target_link_libraries(dtv_userland_host_ts_test PUBLIC
+            dtv::host_runtime dtv::control dtv::identity dtv::tuning)
+        target_compile_definitions(dtv_userland_host_ts_test PRIVATE
+            DTV_USERLAND_HOST_TS_TEST_ACCESS=1)
+        if(MSVC)
+            target_compile_options(dtv_userland_host_ts_test PRIVATE /EHs-c- /GR- /W4)
+            target_link_libraries(dtv_userland_host_ts_test PUBLIC shell32)
+        else()
+            target_compile_options(dtv_userland_host_ts_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        add_executable(host_client_integration_tests
+            tests/host_client_integration_tests.cpp)
+        target_link_libraries(host_client_integration_tests PRIVATE
+            dtv::host_ctl dtv_userland_host_ts_test Threads::Threads)
+        add_test(NAME host_client_integration_tests
+            COMMAND host_client_integration_tests)
+        set_tests_properties(host_client_integration_tests PROPERTIES TIMEOUT 60)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
