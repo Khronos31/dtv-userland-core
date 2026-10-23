@@ -231,10 +231,39 @@ Error HostAuthorityBridge::close_data_session(
             !queue_stream_cleanup(connection.slot) && workers_.error() != Error::OK)
             enter_fatal();
         if (slot.cleanup_pending) return Error::RESOURCE_LIMIT;
+        if (slot.attach_failed && slot.cleanup_quiesced)
+            return finish_failed_attach_cleanup(connection.slot);
         return Error::OK;
     }
     slot.connection_open = false;
     slot.state = DataSlotState::free;
+    return Error::OK;
+}
+
+Error HostAuthorityBridge::finish_failed_attach_cleanup(std::size_t index) noexcept
+{
+    if (index >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    DataSlot& data = data_slots_[index];
+    if (!data.attach_failed || !data.cleanup_quiesced || data.connection_open ||
+        data.attach_pending || data.prepared || data.cleanup_pending ||
+        data.cleanup_inflight)
+        return Error::NOT_READY;
+    if (data.final_available) {
+        const auto released = tuner_service_.authority_release_stream_final_v1(data.ticket);
+        if (!released) {
+            data.state = DataSlotState::fatal_unresolved;
+            enter_fatal();
+            return released.error();
+        }
+    }
+    const auto terminal = tuner_service_.authority_stream_last_terminal_v1(
+        data.ticket.client_id, data.lease_id);
+    if (!terminal || terminal.value().stream_id != data.ticket.stream_id ||
+        !terminal.value().quiesced) return Error::INTERNAL;
+    if (terminal.value().cleanup_error == Error::OK)
+        forget_stream(data.ticket.client_id, data.ticket.stream_id);
+    const std::uint64_t generation = data.generation;
+    data = DataSlot{generation, DataSlotState::free};
     return Error::OK;
 }
 
@@ -314,6 +343,7 @@ Error HostAuthorityBridge::prepare_data_attach(
     const auto lane = workers_.authority_lane(task.receiver, false);
     if (!lane || !workers_.submit(lane.value(), task)) {
         data.attach_pending = false;
+        data.attach_failed = true;
         data.state = DataSlotState::tombstone;
         (void)tuner_service_.authority_abort_attach_v1(data.ticket,
                                                        Error::RESOURCE_LIMIT);
@@ -647,6 +677,7 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 data.attach_result.ready = true;
             } else {
                 data.drained = true;
+                data.attach_failed = true;
                 data.attach_result.error = completion.error == Error::OK
                     ? Error::NOT_READY : completion.error;
                 data.attach_result.response.epoch =
@@ -666,88 +697,123 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
             ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1 ||
             completion.operation == ControlWorkerOperation::tuner_run_stream_cleanup_v1) {
             data.cleanup_inflight = false;
-            if (completion.error == Error::OK && data.state == DataSlotState::tombstone) {
-                const auto final = tuner_service_.authority_final_snapshot_v1(data.ticket);
-                if (!final && final.error() != Error::UNSUPPORTED) {
+            if (data.state != DataSlotState::tombstone) {
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+                return;
+            }
+            const auto terminal = tuner_service_.authority_stream_last_terminal_v1(
+                data.ticket.client_id, data.lease_id);
+            bool quiesced = terminal &&
+                terminal.value().stream_id == data.ticket.stream_id &&
+                terminal.value().quiesced;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+            terminal_observed_ = static_cast<bool>(terminal);
+            terminal_quiesced_ = quiesced;
+            if (force_next_terminal_unquiesced_ && terminal) {
+                quiesced = false;
+                force_next_terminal_unquiesced_ = false;
+                forced_terminal_unquiesced_ = true;
+            }
+            terminal_quiesced_ = quiesced;
+#endif
+            const bool missing_failed_final = data.attach_failed &&
+                (completion.error == Error::NOT_FOUND ||
+                 completion.error == Error::UNSUPPORTED);
+            if (!terminal || !quiesced) {
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+                if (terminal && !quiesced)
+                    quiesced_guard_rejected_ = true;
+#endif
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+                return;
+            }
+            if (completion.error != Error::OK && !missing_failed_final) {
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+                return;
+            }
+            const auto final = completion.error == Error::OK
+                ? tuner_service_.authority_final_snapshot_v1(data.ticket)
+                : Result<px4::userland::TunerStreamFinalSnapshot>::failure(
+                    completion.error);
+            if (!final && data.attach_failed &&
+                (final.error() == Error::NOT_FOUND ||
+                 final.error() == Error::UNSUPPORTED)) {
+                data.cleanup_quiesced = true;
+                data.final_available = false;
+                if (!data.connection_open &&
+                    finish_failed_attach_cleanup(completion.data_slot) != Error::OK) {
+                    data.state = DataSlotState::fatal_unresolved;
+                    enter_fatal();
+                }
+                return;
+            }
+            if (!final && final.error() != Error::UNSUPPORTED) {
+                data.state = DataSlotState::fatal_unresolved;
+                enter_fatal();
+                return;
+            }
+            if (!final) {
+                data = DataSlot{data.generation, DataSlotState::free};
+                return;
+            }
+            if (data.attach_failed) {
+                data.cleanup_quiesced = true;
+                data.final_available = true;
+                if (!data.connection_open &&
+                    finish_failed_attach_cleanup(completion.data_slot) != Error::OK) {
+                    data.state = DataSlotState::fatal_unresolved;
+                    enter_fatal();
+                }
+                return;
+            }
+            auto& event = data.stream_end.event;
+            event.final.id = data.ticket.stream_id;
+            event.final.tune_revision = data.ticket.revision;
+            switch (static_cast<dtv::userland::detail::StreamTerminal>(
+                        final.value().terminal)) {
+            case dtv::userland::detail::StreamTerminal::slow_consumer:
+                event.final.reason = dtv::userland::wire::StreamEndReason::slow_consumer;
+                break;
+            case dtv::userland::detail::StreamTerminal::disconnected:
+                event.final.reason = dtv::userland::wire::StreamEndReason::owner_closed;
+                break;
+            case dtv::userland::detail::StreamTerminal::stopped:
+            case dtv::userland::detail::StreamTerminal::none:
+                event.final.reason = dtv::userland::wire::StreamEndReason::stopped;
+                break;
+            default:
+                event.final.reason = dtv::userland::wire::StreamEndReason::backend_error;
+                break;
+            }
+            event.final.statistics.entries.count = 2U;
+            event.final.statistics.entries.items[0U].id =
+                dtv::userland::wire::kCounterIdTransmittedPackets;
+            event.final.statistics.entries.items[1U].id =
+                dtv::userland::wire::kCounterIdQueueDroppedPackets;
+            auto& packets = event.final.statistics.entries.items[0U].counter;
+            packets.measurement.state = dtv::userland::wire::MeasureState::valid;
+            packets.measurement.value = final.value().counters.packets;
+            packets.overflow = packets.measurement.value ==
+                std::numeric_limits<std::uint64_t>::max();
+            auto& drops = event.final.statistics.entries.items[1U].counter;
+            drops.measurement.state = dtv::userland::wire::MeasureState::valid;
+            drops.measurement.value = final.value().counters.queue_drops;
+            drops.overflow = drops.measurement.value ==
+                std::numeric_limits<std::uint64_t>::max();
+            data.stream_end.ready = true;
+            if (!data.connection_open) {
+                const auto released =
+                    tuner_service_.authority_release_stream_final_v1(data.ticket);
+                if (!released) {
                     data.state = DataSlotState::fatal_unresolved;
                     enter_fatal();
                     return;
                 }
-                if (final) {
-                    const auto terminal = tuner_service_.authority_stream_last_terminal_v1(
-                        data.ticket.client_id, data.lease_id);
-                    bool quiesced = terminal && terminal.value().quiesced;
-#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
-                    terminal_observed_ = static_cast<bool>(terminal);
-                    terminal_quiesced_ = quiesced;
-                    if (force_next_terminal_unquiesced_ && terminal) {
-                        quiesced = false;
-                        force_next_terminal_unquiesced_ = false;
-                        forced_terminal_unquiesced_ = true;
-                    }
-                    terminal_quiesced_ = quiesced;
-#endif
-                    if (!terminal || !quiesced) {
-#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
-                        if (terminal && !quiesced)
-                            quiesced_guard_rejected_ = true;
-#endif
-                        data.state = DataSlotState::fatal_unresolved;
-                        enter_fatal();
-                        return;
-                    }
-                    auto& event = data.stream_end.event;
-                    event.final.id = data.ticket.stream_id;
-                    event.final.tune_revision = data.ticket.revision;
-                    switch (static_cast<dtv::userland::detail::StreamTerminal>(
-                                final.value().terminal)) {
-                    case dtv::userland::detail::StreamTerminal::slow_consumer:
-                        event.final.reason = dtv::userland::wire::StreamEndReason::slow_consumer;
-                        break;
-                    case dtv::userland::detail::StreamTerminal::disconnected:
-                        event.final.reason = dtv::userland::wire::StreamEndReason::owner_closed;
-                        break;
-                    case dtv::userland::detail::StreamTerminal::stopped:
-                    case dtv::userland::detail::StreamTerminal::none:
-                        event.final.reason = dtv::userland::wire::StreamEndReason::stopped;
-                        break;
-                    default:
-                        event.final.reason = dtv::userland::wire::StreamEndReason::backend_error;
-                        break;
-                    }
-                    event.final.statistics.entries.count = 2U;
-                    event.final.statistics.entries.items[0U].id =
-                        dtv::userland::wire::kCounterIdTransmittedPackets;
-                    event.final.statistics.entries.items[1U].id =
-                        dtv::userland::wire::kCounterIdQueueDroppedPackets;
-                    auto& packets = event.final.statistics.entries.items[0U].counter;
-                    packets.measurement.state = dtv::userland::wire::MeasureState::valid;
-                    packets.measurement.value = final.value().counters.packets;
-                    packets.overflow = packets.measurement.value ==
-                        std::numeric_limits<std::uint64_t>::max();
-                    auto& drops = event.final.statistics.entries.items[1U].counter;
-                    drops.measurement.state = dtv::userland::wire::MeasureState::valid;
-                    drops.measurement.value = final.value().counters.queue_drops;
-                    drops.overflow = drops.measurement.value ==
-                        std::numeric_limits<std::uint64_t>::max();
-                    data.stream_end.ready = true;
-                    if (!data.connection_open) {
-                        const auto released =
-                            tuner_service_.authority_release_stream_final_v1(data.ticket);
-                        if (!released) {
-                            data.state = DataSlotState::fatal_unresolved;
-                            enter_fatal();
-                            return;
-                        }
-                        forget_stream(data.ticket.client_id, data.ticket.stream_id);
-                        data = DataSlot{data.generation, DataSlotState::free};
-                    }
-                } else {
-                    data = DataSlot{data.generation, DataSlotState::free};
-                }
-            } else {
-                data.state = DataSlotState::fatal_unresolved;
-                enter_fatal();
+                forget_stream(data.ticket.client_id, data.ticket.stream_id);
+                data = DataSlot{data.generation, DataSlotState::free};
             }
             return;
         }

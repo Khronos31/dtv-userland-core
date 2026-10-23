@@ -142,6 +142,14 @@ public:
         return slots_ && slot < kHostAuthoritySessionCapacity && slots_[slot].session &&
                slots_[slot].session->connected();
     }
+    bool stream_owned_for_test(std::uint8_t slot,
+                               std::uint64_t stream_id) const noexcept
+    {
+        if (!slots_ || slot >= kHostAuthoritySessionCapacity) return false;
+        for (const auto& stream : slots_[slot].streams)
+            if (stream.active && stream.stream_id == stream_id) return true;
+        return false;
+    }
     bool close_pending_for_test(std::uint8_t slot) const noexcept
     {
         return slots_ && slot < kHostAuthoritySessionCapacity &&
@@ -223,7 +231,10 @@ private:
         dtv::userland::detail::StreamAttachTicket ticket{};
         HostAuthorityAttachResult attach_result{};
         bool attach_pending = false;
+        bool attach_failed = false;
         bool prepared = false;
+        bool cleanup_quiesced = false;
+        bool final_available = false;
         bool cleanup_pending = false;
         bool cleanup_inflight = false;
         bool connection_open = false;
@@ -240,6 +251,7 @@ private:
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;
+    Error finish_failed_attach_cleanup(std::size_t slot) noexcept;
     Result<dtv::userland::detail::StreamStopResult> stop_stream_impl(
         std::uint8_t control_slot, std::uint64_t lease_id,
         std::uint64_t stream_id, bool retain_submit_rejection) noexcept;

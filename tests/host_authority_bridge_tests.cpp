@@ -199,6 +199,10 @@ public:
 
 class Stream final : public TunerStreamControl {
 public:
+    explicit Stream(bool missing_final_when_unattached = false) noexcept
+        : missing_final_when_unattached_(missing_final_when_unattached)
+    {
+    }
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
         identity = attachment;
@@ -233,6 +237,8 @@ public:
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
     {
+        if (!attached && missing_final_when_unattached_)
+            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
         return !attached || same(attachment)
             ? Result<TunerStreamFinalSnapshot>::success(final)
             : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
@@ -271,6 +277,7 @@ private:
     TunerStreamFinalSnapshot final{};
     bool attached = false;
     unsigned packets_remaining = 0U;
+    bool missing_final_when_unattached_ = false;
 };
 
 class CardBackend final : public CardServiceBackend {
@@ -503,6 +510,11 @@ bool wait_free(HostAuthorityBridge& bridge, std::uint8_t slot)
 }
 
 struct ActiveStreamFixture final {
+    explicit ActiveStreamFixture(bool missing_final_when_unattached = false) noexcept
+        : stream(missing_final_when_unattached)
+    {
+    }
+
     Backend backend;
     Nonce nonce;
     Time time;
@@ -569,6 +581,27 @@ struct ActiveStreamFixture final {
                bridge->data_attach_response_sent(data, true) == Error::OK;
     }
 };
+
+bool test_attached_missing_final_stays_fatal()
+{
+    ActiveStreamFixture fixture(true);
+    if (!fixture.start()) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) return false;
+    const Error closed = fixture.bridge->close_data_session(data.value());
+    if (closed != Error::OK && closed != Error::RESOURCE_LIMIT) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fixture.bridge->counts().fatal_unresolved == 0U &&
+           std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool rejected = fixture.bridge->counts().fatal_unresolved != 0U &&
+        fixture.bridge->data_counts().fatal_unresolved == 1U;
+    fixture.bridge->close_session_for_test(fixture.control);
+    const auto stopped = fixture.workers->stop_and_join();
+    return rejected && static_cast<bool>(stopped);
+}
 
 bool test_cleanup_requires_quiesced_terminal()
 {
@@ -1394,36 +1427,58 @@ bool test_authority_stream_prepare_commit_stop()
     const auto third_start = bridge.start_stream(control.value(), lease, revision,
                                                   300U, 5000U);
     const auto third_data = bridge.open_data_session();
-    if (!third_start || !third_data) return false;
+    if (!third_start || !third_data) {
+        std::cerr << "third stream start/data failed\n";
+        return false;
+    }
     request.stream_id = third_start.value().stream_id;
     request.attach_token = third_start.value().token;
     backend.block_capture(2U);
     if (bridge.prepare_data_attach(third_data.value(), control.value(), request, 301U) !=
         Error::OK || !backend.wait_capture()) {
+        std::cerr << "third stream prepare/wait failed\n";
         backend.release_capture();
         return false;
     }
     const auto racing_stop = bridge.stop_stream(control.value(), lease,
                                                  third_start.value().stream_id);
     if (!racing_stop || bridge.data_counts().tombstone != 1U) {
+        std::cerr << "third stream racing STOP failed\n";
         backend.release_capture();
         return false;
     }
     backend.release_capture();
-    stream_end = HostAuthorityStreamEndResult{};
+    HostAuthorityAttachResult rejected_attach{};
     const auto race_cleanup_until = std::chrono::steady_clock::now() +
         std::chrono::seconds(5);
-    while (!stream_end.ready && std::chrono::steady_clock::now() < race_cleanup_until) {
+    while (!rejected_attach.ready && std::chrono::steady_clock::now() < race_cleanup_until) {
         (void)bridge.poll();
-        (void)bridge.read_data(third_data.value(), {packet.data(), packet.size()}, Timeout{0U});
-        stream_end = bridge.take_data_stream_end(third_data.value());
+        rejected_attach = bridge.take_data_attach_result(third_data.value());
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!rejected_attach.ready || rejected_attach.error != Error::NOT_FOUND ||
+        rejected_attach.response.stream_id != third_start.value().stream_id) {
+        std::cerr << "third attach completion ready=" << rejected_attach.ready
+                  << " error=" << static_cast<unsigned>(rejected_attach.error)
+                  << " stream=" << rejected_attach.response.stream_id << " expected="
+                  << third_start.value().stream_id << "\n";
+        return false;
+    }
+    const Error third_closed = bridge.close_data_session(third_data.value());
+    if (third_closed != Error::OK && third_closed != Error::RESOURCE_LIMIT) return false;
+    const auto recycled_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (bridge.data_counts().free != kHostAuthoritySessionCapacity &&
+           std::chrono::steady_clock::now() < recycled_until) {
+        (void)bridge.poll();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const auto raced_final = tuner.authority_stream_last_terminal_v1(
         bridge.client_id(control.value()), lease);
-    if (!stream_end.ready || !raced_final || !raced_final.value().quiesced ||
+    if (!raced_final || !raced_final.value().quiesced ||
+        bridge.data_counts().free != kHostAuthoritySessionCapacity ||
+        bridge.data_counts().tombstone != 0U ||
         backend.capture_starts != 3U || backend.capture_stops != 3U ||
-        bridge.data_stream_end_sent(third_data.value(), true) != Error::OK) return false;
+        bridge.counts().fatal_unresolved != 0U) return false;
     const auto before_duplicate = tuner.authority_stream_last_terminal_v1(
         bridge.client_id(control.value()), lease);
     if (!before_duplicate ||
@@ -1447,22 +1502,31 @@ bool test_authority_stream_prepare_commit_stop()
                   << " fatal=" << bridge.counts().fatal_unresolved << "\n";
         return false;
     }
-    if (bridge.begin_shutdown() != Error::OK) return false;
+    if (bridge.begin_shutdown() != Error::OK) {
+        std::cerr << "third stream begin shutdown failed\n";
+        return false;
+    }
     const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!bridge.stopped() && std::chrono::steady_clock::now() < stop_until) {
         (void)bridge.poll();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    return bridge.stopped() && bridge.shutdown_result() == Error::OK;
+    const bool stopped = bridge.stopped() && bridge.shutdown_result() == Error::OK;
+    if (!stopped) std::cerr << "third stream shutdown failed stopped="
+                            << bridge.stopped() << " result="
+                            << static_cast<unsigned>(bridge.shutdown_result()) << " fatal="
+                            << bridge.counts().fatal_unresolved << "\n";
+    return stopped;
 }
 
-bool test_failed_attach_prepare_is_reported_to_data_owner()
+bool failed_attach_cleanup_case(bool missing_final_when_unattached,
+                                bool force_unquiesced = false)
 {
     Backend backend;
     backend.fail_capture_start = true;
     Nonce nonce;
     Time time;
-    Stream stream;
+    Stream stream(missing_final_when_unattached);
     TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
     if (!tuner.configure_strict_capabilities() ||
         !tuner.configure_stream_contract(
@@ -1499,7 +1563,32 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
         std::cerr << "failed ATTACH fixture control HELLO\n";
         return false;
     }
+    std::uint8_t other_control_slot =
+        static_cast<std::uint8_t>(kHostAuthoritySessionCapacity);
+    const char* failed_stage = "other control open";
+    struct Cleanup final {
+        HostAuthorityBridge& bridge;
+        ControlWorkerLanes& workers;
+        std::uint8_t control;
+        std::uint8_t& other;
+        const char*& failed_stage;
+        bool complete = false;
+        ~Cleanup()
+        {
+            if (complete) return;
+            std::cerr << "failed ATTACH case stage=" << failed_stage << "\n";
+            bridge.close_session_for_test(control);
+            if (other < kHostAuthoritySessionCapacity)
+                bridge.close_session_for_test(other);
+            (void)workers.stop_and_join();
+        }
+    } cleanup{bridge, *created.value(), control.value(), other_control_slot,
+              failed_stage};
+    const auto other_control = bridge.open_session();
+    if (!other_control || !hello(bridge, other_control.value())) return false;
+    other_control_slot = other_control.value();
     std::uint64_t lease = 0U;
+    failed_stage = "acquire/tune/status";
     if (!acquire(bridge, control.value(), 2U, lease, 3U) ||
         !tune(bridge, control.value(), list.epoch, lease, 4U)) {
         std::cerr << "failed ATTACH fixture acquire/tune\n";
@@ -1521,6 +1610,7 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
     context.epoch = list.epoch;
     context.state = w::ContextState::ready;
     w::Snapshot snapshot;
+    failed_stage = "START";
     const auto started = bridge.accept(control.value(), frame(w::kOpcodeStartStream, 7U,
         {payload.data(), size.value()}), context, snapshot, 100U);
     if (started.action != w::InboundAction::respond ||
@@ -1535,12 +1625,15 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
         std::cerr << "failed ATTACH fixture START response decode\n";
         return false;
     }
+    failed_stage = "data open/prepare";
     const auto data = bridge.open_data_session();
     if (!data) {
         std::cerr << "failed ATTACH fixture data open error="
                   << static_cast<unsigned>(data.error()) << "\n";
         return false;
     }
+    const auto other_data = bridge.open_data_session();
+    if (!other_data) return false;
     w::AttachRequest attach;
     attach.epoch = list.epoch;
     attach.lease_id = lease;
@@ -1552,6 +1645,7 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
                   << static_cast<unsigned>(prepared) << "\n";
         return false;
     }
+    if (force_unquiesced) bridge.force_next_terminal_unquiesced_for_test();
     HostAuthorityAttachResult result{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!result.ready && std::chrono::steady_clock::now() < deadline) {
@@ -1568,9 +1662,100 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
                   << " capture_starts=" << backend.capture_starts << "\n";
         return false;
     }
-    (void)bridge.close_data_session(data.value());
+    const Error data_closed = bridge.close_data_session(data.value());
+    if (data_closed != Error::OK && data_closed != Error::RESOURCE_LIMIT) return false;
+    if (force_unquiesced) {
+        failed_stage = "expected nonquiesced rejection";
+        const auto fatal_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (bridge.counts().fatal_unresolved == 0U &&
+               std::chrono::steady_clock::now() < fatal_until) {
+            (void)bridge.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const bool rejected = bridge.counts().fatal_unresolved != 0U &&
+            bridge.forced_terminal_unquiesced_for_test() &&
+            bridge.quiesced_guard_rejected_for_test();
+        if (!rejected)
+            std::cerr << "failed ATTACH nonquiesced guard state fatal="
+                      << bridge.counts().fatal_unresolved << " data="
+                      << bridge.data_counts().free << "/"
+                      << bridge.data_counts().active << "/"
+                      << bridge.data_counts().tombstone << "/"
+                      << bridge.data_counts().fatal_unresolved << " forced="
+                      << bridge.forced_terminal_unquiesced_for_test() << " rejected="
+                      << bridge.quiesced_guard_rejected_for_test() << "\n";
+        bridge.close_session_for_test(control.value());
+        bridge.close_session_for_test(other_control.value());
+        cleanup.complete = static_cast<bool>(created.value()->stop_and_join());
+        return rejected && cleanup.complete;
+    }
+    failed_stage = "data slot free";
+    const auto data_free_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (bridge.data_counts().free != kHostAuthoritySessionCapacity - 1U &&
+           std::chrono::steady_clock::now() < data_free_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    auto counts = bridge.data_counts();
+    if (counts.free != kHostAuthoritySessionCapacity - 1U ||
+        counts.tombstone != 0U || counts.fatal_unresolved != 0U ||
+        bridge.counts().fatal_unresolved != 0U ||
+        !bridge.stream_owned_for_test(control.value(), start_response.value().stream_id)) {
+        std::cerr << "failed ATTACH cleanup did not release data slot final_missing="
+                  << missing_final_when_unattached << " counts=" << counts.free << "/"
+                  << counts.active << "/" << counts.tombstone << "/"
+                  << counts.fatal_unresolved << " authority_fatal="
+                  << bridge.counts().fatal_unresolved << "\n";
+        return false;
+    }
+
+    failed_stage = "slot reuse and other control list";
+    const auto reused = bridge.open_data_session();
+    if (!reused || reused.value().slot != data.value().slot ||
+        reused.value().generation == data.value().generation) return false;
+    w::ListRequest list_request;
+    list_request.epoch = list.epoch;
+    std::array<std::uint8_t, w::kEpochSize> list_payload{};
+    const auto list_size = w::encode_list_request(list_request,
+        {list_payload.data(), list_payload.size()});
+    if (!list_size) return false;
+    context.state = w::ContextState::ready;
+    context.epoch = list.epoch;
+    const auto listed = bridge.accept(other_control.value(),
+        frame(w::kOpcodeList, 2U, {list_payload.data(), list_size.value()}),
+        context, snapshot, 102U);
+    const auto list_header = w::decode_header({listed.frame.data, w::kHeaderSize});
+    if (listed.action != w::InboundAction::respond || !list_header ||
+        list_header.value().kind != w::Kind::response ||
+        list_header.value().opcode != w::kOpcodeList ||
+        bridge.response_sent(other_control.value(), true) != Error::OK ||
+        bridge.counts().fatal_unresolved != 0U) return false;
+    if (bridge.close_data_session(reused.value()) != Error::OK ||
+        bridge.close_data_session(other_data.value()) != Error::OK) return false;
+    const auto all_data_free_until =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (bridge.data_counts().free != kHostAuthoritySessionCapacity &&
+           std::chrono::steady_clock::now() < all_data_free_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    counts = bridge.data_counts();
+    if (counts.free != kHostAuthoritySessionCapacity || counts.tombstone != 0U ||
+        counts.fatal_unresolved != 0U) return false;
+    failed_stage = "fixture owner close";
     bridge.close_session_for_test(control.value());
-    return static_cast<bool>(created.value()->stop_and_join());
+    bridge.close_session_for_test(other_control.value());
+    cleanup.complete = static_cast<bool>(created.value()->stop_and_join());
+    return cleanup.complete;
+}
+
+bool test_failed_attach_prepare_is_reported_to_data_owner()
+{
+    const bool final_available = failed_attach_cleanup_case(false);
+    const bool final_missing = failed_attach_cleanup_case(true);
+    const bool nonquiesced = failed_attach_cleanup_case(true, true);
+    const bool attached_final_missing = test_attached_missing_final_stays_fatal();
+    return final_available && final_missing && nonquiesced && attached_final_missing;
 }
 
 bool test_rejected_start_does_not_record_stream()
@@ -2641,6 +2826,8 @@ int main(int argc, char** argv)
         const std::string_view selected(argv[1]);
         bool passed = false;
         if (selected == "m1") passed = test_cleanup_requires_quiesced_terminal();
+        else if (selected == "failed-attach")
+            passed = test_failed_attach_prepare_is_reported_to_data_owner();
         else if (selected == "m8") passed = test_prepare_attach_rejects_old_generation();
         else if (selected == "b1") passed = test_finish_control_close_waits_for_owned_stream();
         else if (selected == "n4") passed = test_accept_preserves_close_pending_before_poll();

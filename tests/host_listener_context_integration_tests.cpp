@@ -92,12 +92,14 @@ public:
     }
     Result<void> start_capture(std::uint8_t, ipc::System) noexcept override
     {
-        return Result<void>::success();
+        return fail_capture_start ? Result<void>::failure(Error::UNSUPPORTED)
+                                  : Result<void>::success();
     }
     Result<void> stop_capture(std::uint8_t, ipc::System) noexcept override
     {
         return Result<void>::success();
     }
+    bool fail_capture_start = false;
 };
 
 class Nonce final : public TunerNonceSource {
@@ -218,9 +220,11 @@ private:
 
 class Family final : public host_runtime::EnclosureFamily {
 public:
-    explicit Family(std::shared_ptr<std::atomic<bool>> shutdown)
+    explicit Family(std::shared_ptr<std::atomic<bool>> shutdown,
+                    bool fail_capture_start = false)
         : shutdown_(std::move(shutdown))
     {
+        tuner_.fail_capture_start = fail_capture_start;
     }
     Result<void> shutdown() noexcept override
     {
@@ -299,7 +303,7 @@ bool read_frame(w::TimedClientTransport& transport, w::Frame& frame) noexcept
     return true;
 }
 
-bool lifecycle()
+bool lifecycle(bool fail_capture_start = false)
 {
 #if defined(_WIN32)
     const char* runtime_parent = std::getenv("LOCALAPPDATA");
@@ -341,7 +345,7 @@ bool lifecycle()
     }
 #endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
-    std::unique_ptr<Family> family(new Family(shutdown));
+    std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start));
     ContextConfig config;
     config.runtime_directory = path;
     config.product = "listener-test";
@@ -435,13 +439,34 @@ bool lifecycle()
         stage = "ATTACH response";
         w::Frame attached_frame;
         if (!read_frame(*data_transport, attached_frame) ||
-            attached_frame.header.kind != w::Kind::response ||
             attached_frame.header.opcode != w::kOpcodeAttachStream) {
             std::fprintf(stderr, "attach frame kind=%u opcode=%u len=%zu\n",
                 static_cast<unsigned>(attached_frame.header.kind),
                 attached_frame.header.opcode, attached_frame.payload.size);
             break;
         }
+        if (fail_capture_start) {
+            if (attached_frame.header.kind != w::Kind::error_response) break;
+            const auto error = w::decode_error_response(attached_frame.payload);
+            if (!error || error.value().error.code !=
+                    static_cast<std::uint32_t>(Error::UNSUPPORTED)) break;
+            data_transport->close();
+            data_transport.reset();
+            stage = "failed ATTACH other connection isolation";
+            auto other_control = host_runtime::connect_control(
+                control_endpoint, Timeout{5000U});
+            if (!other_control) break;
+            const auto status = w::fetch_status(*other_control.value(), Timeout{5000U});
+            if (!status) break;
+            auto other_data = host_runtime::connect_endpoint(
+                data_endpoint, Timeout{5000U});
+            if (!other_data) break;
+            other_data.value()->close();
+            other_control.value()->close();
+            passed = true;
+            break;
+        }
+        if (attached_frame.header.kind != w::Kind::response) break;
         const auto attached = w::decode_attach_response(attached_frame.payload);
         if (!attached || attached.value().stream_id != recording.session.stream_id) break;
         stage = "TS_DATA";
@@ -479,6 +504,9 @@ bool lifecycle()
         poll_errors.load(std::memory_order_relaxed));
     if (!passed) std::fprintf(stderr, "last poll error=%u\n",
         last_poll_error.load(std::memory_order_relaxed));
+    if (fail_capture_start)
+        return passed && !closed && closed.error() == Error::INTERNAL &&
+            !shutdown->load(std::memory_order_acquire);
     return passed && closed && closed.value() == CloseState::quiesced &&
         shutdown->load(std::memory_order_acquire);
 }
@@ -487,5 +515,5 @@ bool lifecycle()
 
 int main()
 {
-    return lifecycle() ? 0 : 1;
+    return lifecycle() && lifecycle(true) ? 0 : 1;
 }

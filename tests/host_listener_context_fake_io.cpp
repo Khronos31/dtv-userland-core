@@ -37,7 +37,10 @@ struct FakeListenerIoControl::Impl final {
     bool published = false;
     bool block_unpublish = false;
     bool unpublish_entered = false;
+    bool fail_unpublish_after_cleanup = false;
     bool poll_entered = false;
+    std::size_t unpublish_count = 0U;
+    std::size_t namespace_release_count = 0U;
 };
 
 namespace {
@@ -173,17 +176,23 @@ public:
     Error unpublish_pair(ListenerPair) noexcept override
     {
         std::unique_lock<std::mutex> lock(state_.mutex);
+        ++state_.unpublish_count;
         if (state_.block_unpublish) {
             state_.unpublish_entered = true;
             state_.changed.notify_all();
             state_.changed.wait(lock, [this] { return !state_.block_unpublish; });
         }
         state_.published = false;
+        if (state_.fail_unpublish_after_cleanup) {
+            state_.fail_unpublish_after_cleanup = false;
+            return Error::INTERNAL;
+        }
         return Error::OK;
     }
     Error release_namespace() noexcept override
     {
         std::lock_guard<std::mutex> lock(state_.mutex);
+        ++state_.namespace_release_count;
         state_.reserved = false;
         return Error::OK;
     }
@@ -265,6 +274,12 @@ void FakeListenerIoControl::block_unpublish()
     impl_->unpublish_entered = false;
 }
 
+void FakeListenerIoControl::fail_unpublish_after_cleanup()
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    impl_->fail_unpublish_after_cleanup = true;
+}
+
 bool FakeListenerIoControl::wait_unpublish()
 {
     std::unique_lock<std::mutex> lock(impl_->mutex);
@@ -296,6 +311,18 @@ bool FakeListenerIoControl::published() const
 {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->published;
+}
+
+std::size_t FakeListenerIoControl::unpublish_count() const
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->unpublish_count;
+}
+
+std::size_t FakeListenerIoControl::namespace_release_count() const
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->namespace_release_count;
 }
 
 void set_fake_listener_io_control(FakeListenerIoControl* control) noexcept
