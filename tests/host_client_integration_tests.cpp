@@ -217,7 +217,7 @@ struct Listener final {
 #endif
 
     bool bind(const std::string& root, const std::string& instance,
-              const char* endpoint_name)
+              const char* endpoint_name, bool start_listening = true)
     {
         dtv::userland::host_runtime::EndpointConfig config{
             root, "test-product", instance};
@@ -234,7 +234,7 @@ struct Listener final {
         if (path.size() >= sizeof(address.sun_path)) return false;
         std::memcpy(address.sun_path, path.c_str(), path.size() + 1U);
         return ::bind(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
-               ::listen(socket, 8) == 0 &&
+               (!start_listening || ::listen(socket, 8) == 0) &&
                px4::userland::windows_security::set_current_user_owner_and_dacl(
                    path_wide.c_str());
 #else
@@ -245,7 +245,8 @@ struct Listener final {
         if (path.size() >= sizeof(address.sun_path)) return false;
         std::memcpy(address.sun_path, path.c_str(), path.size() + 1U);
         return ::bind(socket, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
-               ::chmod(path.c_str(), 0600) == 0 && ::listen(socket, 8) == 0;
+               ::chmod(path.c_str(), 0600) == 0 &&
+               (!start_listening || ::listen(socket, 8) == 0);
 #endif
     }
 
@@ -917,6 +918,48 @@ bool test_unsupported_candidate_then_live_instance()
            service.saw_stop.load() && service.saw_release.load();
 }
 
+bool test_not_ready_candidate_then_live_instance()
+{
+    RuntimeTree not_ready_root;
+    RuntimeTree live_root;
+    if (!not_ready_root.create() || !not_ready_root.create_instance("not-ready") ||
+        !live_root.create() || !live_root.create_instance("live-after-not-ready"))
+        return false;
+    Listener not_ready_control;
+    Listener control;
+    Listener data;
+    if (!not_ready_control.bind(not_ready_root.root, "not-ready", "control.sock", false) ||
+        !control.bind(live_root.root, "live-after-not-ready", "control.sock") ||
+        !data.bind(live_root.root, "live-after-not-ready", "stream.sock")) return false;
+    const dtv::userland::host_runtime::EndpointConfig not_ready_endpoint{
+        not_ready_root.root, "test-product", "not-ready"};
+    const auto not_ready_probe = dtv::userland::host_runtime::connect_control(
+        not_ready_endpoint, {1000U});
+    if (not_ready_probe || not_ready_probe.error() != Error::NOT_READY) return false;
+    FakeService service("live-after-not-ready");
+    FakeControlServer control_server(control, service, 2U);
+    FakeDataServer data_server(data, service, false);
+    control_server.start();
+    data_server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(not_ready_root.root, roots) || !add_root(live_root.root, roots))
+        return false;
+    const auto args = test_ts_arguments(1U);
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        args, profile, output, clock, signal, roots, nullptr, nullptr);
+    data_server.join();
+    control_server.join();
+    return result && output.bytes.size() == wire::kTsPacketSize &&
+           control_server.good.load() && data_server.good.load() &&
+           service.saw_stop.load() && service.saw_release.load();
+}
+
 bool test_security_refusal_stops_search()
 {
 #if defined(_WIN32)
@@ -977,6 +1020,7 @@ int main()
     const bool eof = run_ts_lifecycle(true);
     const bool oom = test_host_ts_frame_allocation_failure_releases_lease();
     const bool unsupported = test_unsupported_candidate_then_live_instance();
+    const bool not_ready = test_not_ready_candidate_then_live_instance();
     const bool security = test_security_refusal_stops_search();
 #if defined(_WIN32)
     (void)::WSACleanup();
@@ -986,6 +1030,8 @@ int main()
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
     if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
+    if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
+    else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && ts && eof && oom && unsupported && security ? 0 : 1;
+    return ctl && ts && eof && oom && unsupported && not_ready && security ? 0 : 1;
 }

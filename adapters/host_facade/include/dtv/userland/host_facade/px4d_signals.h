@@ -16,8 +16,10 @@ bool cleanup_complete() noexcept;
 [[noreturn]] void exit_after_close_deadline(int status) noexcept;
 #if defined(_WIN32) && defined(DTV_USERLAND_SIGNAL_TESTING)
 bool dispatch_console_control_for_test(std::uint32_t control_type) noexcept;
+bool unregister_signal_handler_for_test() noexcept;
 void fail_next_signal_registration_for_test() noexcept;
 std::uint32_t signal_registration_attempts_for_test() noexcept;
+std::uint32_t successful_signal_registrations_for_test() noexcept;
 #endif
 
 }  // namespace px4::userland::px4d
