@@ -175,8 +175,10 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
             ::EqualSid(ace.data() + actual_sid_offset, everyone) != 0 &&
             ::EqualSid(ace.data() + fixed_sid_offset, user) != 0;
     }
-    (void)::LocalFree(everyone);
-    if (!built) return false;
+    if (!built) {
+        (void)::LocalFree(everyone);
+        return false;
+    }
 
     PACL current = nullptr;
     PSECURITY_DESCRIPTOR descriptor = nullptr;
@@ -209,7 +211,33 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
         DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
         nullptr, nullptr, updated, nullptr) : ERROR_INVALID_ACL;
     (void)::LocalFree(descriptor);
-    return set_result == ERROR_SUCCESS;
+    bool verified_layout = false;
+    PACL installed = nullptr;
+    PSECURITY_DESCRIPTOR installed_descriptor = nullptr;
+    if (set_result == ERROR_SUCCESS && ::GetNamedSecurityInfoW(
+            const_cast<LPWSTR>(path), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
+            nullptr, nullptr, &installed, nullptr, &installed_descriptor) == ERROR_SUCCESS &&
+        installed != nullptr) {
+        for (DWORD index = 0U; index < installed->AceCount; ++index) {
+            void* raw = nullptr;
+            if (::GetAce(installed, index, &raw) == 0 || raw == nullptr) continue;
+            const auto* header = static_cast<ACE_HEADER*>(raw);
+            if (header->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+                header->AceSize < fixed_sid_offset + user_size) continue;
+            const auto* bytes = static_cast<const std::uint8_t*>(raw);
+            const DWORD installed_flags = *reinterpret_cast<const DWORD*>(
+                bytes + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK));
+            if (installed_flags != object_flags ||
+                header->AceSize < actual_sid_offset + everyone_size) continue;
+            verified_layout = ::EqualSid(const_cast<std::uint8_t*>(
+                    bytes + actual_sid_offset), everyone) != 0 &&
+                ::EqualSid(const_cast<std::uint8_t*>(bytes + fixed_sid_offset), user) != 0;
+            if (verified_layout) break;
+        }
+    }
+    if (installed_descriptor != nullptr) (void)::LocalFree(installed_descriptor);
+    (void)::LocalFree(everyone);
+    return set_result == ERROR_SUCCESS && verified_layout;
 }
 
 bool socket_transport_test()
@@ -289,10 +317,13 @@ bool socket_transport_test()
             add_unapproved_allow_ace(wide_path.data(), type, flags) &&
             !dtv::userland::host_runtime::connect_control(config, {1000U});
     }
-    const bool rejected_sid_start_mismatch =
+    const bool installed_sid_start_mismatch =
         px4::userland::windows_security::set_current_user_owner_and_dacl(
             wide_path.data()) &&
-        add_sid_start_mismatch_object_allow(wide_path.data()) &&
+        add_sid_start_mismatch_object_allow(wide_path.data());
+    if (!installed_sid_start_mismatch)
+        std::fputs("windows_sid_start_fixture_layout=FAIL\n", stderr);
+    const bool rejected_sid_start_mismatch = installed_sid_start_mismatch &&
         !dtv::userland::host_runtime::connect_control(config, {1000U});
     if (!rejected_sid_start_mismatch)
         std::fputs("windows_sid_start_everyone_mismatch_rejected=FAIL\n", stderr);
