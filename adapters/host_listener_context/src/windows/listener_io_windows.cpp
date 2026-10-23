@@ -553,6 +553,14 @@ public:
         if (::setsockopt(connections_[index].socket, SOL_SOCKET, SO_SNDBUF,
                 reinterpret_cast<const char*>(&bytes), sizeof(bytes)) != 0)
             return socket_error(::WSAGetLastError());
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        int effective_bytes = 0;
+        int option_size = sizeof(effective_bytes);
+        const int option_status = ::getsockopt(connections_[index].socket, SOL_SOCKET, SO_SNDBUF,
+            reinterpret_cast<char*>(&effective_bytes), &option_size);
+        std::fprintf(stderr, "Windows fixture SO_SNDBUF requested=%d status=%d effective=%d error=%d\n",
+            bytes, option_status, effective_bytes, option_status == 0 ? 0 : ::WSAGetLastError());
+#endif
         return Error::OK;
     }
 #endif
