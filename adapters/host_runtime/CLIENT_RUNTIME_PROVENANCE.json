@@ -3,8 +3,8 @@
   "base_core": "bdb062f71183b76f9920ca343ba4a30e5545fb9d",
   "adapted_sources": [
     {
-      "repository": "Khronos31/px4-userland",
-      "revision": "90b08dfe79b0b40e393f015975c761863830866a",
+      "repository": "Khronos31/siano-userland",
+      "revision": "1a35d6b8bb4d2a72b2084658029cb1a825a9a683",
       "paths": [
         "sianod.cpp",
         "sianoctl.cpp",
@@ -13,6 +13,19 @@
         "siano-runtime-backend.h"
       ],
       "purpose": "Siano consumer symbol and header closure audit"
+    },
+    {
+      "repository": "Khronos31/px4-userland",
+      "revision": "90b08dfe79b0b40e393f015975c761863830866a",
+      "paths": [
+        "userland/tools/px4d.cpp",
+        "userland/tools/px4d_signals.h",
+        "userland/include/px4/posix_tuner_nonce.h",
+        "userland/include/px4/windows_tuner_nonce.h",
+        "userland/tests/px4d_signal_tests.cpp",
+        "userland/tests/posix_tuner_nonce_tests.cpp"
+      ],
+      "purpose": "PX4 signal and nonce consumer/API references"
     },
     {
       "repository": "Khronos31/dtv-userland-core",
