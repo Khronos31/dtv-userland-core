@@ -227,16 +227,26 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
             const auto* bytes = static_cast<const std::uint8_t*>(raw);
             const DWORD installed_flags = *reinterpret_cast<const DWORD*>(
                 bytes + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK));
-            if (installed_flags != object_flags ||
-                header->AceSize < actual_sid_offset + everyone_size) continue;
-            verified_layout = ::EqualSid(const_cast<std::uint8_t*>(
-                    bytes + actual_sid_offset), everyone) != 0 &&
-                ::EqualSid(const_cast<std::uint8_t*>(bytes + fixed_sid_offset), user) != 0;
+            if (header->AceSize < actual_sid_offset + everyone_size ||
+                header->AceSize < fixed_sid_offset + user_size) continue;
+            const bool actual_sid_is_everyone = ::EqualSid(const_cast<std::uint8_t*>(
+                bytes + actual_sid_offset), everyone) != 0;
+            const bool fixed_sid_is_user = ::EqualSid(const_cast<std::uint8_t*>(
+                bytes + fixed_sid_offset), user) != 0;
+            std::printf("windows_sid_start_fixture_readback size=%u flags=%lu actual_everyone=%u fixed_user=%u\n",
+                static_cast<unsigned>(header->AceSize),
+                static_cast<unsigned long>(installed_flags),
+                actual_sid_is_everyone ? 1U : 0U,
+                fixed_sid_is_user ? 1U : 0U);
+            verified_layout = installed_flags == object_flags &&
+                actual_sid_is_everyone && fixed_sid_is_user;
             if (verified_layout) break;
         }
     }
     if (installed_descriptor != nullptr) (void)::LocalFree(installed_descriptor);
     (void)::LocalFree(everyone);
+    if (!verified_layout)
+        std::fputs("windows_sid_start_fixture_readback=NO_MATCH\n", stderr);
     return set_result == ERROR_SUCCESS && verified_layout;
 }
 
