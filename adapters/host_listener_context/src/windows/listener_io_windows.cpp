@@ -348,23 +348,56 @@ public:
     Error publish_pair(ListenerPair& pair) noexcept override
     {
         if (!reserved_ || published_) return Error::NOT_READY;
-        if (!remove_stale(control_wide_))
+        if (!remove_stale(control_wide_)) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=remove-control path=%ls winsock=%d\n",
+                control_wide_.c_str(), ::WSAGetLastError());
+#endif
             return socket_error(::WSAGetLastError());
+        }
         control_listener_ = create_listener(control_wide_, control_identity_);
-        if (control_listener_ == INVALID_SOCKET) return socket_error(::WSAGetLastError());
+        if (control_listener_ == INVALID_SOCKET) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=create-control path=%ls winsock=%d\n",
+                control_wide_.c_str(), error);
+#endif
+            return socket_error(error);
+        }
         if (!remove_stale(data_wide_)) {
             const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=remove-data path=%ls winsock=%d\n",
+                data_wide_.c_str(), error);
+#endif
             rollback_listeners();
             return socket_error(error);
         }
         data_listener_ = create_listener(data_wide_, data_identity_);
         if (data_listener_ == INVALID_SOCKET) {
             const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=create-data path=%ls winsock=%d\n",
+                data_wide_.c_str(), error);
+#endif
             rollback_listeners();
             return socket_error(error);
         }
-        if (::listen(control_listener_, SOMAXCONN) != 0 || ::listen(data_listener_, SOMAXCONN) != 0) {
+        if (::listen(control_listener_, SOMAXCONN) != 0) {
             const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=listen-control path=%ls winsock=%d\n",
+                control_wide_.c_str(), error);
+#endif
+            rollback_listeners();
+            return socket_error(error);
+        }
+        if (::listen(data_listener_, SOMAXCONN) != 0) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows publish stage=listen-data path=%ls winsock=%d\n",
+                data_wide_.c_str(), error);
+#endif
             rollback_listeners();
             return socket_error(error);
         }
@@ -638,19 +671,71 @@ private:
     {
         SOCKADDR_UN address{}; address.sun_family = AF_UNIX;
         if (!wide_to_utf8(path, address.sun_path, sizeof(address.sun_path))) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=encode-path path=%ls\n", path.c_str());
+#endif
             ::WSASetLastError(WSAEINVAL); return INVALID_SOCKET;
         }
         const SOCKET listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
-        if (listener == INVALID_SOCKET) return INVALID_SOCKET;
-        if (!clear_socket_inherit(listener) || !set_nonblocking(listener) ||
-            ::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+        if (listener == INVALID_SOCKET) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=socket path=%ls winsock=%d\n",
+                path.c_str(), ::WSAGetLastError());
+#endif
+            return INVALID_SOCKET;
+        }
+        if (!clear_socket_inherit(listener)) {
             const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=inherit path=%ls win32=%lu\n",
+                path.c_str(), static_cast<unsigned long>(::GetLastError()));
+#endif
             (void)::closesocket(listener); ::WSASetLastError(error); return INVALID_SOCKET;
         }
-        if (!file_identity(path.c_str(), identity) ||
-            !apply_current_user_security(path.c_str()) ||
-            !verify_current_user_security(path.c_str())) {
+        if (!set_nonblocking(listener)) {
             const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=nonblocking path=%ls winsock=%d\n",
+                path.c_str(), error);
+#endif
+            (void)::closesocket(listener); ::WSASetLastError(error); return INVALID_SOCKET;
+        }
+        if (::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) != 0) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=bind path=%ls winsock=%d\n",
+                path.c_str(), error);
+#endif
+            (void)::closesocket(listener); ::WSASetLastError(error); return INVALID_SOCKET;
+        }
+        if (!file_identity(path.c_str(), identity)) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=identity path=%ls win32=%lu\n",
+                path.c_str(), static_cast<unsigned long>(::GetLastError()));
+#endif
+            (void)::closesocket(listener);
+            (void)delete_if_identity(path.c_str(), identity);
+            identity = {}; ::WSASetLastError(error == 0 ? WSAEACCES : error);
+            return INVALID_SOCKET;
+        }
+        if (!apply_current_user_security(path.c_str())) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=apply-security path=%ls win32=%lu\n",
+                path.c_str(), static_cast<unsigned long>(::GetLastError()));
+#endif
+            (void)::closesocket(listener);
+            (void)delete_if_identity(path.c_str(), identity);
+            identity = {}; ::WSASetLastError(error == 0 ? WSAEACCES : error);
+            return INVALID_SOCKET;
+        }
+        if (!verify_current_user_security(path.c_str())) {
+            const int error = ::WSAGetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows listener stage=verify-security path=%ls win32=%lu\n",
+                path.c_str(), static_cast<unsigned long>(::GetLastError()));
+#endif
             (void)::closesocket(listener);
             (void)delete_if_identity(path.c_str(), identity);
             identity = {}; ::WSASetLastError(error == 0 ? WSAEACCES : error);
