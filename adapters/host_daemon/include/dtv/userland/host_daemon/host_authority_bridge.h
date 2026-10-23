@@ -139,6 +139,43 @@ public:
         return slots_ && slot < kHostAuthoritySessionCapacity && slots_[slot].session &&
                slots_[slot].session->connected();
     }
+    bool close_pending_for_test(std::uint8_t slot) const noexcept
+    {
+        return slots_ && slot < kHostAuthoritySessionCapacity &&
+               slots_[slot].close_pending;
+    }
+    bool close_pending_before_accept_for_test() const noexcept
+    {
+        return close_pending_before_accept_;
+    }
+    bool accept_preserved_close_pending_for_test() const noexcept
+    {
+        return accept_preserved_close_pending_;
+    }
+    bool retained_disconnect_for_test(std::uint8_t slot,
+                                      std::uint64_t client) const noexcept
+    {
+        if (!slots_ || slot >= kHostAuthoritySessionCapacity) return false;
+        const Slot& value = slots_[slot];
+        return value.cleanup_pending &&
+               value.cleanup.kind == dtv::userland::detail::AuthorityJobKind::disconnect &&
+               value.cleanup.key.client_id == client && value.cleanup.client_id == client;
+    }
+    void force_next_terminal_unquiesced_for_test() noexcept
+    {
+        force_next_terminal_unquiesced_ = true;
+    }
+    bool terminal_observed_for_test() const noexcept { return terminal_observed_; }
+    bool terminal_quiesced_for_test() const noexcept { return terminal_quiesced_; }
+    bool forced_terminal_unquiesced_for_test() const noexcept
+    {
+        return forced_terminal_unquiesced_;
+    }
+    bool quiesced_guard_rejected_for_test() const noexcept
+    {
+        return quiesced_guard_rejected_;
+    }
+    void close_session_for_test(std::uint8_t slot) noexcept;
 #endif
 
     bool submit(const dtv::userland::detail::AuthorityJob& job) noexcept override;
@@ -224,6 +261,15 @@ private:
     bool fatal_ = false;
     bool stop_requested_ = false;
     bool stopped_ = false;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+    bool force_next_terminal_unquiesced_ = false;
+    bool terminal_observed_ = false;
+    bool terminal_quiesced_ = false;
+    bool forced_terminal_unquiesced_ = false;
+    bool quiesced_guard_rejected_ = false;
+    bool close_pending_before_accept_ = false;
+    bool accept_preserved_close_pending_ = false;
+#endif
     IngressStop stop_other_ingress_ = nullptr;
     void* stop_other_ingress_context_ = nullptr;
     IngressStop stop_control_ingress_ = nullptr;

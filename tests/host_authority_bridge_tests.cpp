@@ -6,6 +6,7 @@
 #include <iostream>
 #include <condition_variable>
 #include <mutex>
+#include <string_view>
 #include <thread>
 
 namespace {
@@ -489,6 +490,244 @@ bool wait_free(HostAuthorityBridge& bridge, std::uint8_t slot)
               << counts.tombstone << "/" << counts.fatal_unresolved
               << " id=" << bridge.client_id(slot) << "\n";
     return false;
+}
+
+struct ActiveStreamFixture final {
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    Stream stream;
+    TunerService tuner{backend, nonce, time, nullptr, nullptr, &stream};
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card{card_backend, card_session};
+    std::unique_ptr<ControlWorkerLanes> workers{};
+    std::unique_ptr<HostAuthorityBridge> bridge{};
+    w::ListResponse list{make_list()};
+    std::uint8_t control = 0U;
+    std::uint64_t lease = 0U;
+    std::uint64_t stream_id = 0U;
+    dtv::userland::detail::ReceiverToken attach_token{};
+
+    bool start(const ControlWorkerStartupOptions* options = nullptr)
+    {
+        if (!tuner.configure_strict_capabilities() ||
+            !tuner.configure_stream_contract(
+                dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL))
+            return false;
+        auto created = options == nullptr
+            ? ControlWorkerLanes::create(card, tuner)
+            : ControlWorkerLanes::create_for_test(card, tuner, *options);
+        if (!created) return false;
+        workers = std::move(created.value());
+        const w::ServerHello server{list.epoch, list.producer, 0U};
+        bridge = std::make_unique<HostAuthorityBridge>(tuner, *workers, server, list);
+        if (bridge->configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+            return false;
+        const auto opened = bridge->open_session();
+        if (!opened || !hello(*bridge, opened.value())) return false;
+        control = opened.value();
+        if (!acquire(*bridge, control, 2U, lease) ||
+            !tune(*bridge, control, list.epoch, lease)) return false;
+        const auto status = tuner.engine_status();
+        if (!status) return false;
+        const auto started = bridge->start_stream(control, lease,
+            status.value().tune_metadata[2U].current_revision, 100U, 5000U);
+        if (!started) return false;
+        stream_id = started.value().stream_id;
+        attach_token = started.value().token;
+        return stream_id != 0U;
+    }
+
+    bool attach(HostAuthorityDataConnection data)
+    {
+        w::AttachRequest request;
+        request.epoch = list.epoch;
+        request.lease_id = lease;
+        request.stream_id = stream_id;
+        request.attach_token = attach_token;
+        if (bridge->prepare_data_attach(data, control, request, 101U) != Error::OK)
+            return false;
+        HostAuthorityAttachResult result{};
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!result.ready && std::chrono::steady_clock::now() < until) {
+            (void)bridge->poll();
+            result = bridge->take_data_attach_result(data);
+            if (!result.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        return result.ready && result.error == Error::OK &&
+               bridge->data_attach_response_sent(data, true) == Error::OK;
+    }
+};
+
+bool test_cleanup_requires_quiesced_terminal()
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start()) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) return false;
+    fixture.bridge->force_next_terminal_unquiesced_for_test();
+    const Error closed = fixture.bridge->close_data_session(data.value());
+    if (closed != Error::OK && closed != Error::RESOURCE_LIMIT) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fixture.bridge->counts().fatal_unresolved == 0U &&
+           std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto counts = fixture.bridge->data_counts();
+    const bool passed = fixture.bridge->terminal_observed_for_test() &&
+        fixture.bridge->forced_terminal_unquiesced_for_test() &&
+        fixture.bridge->quiesced_guard_rejected_for_test() &&
+        fixture.bridge->counts().fatal_unresolved == 1U;
+    if (!passed) {
+        std::cerr << "M1 unexpected state fatal=" << fixture.bridge->counts().fatal_unresolved
+                  << " data=" << counts.fatal_unresolved << "/" << counts.free
+                  << " final-released=" << fixture.stream.final_released
+                  << " terminal=" << fixture.bridge->terminal_observed_for_test()
+                  << "/" << fixture.bridge->terminal_quiesced_for_test()
+                  << " rejected=" << fixture.bridge->quiesced_guard_rejected_for_test()
+                  << "\n";
+    }
+    fixture.bridge->close_session_for_test(fixture.control);
+    return passed;
+}
+
+bool test_prepare_attach_rejects_old_generation()
+{
+    ControlWorkerStartupOptions options;
+    options.fail_tuner_attach_submit = true;
+    ActiveStreamFixture fixture;
+    if (!fixture.start(&options)) return false;
+    const auto old = fixture.bridge->open_data_session();
+    if (!old || fixture.bridge->close_data_session(old.value()) != Error::OK) return false;
+    const auto current = fixture.bridge->open_data_session();
+    if (!current || current.value().slot != old.value().slot ||
+        current.value().generation == old.value().generation) return false;
+    w::AttachRequest request;
+    request.epoch = fixture.list.epoch;
+    request.lease_id = fixture.lease;
+    request.stream_id = fixture.stream_id;
+    request.attach_token = fixture.attach_token;
+    const Error result = fixture.bridge->prepare_data_attach(
+        old.value(), fixture.control, request, 101U);
+    const bool rejected = result == Error::NOT_FOUND &&
+        fixture.bridge->data_counts().active == 1U &&
+        fixture.bridge->data_counts().tombstone == 0U;
+    if (!rejected)
+        std::cerr << "M8 stale generation was not rejected before attach reservation\n";
+    const Error data_closed = fixture.bridge->close_data_session(current.value());
+    const Error control_closed = fixture.bridge->close_session(fixture.control);
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fixture.bridge->data_counts().free != kHostAuthoritySessionCapacity &&
+           std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool freed = wait_free(*fixture.bridge, fixture.control);
+    return rejected &&
+        (data_closed == Error::OK || data_closed == Error::RESOURCE_LIMIT) &&
+        control_closed == Error::OK && freed;
+}
+
+bool test_finish_control_close_waits_for_owned_stream()
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start()) { std::cerr << "B1 setup\n"; return false; }
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) { std::cerr << "B1 attach\n"; return false; }
+    if (fixture.bridge->close_session(fixture.control) != Error::OK) { std::cerr << "B1 close call\n"; return false; }
+    if (!fixture.bridge->session_connected_for_test(fixture.control) ||
+        !fixture.bridge->close_pending_for_test(fixture.control) ||
+        fixture.bridge->data_counts().tombstone != 1U) {
+        std::cerr << "B1 close disconnected before owned stream cleanup advanced\n";
+        return false;
+    }
+    const bool freed = wait_free(*fixture.bridge, fixture.control);
+    if (!freed || fixture.bridge->begin_shutdown() != Error::OK) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() && std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return fixture.bridge->stopped() &&
+           fixture.bridge->shutdown_result() == Error::OK;
+}
+
+bool test_accept_preserves_close_pending_before_poll()
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start()) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) return false;
+    w::Context context;
+    w::Snapshot snapshot;
+    auto bad_frame = frame(w::kOpcodeList, 11U, {});
+    bad_frame.header.kind = w::Kind::response;
+    const auto reply = fixture.bridge->accept(fixture.control, bad_frame,
+                                               context, snapshot, 0U);
+    if (reply.action != w::InboundAction::close ||
+        !fixture.bridge->close_pending_before_accept_for_test() ||
+        !fixture.bridge->accept_preserved_close_pending_for_test() ||
+        !fixture.bridge->close_pending_for_test(fixture.control) ||
+        fixture.bridge->data_counts().tombstone != 1U) {
+        std::cerr << "N4 accept state action=" << static_cast<unsigned>(reply.action)
+                  << " pending=" << fixture.bridge->close_pending_for_test(fixture.control)
+                  << " connected="
+                  << fixture.bridge->session_connected_for_test(fixture.control) << "\n";
+        return false;
+    }
+    const Error data_closed = fixture.bridge->close_data_session(data.value());
+    if (data_closed != Error::OK && data_closed != Error::RESOURCE_LIMIT &&
+        data_closed != Error::NOT_FOUND) return false;
+    const bool freed = wait_free(*fixture.bridge, fixture.control);
+    fixture.bridge->close_session_for_test(fixture.control);
+    return freed;
+}
+
+bool test_response_sent_retains_rejected_hello_disconnect()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    ControlWorkerStartupOptions options;
+    options.reject_next_authority_cleanup_submit = true;
+    auto created = ControlWorkerLanes::create_for_test(card, tuner, options);
+    if (!created) return false;
+    const auto list = make_list();
+    const w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto slot = bridge.open_session();
+    if (!slot) return false;
+    std::array<std::uint8_t, w::kHelloRequestSize> payload{};
+    const auto size = w::encode_hello_request(
+        {{1U, 0U}, {1U, 0U}, w::kFeatureCardService, 0U},
+        {payload.data(), payload.size()});
+    w::Context context;
+    w::Snapshot snapshot;
+    const auto reply = bridge.accept(slot.value(), frame(w::kOpcodeHello, 1U,
+        {payload.data(), size.value()}), context, snapshot, 0U);
+    const auto client = bridge.client_id(slot.value());
+    if (!size || reply.action != w::InboundAction::respond ||
+        !reply.close_after_reply ||
+        bridge.response_sent(slot.value(), true) != Error::RESOURCE_LIMIT ||
+        !bridge.retained_disconnect_for_test(slot.value(), client) ||
+        bridge.session_connected_for_test(slot.value())) {
+        std::cerr << "N5 rejected HELLO DISCONNECT value was not retained\n";
+        return false;
+    }
+    if (!wait_free(bridge, slot.value())) return false;
+    if (bridge.begin_shutdown() != Error::OK) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
 bool test_disconnect_direct_observation()
@@ -1986,8 +2225,28 @@ bool test_fatal_late_acquire_is_not_finalized_early()
 
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
+    if (argc == 2) {
+        const std::string_view selected(argv[1]);
+        bool passed = false;
+        if (selected == "m1") passed = test_cleanup_requires_quiesced_terminal();
+        else if (selected == "m8") passed = test_prepare_attach_rejects_old_generation();
+        else if (selected == "b1") passed = test_finish_control_close_waits_for_owned_stream();
+        else if (selected == "n4") passed = test_accept_preserves_close_pending_before_poll();
+        else if (selected == "n5") passed = test_response_sent_retains_rejected_hello_disconnect();
+        else return 2;
+        if (!passed) return 1;
+        return 0;
+    }
+    if (!test_cleanup_requires_quiesced_terminal() ||
+        !test_prepare_attach_rejects_old_generation() ||
+        !test_finish_control_close_waits_for_owned_stream() ||
+        !test_accept_preserves_close_pending_before_poll() ||
+        !test_response_sent_retains_rejected_hello_disconnect()) {
+        std::cerr << "stream guard direct-observation fixture failed\n";
+        return 1;
+    }
     if (!test_disconnect_direct_observation()) {
         std::cerr << "disconnect direct observation fixture failed\n";
         return 1;

@@ -683,6 +683,8 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(host_authority_bridge_tests PRIVATE dtv::host_authority_bridge)
         target_compile_definitions(host_authority_bridge_tests PRIVATE
             PX4_CONTROL_WORKERS_TEST_ACCESS=1 PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS=1)
+        target_compile_definitions(dtv_userland_host_authority_bridge PRIVATE
+            PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS=1)
         add_test(NAME host_authority_bridge_tests COMMAND host_authority_bridge_tests)
         set_tests_properties(host_authority_bridge_tests PROPERTIES TIMEOUT 120)
     endif()

@@ -28,6 +28,21 @@ HostAuthorityBridge::HostAuthorityBridge(
 {
 }
 
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+void HostAuthorityBridge::close_session_for_test(std::uint8_t index) noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return;
+    Slot& slot = slots_[index];
+    if (!slot.session) return;
+    const AuthorityJob cleanup = authority_owner_.authority().close(*slot.session);
+    if (cleanup.kind == AuthorityJobKind::disconnect) {
+        (void)authority_owner_.authority().cleanup_submitted(cleanup, false);
+        (void)authority_owner_.authority().complete(cleanup.key, Error::OK);
+    }
+    slot.session.reset();
+}
+#endif
+
 Result<std::uint8_t> HostAuthorityBridge::open_session() noexcept
 {
     if (workers_.error() != Error::OK) enter_fatal();
@@ -78,8 +93,16 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     }
     if (reply.action == dtv::userland::wire::InboundAction::close) {
         slot.state = SlotState::tombstone;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+        close_pending_before_accept_ = slot.close_pending;
+        accept_preserved_close_pending_ = false;
+#endif
         slot.close_pending = slot.close_pending || (reply.cleanup_required &&
             reply.cleanup.kind == AuthorityJobKind::disconnect);
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+        accept_preserved_close_pending_ = close_pending_before_accept_ &&
+                                         slot.close_pending;
+#endif
         if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
         if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
         if (slot.close_pending) close_owned_streams(index);
@@ -611,7 +634,22 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 if (final) {
                     const auto terminal = tuner_service_.authority_stream_last_terminal_v1(
                         data.ticket.client_id, data.lease_id);
-                    if (!terminal || !terminal.value().quiesced) {
+                    bool quiesced = terminal && terminal.value().quiesced;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+                    terminal_observed_ = static_cast<bool>(terminal);
+                    terminal_quiesced_ = quiesced;
+                    if (force_next_terminal_unquiesced_ && terminal) {
+                        quiesced = false;
+                        force_next_terminal_unquiesced_ = false;
+                        forced_terminal_unquiesced_ = true;
+                    }
+                    terminal_quiesced_ = quiesced;
+#endif
+                    if (!terminal || !quiesced) {
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+                        if (terminal && !quiesced)
+                            quiesced_guard_rejected_ = true;
+#endif
                         data.state = DataSlotState::fatal_unresolved;
                         enter_fatal();
                         return;
