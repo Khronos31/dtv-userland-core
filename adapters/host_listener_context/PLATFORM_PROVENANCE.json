@@ -1,0 +1,27 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/dtv-userland-core",
+  "base_commit": "7c4880faf8828fd22dc50c88b2b4e23b97d4244b",
+  "listener_io_interest_commit": "c6aaca6ae59b4c4f9cc992984d46095dbbb5a3a1",
+  "listener_io_contract_sha256": "e670bbaad670bcb960992984d46095dbbb5a3a5e444b2372d45b224c0c114c85",
+  "platform_sources": [
+    "adapters/host_listener_context/src/posix/listener_io_posix.cpp",
+    "adapters/host_listener_context/src/windows/listener_io_windows.cpp"
+  ],
+  "platform_fixtures": [
+    "tests/host_listener_context_platform/posix_tests.cpp",
+    "tests/host_listener_context_platform/windows_tests.cpp"
+  ],
+  "adapted_references": [
+    {
+      "path": "adapters/host_runtime/src/control_socket.cpp",
+      "purpose": "Endpoint path contract and existing POSIX/Windows transport error and security behavior"
+    },
+    {
+      "path": "adapters/host_runtime/include/windows/windows_security.h",
+      "purpose": "Current-user protected Windows runtime directory and object DACL construction"
+    }
+  ],
+  "scope": "Synchronous nonblocking POSIX poll/AF_UNIX and Windows WSAPoll/AF_UNIX listener I/O, paired endpoint lease/publish/rollback, native-handle lifetime, current-owner security and device-free OS fixtures. No listener protocol state machine, USB access, product dispatch or Engine ownership."
+}
