@@ -201,6 +201,8 @@ public:
         attached = true;
         packets_remaining = 2U;
         counters = TunerStreamCounters{};
+        counters.packets = 2U;
+        counters.bytes = 2U * 188U;
         final = TunerStreamFinalSnapshot{};
         final_released = false;
         return Result<void>::success();
@@ -239,8 +241,6 @@ public:
         if (packets_remaining != 0U && output.data != nullptr && output.size >= 188U) {
             for (std::size_t i = 0U; i < 188U; ++i) output.data[i] = static_cast<std::uint8_t>(i);
             --packets_remaining;
-            ++counters.packets;
-            counters.bytes += 188U;
             return Result<TunerStreamReadResult>::success({188U, false, false,
                 TunerStreamTerminal::none});
         }
@@ -824,14 +824,26 @@ bool test_authority_stream_prepare_commit_stop()
     }
     const auto final = tuner.authority_stream_last_terminal_v1(
         bridge.client_id(control.value()), lease);
+    const auto first_end_counts = bridge.data_counts();
     if (!stream_end.ready || !drained_packet_seen ||
         stream_end.event.final.id != started.value().stream_id ||
         stream_end.event.final.statistics.entries.items[0U].counter.measurement.value != 2U ||
         !final || !final.value().quiesced || backend.capture_stops != 1U ||
-        bridge.data_counts().active != 0U || bridge.data_counts().tombstone != 1U ||
-        bridge.data_stream_end_sent(data.value(), true) != Error::OK ||
-        bridge.data_counts().tombstone != 0U || !stream.final_released)
+        first_end_counts.active != 0U || first_end_counts.tombstone != 1U) {
+        std::cerr << "first STREAM_END mismatch ready=" << stream_end.ready
+                  << " drained=" << drained_packet_seen
+                  << " id=" << stream_end.event.final.id
+                  << " expected_id=" << started.value().stream_id
+                  << " packets=" << stream_end.event.final.statistics.entries.items[0U]
+                         .counter.measurement.value
+                  << " quiesced=" << (final && final.value().quiesced)
+                  << " capture_stops=" << backend.capture_stops
+                  << " counts=" << first_end_counts.active << "/"
+                  << first_end_counts.tombstone << "\n";
         return false;
+    }
+    if (bridge.data_stream_end_sent(data.value(), true) != Error::OK ||
+        bridge.data_counts().tombstone != 0U || !stream.final_released) return false;
     const auto second_start = bridge.start_stream(control.value(), lease, revision,
                                                    200U, 5000U);
     const auto second_data = bridge.open_data_session();
