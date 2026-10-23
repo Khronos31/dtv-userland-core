@@ -255,8 +255,23 @@ bool test_pair_io_and_dacl() noexcept
                endpoint_dacl_is_current_user_only(data_path.c_str()),
                "protected current-user endpoint DACL readback")) return false;
 
-    const SOCKET peer = connect_peer(control_path);
-    if (!check(peer != INVALID_SOCKET, "connect Windows control peer")) return false;
+    const SOCKET peer = ::socket(AF_UNIX, SOCK_STREAM, 0);
+    int receive_buffer = 4096;
+    if (!check(peer != INVALID_SOCKET &&
+               ::setsockopt(peer, SOL_SOCKET, SO_RCVBUF,
+                   reinterpret_cast<const char*>(&receive_buffer), sizeof(receive_buffer)) == 0,
+               "limit Windows peer receive buffer")) return false;
+    SOCKADDR_UN peer_address{};
+    peer_address.sun_family = AF_UNIX;
+    if (!check(::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            control_path.c_str(), -1, peer_address.sun_path,
+            static_cast<int>(sizeof(peer_address.sun_path)), nullptr, nullptr) > 0 &&
+               ::connect(peer, reinterpret_cast<const sockaddr*>(&peer_address),
+                   sizeof(peer_address)) == 0,
+               "connect Windows control peer")) {
+        (void)::closesocket(peer);
+        return false;
+    }
     std::array<ReadyEvent, kListenerIoEventCapacity> events{};
     std::size_t count = 0U;
     if (!check(io->poll(::px4::userland::ipc::posix::kInvalidWakeHandle, Timeout{1000U},
@@ -286,11 +301,14 @@ bool test_pair_io_and_dacl() noexcept
     read = io->read_some(accepted.connection, MutableByteView{input.data(), input.size()});
     if (!check(read.status == IoStatus::progress && read.transferred == 1U && input[0] == 'x',
                "read Windows fragment")) return false;
-    int receive_buffer = 4096;
-    (void)::setsockopt(peer, SOL_SOCKET, SO_RCVBUF,
-        reinterpret_cast<const char*>(&receive_buffer), sizeof(receive_buffer));
     std::vector<std::uint8_t> large(8U * 1024U * 1024U, 0x5aU);
     const IoResult written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
+    if (written.status != IoStatus::progress || written.transferred == 0U ||
+        written.transferred >= large.size()) {
+        std::fprintf(stderr, "Windows write status=%u transferred=%zu error=%u\n",
+            static_cast<unsigned>(written.status), written.transferred,
+            static_cast<unsigned>(written.error));
+    }
     if (!check(written.status == IoStatus::progress && written.transferred > 0U &&
                written.transferred < large.size(), "partial Windows write")) return false;
     (void)::shutdown(peer, SD_SEND);
