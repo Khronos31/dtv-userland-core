@@ -524,6 +524,50 @@ bool test_capacity_and_send_failure()
     return true;
 }
 
+bool test_duplicate_completion_is_ignored()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    ControlWorkerStartupOptions options;
+    options.duplicate_next_authority_completion = true;
+    auto created = ControlWorkerLanes::create_for_test(card, tuner, options);
+    if (!created) return false;
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto slot = bridge.open_session();
+    if (!slot || !hello(bridge, slot.value())) return false;
+    std::uint64_t lease = 0U;
+    if (!acquire(bridge, slot.value(), 2U, lease)) return false;
+    const auto reply = bridge.take_response(slot.value());
+    if (reply.action != w::InboundAction::close || reply.frame.size != 0U) {
+        std::cerr << "duplicate completion generated an extra response\n";
+        return false;
+    }
+    const auto status = tuner.engine_status();
+    if (!status || !status.value().leased[2U] || bridge.counts().active != 1U ||
+        bridge.counts().fatal_unresolved != 0U) {
+        std::cerr << "duplicate completion changed lease/owner state\n";
+        return false;
+    }
+    if (bridge.close_session(slot.value()) != Error::OK ||
+        !wait_free(bridge, slot.value())) return false;
+    const auto released = tuner.engine_status();
+    if (!released || released.value().leased[2U]) return false;
+    if (bridge.begin_shutdown() != Error::OK) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return bridge.stopped() && bridge.shutdown_result() == Error::OK;
+}
+
 bool test_release_uses_worker_and_clears_engine_lease()
 {
     Backend backend;
@@ -861,6 +905,10 @@ int main()
     }
     if (!test_capacity_and_send_failure()) {
         std::cerr << "capacity/send failure fixture failed\n";
+        return 1;
+    }
+    if (!test_duplicate_completion_is_ignored()) {
+        std::cerr << "duplicate completion fixture failed\n";
         return 1;
     }
     if (!test_release_uses_worker_and_clears_engine_lease()) {

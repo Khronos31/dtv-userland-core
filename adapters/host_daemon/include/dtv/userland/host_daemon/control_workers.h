@@ -40,6 +40,7 @@ struct ControlWorkerStartupOptions final {
     // pthread error.
     bool fail_tune_signal = false;
     int fatal_after_authority_lane = -1;
+    bool duplicate_next_authority_completion = false;
     bool mismatch_next_authority_acquire_receiver = false;
     bool reject_next_authority_cleanup_submit = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;

@@ -662,6 +662,10 @@ struct ControlWorkerLanes::Impl final {
                 (void)push_completion(completion);
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
                 if (task.operation == ControlWorkerOperation::tuner_authority_job &&
+                    owner.duplicate_next_authority_completion.exchange(false)) {
+                    (void)push_completion(completion);
+                }
+                if (task.operation == ControlWorkerOperation::tuner_authority_job &&
                     owner.fatal_after_authority_lane.load() == static_cast<int>(lane)) {
                     owner.worker_error.store(Error::INTERNAL);
                     owner.fatal_after_authority_lane.store(-1);
@@ -876,6 +880,7 @@ struct ControlWorkerLanes::Impl final {
     bool fail_tuner_attach_submit = false;
     bool fail_tune_signal = false;
     std::atomic<int> fatal_after_authority_lane{-1};
+    std::atomic<bool> duplicate_next_authority_completion{false};
     std::atomic<bool> mismatch_next_authority_acquire_receiver{false};
     std::atomic<bool> reject_next_authority_cleanup_submit{false};
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
@@ -894,6 +899,8 @@ struct ControlWorkerLanes::Impl final {
             fail_tuner_attach_submit = options->fail_tuner_attach_submit;
             fail_tune_signal = options->fail_tune_signal;
             fatal_after_authority_lane.store(options->fatal_after_authority_lane);
+            duplicate_next_authority_completion.store(
+                options->duplicate_next_authority_completion);
             mismatch_next_authority_acquire_receiver.store(
                 options->mismatch_next_authority_acquire_receiver);
             reject_next_authority_cleanup_submit.store(
