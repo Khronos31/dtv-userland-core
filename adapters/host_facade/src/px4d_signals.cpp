@@ -20,6 +20,20 @@ std::atomic<bool> stop_requested_flag{false};
 std::atomic<bool> cleanup_complete_flag{false};
 HANDLE cleanup_event = nullptr;
 constexpr DWORD kTerminationGraceMilliseconds = 5000U;
+#if defined(DTV_USERLAND_SIGNAL_TESTING)
+std::atomic<bool> fail_next_registration_for_test{false};
+std::atomic<std::uint32_t> registration_attempts_for_test{0U};
+#endif
+
+BOOL register_console_control_handler(PHANDLER_ROUTINE handler, BOOL add) noexcept
+{
+#if defined(DTV_USERLAND_SIGNAL_TESTING)
+    registration_attempts_for_test.fetch_add(1U, std::memory_order_relaxed);
+    if (fail_next_registration_for_test.exchange(false, std::memory_order_acq_rel))
+        return FALSE;
+#endif
+    return ::SetConsoleCtrlHandler(handler, add);
+}
 
 BOOL WINAPI console_control_handler(DWORD control_type) noexcept
 {
@@ -46,7 +60,8 @@ namespace px4::userland::px4d {
 bool install_signal_handlers() noexcept
 {
     if (cleanup_event == nullptr) cleanup_event = ::CreateEventW(nullptr, TRUE, FALSE, nullptr);
-    return cleanup_event != nullptr && ::SetConsoleCtrlHandler(console_control_handler, TRUE) != 0;
+    return cleanup_event != nullptr &&
+        register_console_control_handler(console_control_handler, TRUE) != 0;
 }
 
 bool stop_requested() noexcept
@@ -71,6 +86,16 @@ bool cleanup_complete() noexcept
 }
 
 #if defined(DTV_USERLAND_SIGNAL_TESTING)
+void fail_next_signal_registration_for_test() noexcept
+{
+    fail_next_registration_for_test.store(true, std::memory_order_release);
+}
+
+std::uint32_t signal_registration_attempts_for_test() noexcept
+{
+    return registration_attempts_for_test.load(std::memory_order_acquire);
+}
+
 bool dispatch_console_control_for_test(std::uint32_t control_type) noexcept
 {
     return console_control_handler(static_cast<DWORD>(control_type)) != FALSE;

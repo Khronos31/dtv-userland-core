@@ -73,6 +73,67 @@ bool add_everyone_allow(const wchar_t* path)
     return set_result == ERROR_SUCCESS;
 }
 
+bool add_unapproved_allow_ace(const wchar_t* path, BYTE ace_type, DWORD object_flags)
+{
+    PACL current = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    if (::GetNamedSecurityInfoW(const_cast<LPWSTR>(path), SE_FILE_OBJECT,
+            DACL_SECURITY_INFORMATION, nullptr, nullptr, &current, nullptr,
+            &descriptor) != ERROR_SUCCESS || current == nullptr) return false;
+    PSID everyone = nullptr;
+    if (::ConvertStringSidToSidW(L"S-1-1-0", &everyone) == 0) {
+        if (descriptor != nullptr) (void)::LocalFree(descriptor);
+        return false;
+    }
+    const DWORD sid_size = ::GetLengthSid(everyone);
+    const bool object_ace = ace_type == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+        ace_type == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE;
+    const std::size_t guid_count = object_ace ?
+        static_cast<std::size_t>((object_flags & ACE_OBJECT_TYPE_PRESENT) != 0U) +
+        static_cast<std::size_t>((object_flags & ACE_INHERITED_OBJECT_TYPE_PRESENT) != 0U) : 0U;
+    const std::size_t sid_offset = sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) +
+        (object_ace ? sizeof(DWORD) + guid_count * sizeof(GUID) : 0U);
+    const std::size_t ace_size = sid_offset + sid_size;
+    std::vector<std::uint8_t> ace(ace_size, 0U);
+    auto* header = reinterpret_cast<ACE_HEADER*>(ace.data());
+    header->AceType = ace_type;
+    header->AceSize = static_cast<WORD>(ace_size);
+    *reinterpret_cast<ACCESS_MASK*>(ace.data() + sizeof(ACE_HEADER)) = GENERIC_ALL;
+    if (object_ace)
+        *reinterpret_cast<DWORD*>(ace.data() + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK)) =
+            object_flags;
+    const bool copied_sid = ::CopySid(sid_size, ace.data() + sid_offset, everyone) != 0;
+    (void)::LocalFree(everyone);
+    if (!copied_sid) {
+        if (descriptor != nullptr) (void)::LocalFree(descriptor);
+        return false;
+    }
+    ACL_SIZE_INFORMATION size_info{};
+    const bool read_size = ::GetAclInformation(current, &size_info, sizeof(size_info),
+        AclSizeInformation) != 0;
+    const std::size_t acl_capacity = read_size ?
+        static_cast<std::size_t>(size_info.AclBytesInUse) + ace_size + 16U : 0U;
+    std::vector<std::uint8_t> acl_storage(acl_capacity, 0U);
+    PACL updated = reinterpret_cast<PACL>(acl_storage.data());
+    bool built = read_size && ::InitializeAcl(updated, static_cast<DWORD>(acl_capacity),
+        ACL_REVISION_DS) != 0;
+    for (DWORD index = 0U; built && index < size_info.AceCount; ++index) {
+        void* existing = nullptr;
+        built = ::GetAce(current, index, &existing) != 0 && existing != nullptr &&
+            ::AddAce(updated, ACL_REVISION_DS, MAXDWORD, existing,
+                     static_cast<ACE_HEADER*>(existing)->AceSize) != 0;
+    }
+    if (built)
+        built = ::AddAce(updated, ACL_REVISION_DS, MAXDWORD, ace.data(),
+                         static_cast<DWORD>(ace.size())) != 0;
+    const DWORD set_result = built ? ::SetNamedSecurityInfoW(
+        const_cast<LPWSTR>(path), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, updated, nullptr) : ERROR_INVALID_ACL;
+    if (descriptor != nullptr) (void)::LocalFree(descriptor);
+    return set_result == ERROR_SUCCESS;
+}
+
 bool socket_transport_test()
 {
     struct WinsockLifecycle final {
@@ -138,6 +199,18 @@ bool socket_transport_test()
     transport.value()->close();
     const bool rejected_acl = add_everyone_allow(wide_path.data()) &&
         !dtv::userland::host_runtime::connect_control(config, {1000U});
+    bool rejected_nonstandard_aces = true;
+    for (const BYTE type : std::array<BYTE, 3U>{ACCESS_ALLOWED_OBJECT_ACE_TYPE,
+            ACCESS_ALLOWED_CALLBACK_ACE_TYPE, ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE}) {
+        const DWORD flags = type == ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
+            type == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE ?
+            ACE_OBJECT_TYPE_PRESENT | ACE_INHERITED_OBJECT_TYPE_PRESENT : 0U;
+        rejected_nonstandard_aces = rejected_nonstandard_aces &&
+            px4::userland::windows_security::set_current_user_owner_and_dacl(
+                wide_path.data()) &&
+            add_unapproved_allow_ace(wide_path.data(), type, flags) &&
+            !dtv::userland::host_runtime::connect_control(config, {1000U});
+    }
     auto shared_config = config;
     shared_config.access = dtv::userland::host_runtime::EndpointAccess::shared_group;
     const bool rejected_group = !dtv::userland::host_runtime::connect_control(
@@ -148,6 +221,8 @@ bool socket_transport_test()
         std::puts("windows_unapproved_everyone_allow_ace_rejected=PASS");
     if (rejected_group)
         std::puts("windows_shared_group_access_rejected=PASS");
+    if (rejected_nonstandard_aces)
+        std::puts("windows_nonstandard_allow_aces_rejected=PASS");
     (void)::closesocket(server);
     (void)::DeleteFileW(wide_path.data());
     (void)::RemoveDirectoryW(instance);
@@ -157,16 +232,29 @@ bool socket_transport_test()
     (void)::RemoveDirectoryW(directory);
     return sent && read && read.value() == 1U && received[0] == byte &&
            eof && eof.value() == 0U && rejected_acl &&
-           rejected_group;
+           rejected_group && rejected_nonstandard_aces;
 }
 
 bool windows_control_signal_test()
 {
-    if (!px4::userland::px4d::install_signal_handlers()) return false;
+    const std::uint32_t before =
+        px4::userland::px4d::signal_registration_attempts_for_test();
+    px4::userland::px4d::fail_next_signal_registration_for_test();
+    const bool rejected_registration =
+        !px4::userland::px4d::install_signal_handlers();
+    const std::uint32_t after_failure =
+        px4::userland::px4d::signal_registration_attempts_for_test();
+    if (!rejected_registration || after_failure != before + 1U ||
+        px4::userland::px4d::stop_requested()) return false;
+    if (!px4::userland::px4d::install_signal_handlers() ||
+        px4::userland::px4d::signal_registration_attempts_for_test() != before + 2U)
+        return false;
     const bool handled = px4::userland::px4d::dispatch_console_control_for_test(
         CTRL_BREAK_EVENT);
     const bool stopped = px4::userland::px4d::stop_requested();
     if (handled && stopped) std::puts("windows_ctrl_break_handler_lifecycle=PASS");
+    if (rejected_registration)
+        std::puts("windows_console_handler_registration_failure_rejected=PASS");
     return handled && stopped;
 }
 #else

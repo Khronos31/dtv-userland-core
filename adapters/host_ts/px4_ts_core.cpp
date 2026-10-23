@@ -20,6 +20,10 @@
 #include <memory>
 #include <string_view>
 
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+#include <atomic>
+#endif
+
 namespace px4::userland::cli {
 namespace {
 
@@ -27,6 +31,10 @@ using namespace ipc;
 using namespace ipc::posix;
 
 constexpr std::uint64_t kTsProgressTimeoutMs = 5000U;
+
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+std::atomic<bool> fail_next_frame_storage_allocation{false};
+#endif
 
 Px4TsArguments invalid(std::string_view message) noexcept
 {
@@ -1350,11 +1358,16 @@ static Result<Px4TsRunResult> run_wire_profile(
         return Result<Px4TsRunResult>::failure(attach_written.error());
     }
 
-    std::unique_ptr<std::uint8_t[]> frame_storage(
-        new (std::nothrow) std::uint8_t[wire::kMaxFrameSize]);
+    std::unique_ptr<std::uint8_t[]> frame_storage;
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+    if (!fail_next_frame_storage_allocation.exchange(false, std::memory_order_acq_rel))
+#endif
+        frame_storage.reset(new (std::nothrow) std::uint8_t[wire::kMaxFrameSize]);
     std::array<std::uint8_t, 8192U> read_buffer{};
     if (!frame_storage) {
         data.value().close();
+        (void)wire::stop_recording(control_transport, session, Timeout{4000U});
+        (void)wire::release_recording(control_transport, session, Timeout{4000U});
         control.value().close();
         return Result<Px4TsRunResult>::failure(Error::INTERNAL);
     }
@@ -1529,6 +1542,11 @@ Result<Px4TsRunResult> Px4TsRunner::run_wire(
 
 #if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
 namespace test_access {
+
+void fail_next_frame_allocation() noexcept
+{
+    fail_next_frame_storage_allocation.store(true, std::memory_order_release);
+}
 
 Result<Px4TsRunResult> run_wire_with_roots(
     const Px4TsArguments& arguments, const TsClientProfile& profile,

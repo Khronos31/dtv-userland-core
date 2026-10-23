@@ -157,14 +157,14 @@ Error endpoint_security(const std::string& path) noexcept
                 trustee = const_cast<DWORD*>(
                     &static_cast<ACCESS_ALLOWED_ACE*>(raw)->SidStart);
             } else if (header->AceType == ACCESS_ALLOWED_OBJECT_ACE_TYPE) {
-                trustee = const_cast<DWORD*>(
-                    &static_cast<ACCESS_ALLOWED_OBJECT_ACE*>(raw)->SidStart);
+                accepted = false;
+                break;
             } else if (header->AceType == ACCESS_ALLOWED_CALLBACK_ACE_TYPE) {
-                trustee = const_cast<DWORD*>(
-                    &static_cast<ACCESS_ALLOWED_CALLBACK_ACE*>(raw)->SidStart);
+                accepted = false;
+                break;
             } else if (header->AceType == ACCESS_ALLOWED_CALLBACK_OBJECT_ACE_TYPE) {
-                trustee = const_cast<DWORD*>(
-                    &static_cast<ACCESS_ALLOWED_CALLBACK_OBJECT_ACE*>(raw)->SidStart);
+                accepted = false;
+                break;
             } else {
                 continue;
             }

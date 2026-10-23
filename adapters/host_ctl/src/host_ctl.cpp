@@ -154,8 +154,9 @@ int exit_status(Error error) noexcept
 
 void usage(FILE* output, const Profile& profile) noexcept
 {
-    std::fprintf(output, "usage: %s [--runtime-dir PATH] [--instance TOKEN] "
+    std::fprintf(output, "usage: %s --runtime-dir PATH [--instance TOKEN] "
         "[--device usb:BUS-PORT[,BUS-PORT...]] [--group] list|status\n"
+        "  --runtime-dir is required; --instance is required unless --device is supplied\n"
         "       %s --help | --version\n", profile.tool_name, profile.tool_name);
 }
 
