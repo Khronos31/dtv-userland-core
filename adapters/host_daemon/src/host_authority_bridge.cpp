@@ -55,6 +55,11 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     if (slot.state != SlotState::active || !slot.session) return {};
     const auto reply = authority_owner_.authority().accept(
         *slot.session, frame, context, snapshot, accepted_at_ms, *this);
+    if (reply.action == dtv::userland::wire::InboundAction::close &&
+        !reply.cleanup_required) {
+        slot.state = SlotState::tombstone;
+        if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
+    }
     return reply;
 }
 
@@ -159,6 +164,11 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
                                     std::size_t index) noexcept
 {
     if (index >= slots_.size() || job.key.request_id > 0xffffffffU) return false;
+    Slot& slot = slots_[index];
+    if (job.kind == AuthorityJobKind::disconnect && slot.inflight != 0U) {
+        retain_cleanup(job, index);
+        return true;
+    }
     ControlWorkerTask task{};
     task.operation = ControlWorkerOperation::tuner_authority_job;
     task.kind = job.kind == AuthorityJobKind::disconnect
@@ -175,7 +185,6 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
         task.receiver, job.kind == AuthorityJobKind::disconnect);
     if (!lane || !workers_.submit(lane.value(), task)) return false;
 
-    Slot& slot = slots_[index];
     if (job.kind == AuthorityJobKind::disconnect) {
         slot.cleanup = job;
         slot.cleanup_accepted = true;

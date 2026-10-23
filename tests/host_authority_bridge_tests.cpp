@@ -568,6 +568,93 @@ bool test_duplicate_completion_is_ignored()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool test_gate_close_waits_for_other_lane_release()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    auto created = ControlWorkerLanes::create(card, tuner);
+    if (!created) return false;
+    const auto request_lane = created.value()->authority_lane(4U, false);
+    const auto cleanup_lane = created.value()->authority_lane(4U, true);
+    if (!request_lane || !cleanup_lane || request_lane.value() == cleanup_lane.value()) {
+        std::cerr << "receiver 4 did not route away from cleanup lane\n";
+        return false;
+    }
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto slot = bridge.open_session();
+    if (!slot || !hello(bridge, slot.value())) return false;
+    std::uint64_t lease = 0U;
+    if (!acquire(bridge, slot.value(), 4U, lease)) return false;
+
+    backend.block_close(4U);
+    std::array<std::uint8_t, 64U> release_payload{};
+    const auto release_size = w::encode_release_request({list.epoch, lease},
+        {release_payload.data(), release_payload.size()});
+    if (!release_size) return false;
+    w::Context context;
+    w::Snapshot snapshot;
+    const auto release_reply = bridge.accept(slot.value(),
+        frame(w::kOpcodeRelease, 4U,
+              {release_payload.data(), release_size.value()}),
+        context, snapshot, 0U);
+    if (!release_reply.queued || !backend.wait_close()) {
+        backend.release_close();
+        return false;
+    }
+
+    std::array<std::uint8_t, w::kEpochSize> list_payload{};
+    const auto list_size = w::encode_list_request({list.epoch},
+        {list_payload.data(), list_payload.size()});
+    if (!list_size) {
+        backend.release_close();
+        return false;
+    }
+    const std::uint64_t id = bridge.client_id(slot.value());
+    const auto second = bridge.accept(slot.value(),
+        frame(w::kOpcodeList, 5U, {list_payload.data(), list_payload.size()}),
+        context, snapshot, 0U);
+    if (second.action != w::InboundAction::close || second.cleanup_required) {
+        backend.release_close();
+        std::cerr << "second frame did not enter accepted gate-close cleanup\n";
+        return false;
+    }
+    for (unsigned i = 0U; i < 20U; ++i) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (bridge.counts().tombstone != 1U || bridge.client_id(slot.value()) != id ||
+        bridge.counts().fatal_unresolved != 0U) {
+        backend.release_close();
+        std::cerr << "gate close bypassed same-client inflight barrier\n";
+        return false;
+    }
+
+    backend.release_close();
+    if (!wait_free(bridge, slot.value())) {
+        std::cerr << "gate close did not drain after RELEASE completion\n";
+        return false;
+    }
+    if (bridge.begin_shutdown() != Error::OK) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!bridge.stopped() || bridge.shutdown_result() != Error::OK) {
+        std::cerr << "gate-close late RELEASE made bridge fatal\n";
+        return false;
+    }
+    const auto engine = tuner.engine_status();
+    return engine && !engine.value().leased[4U];
+}
+
 bool test_release_uses_worker_and_clears_engine_lease()
 {
     Backend backend;
@@ -827,18 +914,23 @@ bool test_fatal_late_acquire_is_not_finalized_early()
     ControlWorkerStartupOptions options;
     options.fatal_after_authority_lane = static_cast<int>(ControlWorkerLane::tuner_dev1);
     auto created = ControlWorkerLanes::create_for_test(*card, *tuner, options);
-    if (!created) return false;
+    if (!created) { std::cerr << "fatal setup worker create\n"; return false; }
     ControlWorkerLanes* workers = created.value().release();
     const auto list = make_list();
     w::ServerHello server{list.epoch, list.producer, 0U};
     auto* bridge = new HostAuthorityBridge(*tuner, *workers, server, list);
     unsigned other_ingress_stops = 0U;
-    if (bridge->set_ingress_stop(&mark_ingress_stopped, &other_ingress_stops) != Error::OK)
+    if (bridge->set_ingress_stop(&mark_ingress_stopped, &other_ingress_stops) != Error::OK) {
+        std::cerr << "fatal setup ingress callback\n";
         return false;
+    }
     const auto first = bridge->open_session();
     const auto second = bridge->open_session();
     if (!first || !second || !hello(*bridge, first.value()) ||
-        !hello(*bridge, second.value())) return false;
+        !hello(*bridge, second.value())) {
+        std::cerr << "fatal setup session hello\n";
+        return false;
+    }
 
     std::array<std::uint8_t, w::kAcquireRequestSize> payload_a{};
     std::array<std::uint8_t, w::kAcquireRequestSize> payload_b{};
@@ -846,14 +938,39 @@ bool test_fatal_late_acquire_is_not_finalized_early()
         {payload_a.data(), payload_a.size()});
     const auto size_b = w::encode_acquire_request({list.epoch, 4U},
         {payload_b.data(), payload_b.size()});
-    if (!size_a || !size_b) return false;
+    if (!size_a || !size_b) { std::cerr << "fatal setup acquire encoding\n"; return false; }
     w::Context context;
     w::Snapshot snapshot;
-    if (!bridge->accept(first.value(), frame(w::kOpcodeAcquire, 2U,
-            {payload_a.data(), size_a.value()}), context, snapshot, 0U).queued ||
-        !bridge->accept(second.value(), frame(w::kOpcodeAcquire, 2U,
-            {payload_b.data(), size_b.value()}), context, snapshot, 0U).queued ||
-        !backend->wait_open()) return false;
+    const auto queued_b = bridge->accept(second.value(), frame(w::kOpcodeAcquire, 2U,
+        {payload_b.data(), size_b.value()}), context, snapshot, 0U);
+    if (!queued_b.queued) {
+        std::cerr << "fatal setup blocked acquire dispatch failed\n";
+        backend->release_open();
+        return false;
+    }
+    if (!backend->wait_open()) {
+        std::cerr << "fatal setup blocked open was not reached\n";
+        backend->release_open();
+        return false;
+    }
+    const auto queued_a = bridge->accept(first.value(), frame(w::kOpcodeAcquire, 2U,
+        {payload_a.data(), size_a.value()}), context, snapshot, 0U);
+    if (!queued_a.queued) {
+        std::cerr << "fatal setup fatal-lane acquire dispatch failed\n";
+        backend->release_open();
+        return false;
+    }
+
+    const auto fatal_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (workers->error() == Error::OK &&
+           std::chrono::steady_clock::now() < fatal_until) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (workers->error() == Error::OK) {
+        backend->release_open();
+        std::cerr << "fatal worker error did not become observable\n";
+        return false;
+    }
 
     const Error early = bridge->poll();
     if (early != Error::OK || bridge->stopped() || other_ingress_stops != 1U ||
@@ -909,6 +1026,10 @@ int main()
     }
     if (!test_duplicate_completion_is_ignored()) {
         std::cerr << "duplicate completion fixture failed\n";
+        return 1;
+    }
+    if (!test_gate_close_waits_for_other_lane_release()) {
+        std::cerr << "gate-close inflight barrier fixture failed\n";
         return 1;
     }
     if (!test_release_uses_worker_and_clears_engine_lease()) {
