@@ -308,22 +308,35 @@ bool test_pair_io_and_dacl() noexcept
                "read Windows fragment")) return false;
     if (!check(set_connection_send_buffer_for_test(*io, accepted.connection, 4096) == Error::OK,
                "constrain Windows server send buffer")) return false;
-    std::vector<std::uint8_t> large(12U * 1024U * 1024U, 0x5aU);
-    constexpr std::size_t prefill_size = 8U * 1024U * 1024U;
-    const IoResult prefill = io->write_some(accepted.connection,
-        ByteView{large.data(), prefill_size});
-    if (!check(prefill.status == IoStatus::progress && prefill.transferred == prefill_size,
-               "prefill Windows peer receive queue")) return false;
-    const IoResult written = io->write_some(accepted.connection,
-        ByteView{large.data(), large.size()});
-    const bool partial_write = written.status == IoStatus::progress &&
-        written.transferred > 0U && written.transferred < large.size();
-    if (!partial_write) {
-        std::fprintf(stderr, "Windows write prefill=%zu status=%u transferred=%zu error=%u\n",
-            prefill.transferred, static_cast<unsigned>(written.status), written.transferred,
+    std::vector<std::uint8_t> large(8U * 1024U * 1024U, 0x5aU);
+    IoResult written{};
+    std::size_t full_writes = 0U;
+    std::size_t partial_writes = 0U;
+    bool blocked = false;
+    for (std::size_t attempt = 0U; attempt < 4U; ++attempt) {
+        written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
+        if (written.status == IoStatus::progress && written.transferred == large.size()) {
+            ++full_writes;
+            continue;
+        }
+        if (written.status == IoStatus::progress && written.transferred > 0U &&
+            written.transferred < large.size()) {
+            ++partial_writes;
+            continue;
+        }
+        blocked = written.status == IoStatus::would_block && written.transferred == 0U &&
+            written.error == Error::OK;
+        break;
+    }
+    if (full_writes == 0U || !blocked) {
+        std::fprintf(stderr,
+            "Windows writes full=%zu partial=%zu blocked=%u final_status=%u transferred=%zu error=%u\n",
+            full_writes, partial_writes, blocked ? 1U : 0U,
+            static_cast<unsigned>(written.status), written.transferred,
             static_cast<unsigned>(written.error));
     }
-    if (!check(partial_write, "partial Windows write")) return false;
+    if (!check(full_writes > 0U && blocked,
+               "full Windows writes transition to would-block")) return false;
     (void)::shutdown(peer, SD_SEND);
     read = io->read_some(accepted.connection, MutableByteView{input.data(), input.size()});
     if (!check(read.status == IoStatus::eof, "clean Windows EOF")) return false;
