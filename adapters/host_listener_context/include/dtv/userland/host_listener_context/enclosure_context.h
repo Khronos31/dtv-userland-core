@@ -13,6 +13,7 @@
 namespace dtv::userland::host_listener_context {
 
 struct ContextConfig final {
+    // These values are copied into Context-owned configuration during assemble.
     std::string runtime_directory;
     std::string product;
     std::string instance;
@@ -33,6 +34,7 @@ enum class CloseState : std::uint8_t {
 
 class EnclosureContext final {
 public:
+    // Ownership of family and nonce_source transfers to the returned Context.
     static Result<std::unique_ptr<EnclosureContext>> assemble(
         std::unique_ptr<host_runtime::EnclosureFamily> family,
         std::unique_ptr<host_runtime::TunerNonceSource> nonce_source,
@@ -46,6 +48,8 @@ public:
     Result<void> reserve_namespace() noexcept;
     Result<void> publish() noexcept;
     Result<void> poll_once(Timeout timeout) noexcept;
+    // pending keeps the Context owner graph alive; call close() again to
+    // observe the same cleanup operation's eventual result.
     Result<CloseState> close(Timeout timeout) noexcept;
 
 private:

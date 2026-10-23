@@ -98,6 +98,9 @@ public:
     virtual Error release_namespace() noexcept = 0;
 };
 
+// Exactly one platform implementation is linked into the target.
+std::unique_ptr<ListenerIo> create_listener_io() noexcept;
+
 }  // namespace dtv::userland::host_listener_context::detail
 
 #endif  // DTV_USERLAND_HOST_LISTENER_CONTEXT_DETAIL_LISTENER_IO_H
