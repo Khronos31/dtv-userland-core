@@ -15,6 +15,38 @@ permissions:
   contents: read
 
 jobs:
+  base_msvc_compare:
+    runs-on: windows-2022
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: a8a840a7e44932db5baa897fd41da9a1035e58c7
+      - name: Configure base
+        run: >-
+          cmake -S . -B build -A x64
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+      - name: Confirm base missing compatibility header
+        shell: pwsh
+        run: |
+          $output = cmake --build build --config Release --target host_authority_bridge_tests 2>&1
+          $buildExit = $LASTEXITCODE
+          $output | Out-File -FilePath build.log
+          if ($buildExit -eq 0) { throw 'Base unexpectedly builds the MSVC bridge target' }
+          if (-not (Select-String -Path build.log -Pattern 'windows_pthread_compat.h')) {
+            throw 'Base failed for a reason other than the missing pthread compatibility header'
+          }
+          Write-Host "base_head=a8a840a7e44932db5baa897fd41da9a1035e58c7 expected_missing_header_failure=$buildExit"
+
   msvc:
     runs-on: windows-2022
     steps:
