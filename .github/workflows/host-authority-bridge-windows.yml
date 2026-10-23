@@ -86,8 +86,8 @@ jobs:
           Set-Acl -Path $runtimeRoot -AclObject $acl
           Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$runtimeRoot"
           Write-Host "worker_runtime_parent=$runtimeRoot"
-      - name: Build bridge tests
-        run: cmake --build build --config Release --target host_authority_bridge_tests
+      - name: Build all targets
+        run: cmake --build build --config Release
       - name: Run bridge tests
         run: ctest --test-dir build -C Release -R '^host_authority_bridge_tests$' --output-on-failure
       - name: Measure bridge fixture peak working set
