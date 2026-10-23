@@ -26,6 +26,7 @@ option(DTV_USERLAND_BUILD_HOST_FACADE "Build the host process facade" OFF)
 option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build platform client/runtime helpers" OFF)
 option(DTV_USERLAND_BUILD_HOST_CTL "Build the host control CLI" OFF)
 option(DTV_USERLAND_BUILD_HOST_TS "Build the shared host TS client" OFF)
+option(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT "Build the host listener and enclosure Context" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -297,6 +298,23 @@ if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
     endif()
 endif()
 
+if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
+    if(NOT DTV_USERLAND_BUILD_HOST_RUNTIME OR NOT DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE")
+    endif()
+    add_library(dtv_userland_host_listener_context INTERFACE)
+    add_library(dtv::host_listener_context ALIAS dtv_userland_host_listener_context)
+    set_target_properties(dtv_userland_host_listener_context PROPERTIES
+        EXPORT_NAME host_listener_context)
+    target_compile_features(dtv_userland_host_listener_context INTERFACE cxx_std_17)
+    target_include_directories(dtv_userland_host_listener_context INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_listener_context INTERFACE
+        dtv::host_runtime dtv::host_authority_bridge)
+endif()
+
 if(DTV_USERLAND_BUILD_HOST_FACADE)
     add_library(dtv_userland_host_facade STATIC
         adapters/host_facade/src/px4d_signals.cpp)
@@ -349,6 +367,17 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
         target_compile_options(dtv_userland_host_runtime PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+endif()
+if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
+    install(TARGETS dtv_userland_host_listener_context
+        EXPORT dtv_userland_host_listener_contextTargets)
+    install(EXPORT dtv_userland_host_listener_contextTargets
+        FILE dtv_userland_host_listener_contextTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_listener_context/include/dtv/userland/host_listener_context/enclosure_context.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_listener_context)
 endif()
 
 if(DTV_USERLAND_BUILD_HOST_TS)
@@ -735,6 +764,17 @@ install(FILES
 install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core)
 
 if(DTV_USERLAND_BUILD_TESTING)
+    if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
+        add_executable(host_listener_context_seam_tests
+            tests/host_listener_context_seam_tests.cpp)
+        target_include_directories(host_listener_context_seam_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
+        target_link_libraries(host_listener_context_seam_tests PRIVATE
+            dtv::host_listener_context)
+        add_test(NAME host_listener_context_seam_tests
+            COMMAND host_listener_context_seam_tests)
+    endif()
+
     add_executable(foundation_tests tests/foundation_tests.cpp)
     target_link_libraries(foundation_tests PRIVATE dtv::core)
     add_test(NAME foundation_tests COMMAND foundation_tests)
