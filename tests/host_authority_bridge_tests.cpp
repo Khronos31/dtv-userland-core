@@ -376,7 +376,7 @@ Error finish_fake_send(HostAuthorityBridge& bridge, std::uint8_t slot,
 }
 
 bool acquire(HostAuthorityBridge& bridge, std::uint8_t slot, std::uint16_t receiver,
-             std::uint64_t& lease)
+             std::uint64_t& lease, std::uint32_t request_id = 2U)
 {
     std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
     const auto size = w::encode_acquire_request({make_list().epoch, receiver},
@@ -385,7 +385,7 @@ bool acquire(HostAuthorityBridge& bridge, std::uint8_t slot, std::uint16_t recei
     w::Context context;
     context.state = w::ContextState::ready;
     w::Snapshot snapshot;
-    const auto reply = bridge.accept(slot, frame(w::kOpcodeAcquire, 2U,
+    const auto reply = bridge.accept(slot, frame(w::kOpcodeAcquire, request_id,
         {payload.data(), size.value()}), context, snapshot, 0U);
     if (!reply.queued) return false;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -434,7 +434,8 @@ bool release(HostAuthorityBridge& bridge, std::uint8_t slot,
 }
 
 bool tune(HostAuthorityBridge& bridge, std::uint8_t slot,
-          const w::Uuid& epoch, std::uint64_t lease)
+          const w::Uuid& epoch, std::uint64_t lease,
+          std::uint32_t request_id = 3U)
 {
     std::array<std::uint8_t, 128U> payload{};
     w::TuneRequest request;
@@ -450,7 +451,7 @@ bool tune(HostAuthorityBridge& bridge, std::uint8_t slot,
     context.epoch = epoch;
     context.state = w::ContextState::ready;
     w::Snapshot snapshot;
-    const auto reply = bridge.accept(slot, frame(w::kOpcodeTune, 3U,
+    const auto reply = bridge.accept(slot, frame(w::kOpcodeTune, request_id,
         {payload.data(), size.value()}), context, snapshot, 0U);
     if (!reply.queued) {
         const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
@@ -985,8 +986,8 @@ bool test_authority_stream_prepare_commit_stop()
     if (!control || !other_control || !hello(bridge, control.value()) ||
         !hello(bridge, other_control.value())) return false;
     std::uint64_t lease = 0U;
-    if (!acquire(bridge, control.value(), 2U, lease) ||
-        !tune(bridge, control.value(), list.epoch, lease)) return false;
+    if (!acquire(bridge, control.value(), 2U, lease, 3U) ||
+        !tune(bridge, control.value(), list.epoch, lease, 4U)) return false;
     std::uint64_t other_lease = 0U;
     if (!acquire(bridge, other_control.value(), 3U, other_lease) ||
         !tune(bridge, other_control.value(), list.epoch, other_lease)) return false;
