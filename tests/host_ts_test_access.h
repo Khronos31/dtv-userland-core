@@ -7,6 +7,8 @@
 
 namespace px4::userland::cli::test_access {
 
+void fail_next_frame_allocation() noexcept;
+
 dtv::userland::Result<Px4TsRunResult> run_wire_with_roots(
     const Px4TsArguments& arguments, const TsClientProfile& profile,
     Px4TsOutput& output, Px4TsClock& clock, const Px4TsSignal& signal,
