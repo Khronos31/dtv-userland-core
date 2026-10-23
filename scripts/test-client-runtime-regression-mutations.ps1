@@ -15,12 +15,19 @@ function Build-PrimaryFixture([string]$target) {
 
 function Expect-PrimaryFailure([string]$target, [string]$diagnostic, [string]$logPath) {
     $binary = Join-Path $root "build/Release/$target.exe"
-    $stdoutPath = "$logPath.stdout"
-    $stderrPath = "$logPath.stderr"
-    $process = Start-Process -FilePath $binary -NoNewWindow -Wait -PassThru `
-        -RedirectStandardOutput $stdoutPath -RedirectStandardError $stderrPath
+    $startInfo = [System.Diagnostics.ProcessStartInfo]::new($binary)
+    $startInfo.UseShellExecute = $false
+    $startInfo.CreateNoWindow = $true
+    $startInfo.RedirectStandardOutput = $true
+    $startInfo.RedirectStandardError = $true
+    $process = [System.Diagnostics.Process]::Start($startInfo)
+    $stdout = $process.StandardOutput.ReadToEnd()
+    $stderr = $process.StandardError.ReadToEnd()
+    $process.WaitForExit()
     $fixtureExit = $process.ExitCode
-    Get-Content $stdoutPath, $stderrPath | Tee-Object -FilePath $logPath
+    $fixtureOutput = $stdout + $stderr
+    [System.IO.File]::WriteAllText($logPath, $fixtureOutput, $encoding)
+    Write-Output $fixtureOutput
     if ($fixtureExit -eq 0) { throw "$target unexpectedly passed the old-behavior mutation" }
     if (-not (Select-String -Path $logPath -SimpleMatch $diagnostic -Quiet)) {
         throw "$target failed without the primary diagnostic '$diagnostic'"
