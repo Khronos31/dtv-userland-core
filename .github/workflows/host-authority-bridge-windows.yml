@@ -46,6 +46,7 @@ jobs:
             throw 'Base failed for a reason other than the missing pthread compatibility header'
           }
           Write-Host "base_head=a8a840a7e44932db5baa897fd41da9a1035e58c7 expected_missing_header_failure=$buildExit"
+          exit 0
 
   msvc:
     runs-on: windows-2022
