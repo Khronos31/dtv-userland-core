@@ -138,6 +138,22 @@ bool endpoint_dacl_is_current_user_only(const wchar_t* path) noexcept
     return valid;
 }
 
+bool endpoint_is_af_unix_socket(const wchar_t* path) noexcept
+{
+    const HANDLE file = ::CreateFileW(path, FILE_READ_ATTRIBUTES,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr, OPEN_EXISTING,
+        FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return false;
+    FILE_ATTRIBUTE_TAG_INFO information{};
+    const BOOL queried = ::GetFileInformationByHandleEx(file, FileAttributeTagInfo,
+        &information, sizeof(information));
+    (void)::CloseHandle(file);
+    return queried != 0 &&
+        (information.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U &&
+        (information.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U &&
+        information.ReparseTag == IO_REPARSE_TAG_AF_UNIX;
+}
+
 SOCKET connect_peer(const std::wstring& path) noexcept
 {
     SOCKADDR_UN address{};
@@ -229,9 +245,9 @@ bool test_pair_io_and_dacl() noexcept
     const DWORD data_attributes = ::GetFileAttributesW(data_path.c_str());
     if (!check(control_attributes != INVALID_FILE_ATTRIBUTES &&
                data_attributes != INVALID_FILE_ATTRIBUTES &&
-               (control_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
-               (data_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U,
-               "control and data socket paths created under instance directory")) return false;
+               endpoint_is_af_unix_socket(control_path.c_str()) &&
+               endpoint_is_af_unix_socket(data_path.c_str()),
+               "control and data AF_UNIX socket paths under instance directory")) return false;
     if (!check(io->release_namespace() == Error::BUSY &&
                competitor->reserve_pair(control, data) == Error::BUSY,
                "published pair retains exclusive namespace lease")) return false;

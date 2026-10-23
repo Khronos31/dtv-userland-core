@@ -114,22 +114,42 @@ bool file_identity(const wchar_t* path, PathIdentity& output,
     BY_HANDLE_FILE_INFORMATION info{};
     const BOOL ok = ::GetFileInformationByHandle(file, &info);
     const DWORD info_error = ok == 0 ? ::GetLastError() : ERROR_SUCCESS;
-    (void)::CloseHandle(file);
     if (ok == 0) {
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
         std::fprintf(stderr, "Windows identity stage=query path=%ls win32=%lu\n", path,
             static_cast<unsigned long>(info_error));
 #endif
+        (void)::CloseHandle(file);
         return false;
     }
-    if ((info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
-        (require_file && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)) {
+    if ((require_file && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) ||
+        (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U) {
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
         std::fprintf(stderr, "Windows identity stage=attributes path=%ls attrs=%lu\n", path,
             static_cast<unsigned long>(info.dwFileAttributes));
 #endif
+        (void)::CloseHandle(file);
         return false;
     }
+    FILE_ATTRIBUTE_TAG_INFO tag_info{};
+    if (::GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag_info,
+                                       sizeof(tag_info)) == 0) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        std::fprintf(stderr, "Windows identity stage=tag-query path=%ls win32=%lu\n", path,
+            static_cast<unsigned long>(::GetLastError()));
+#endif
+        (void)::CloseHandle(file);
+        return false;
+    }
+    if (tag_info.ReparseTag != IO_REPARSE_TAG_AF_UNIX) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+        std::fprintf(stderr, "Windows identity stage=tag path=%ls tag=%lu\n", path,
+            static_cast<unsigned long>(tag_info.ReparseTag));
+#endif
+        (void)::CloseHandle(file);
+        return false;
+    }
+    (void)::CloseHandle(file);
     output = PathIdentity{info.dwVolumeSerialNumber,
         (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow, true};
     return true;
@@ -642,7 +662,7 @@ private:
             ::WSASetLastError(WSAEACCES);
             return false;
         }
-        if ((attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0U ||
+        if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ||
             !verify_current_user_security(path.c_str())) {
             ::WSASetLastError(WSAEACCES);
             return false;
