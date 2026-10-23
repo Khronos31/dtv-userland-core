@@ -300,7 +300,11 @@ bool lifecycle()
         ("dtv-context-" + std::to_string(std::chrono::steady_clock::now()
             .time_since_epoch().count()))).string();
     std::error_code fs_error;
-    if (!std::filesystem::create_directory(path, fs_error) || fs_error) return false;
+    if (!std::filesystem::create_directory(path, fs_error) || fs_error) {
+        std::fprintf(stderr, "runtime directory create error=%u\n",
+                     static_cast<unsigned>(fs_error.value()));
+        return false;
+    }
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<Family> family(new Family(shutdown));
     ContextConfig config;
@@ -315,8 +319,21 @@ bool lifecycle()
     config.stream_arm_budget_ms = 5000U;
     auto assembled = EnclosureContext::assemble(std::move(family),
         std::unique_ptr<host_runtime::TunerNonceSource>(new Nonce()), config);
-    if (!assembled || !assembled.value()->reserve_namespace() ||
-        !assembled.value()->publish()) {
+    if (!assembled) {
+        std::fprintf(stderr, "Context assemble error=%u\n",
+                     static_cast<unsigned>(assembled.error()));
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+    if (const auto reserved = assembled.value()->reserve_namespace(); !reserved) {
+        std::fprintf(stderr, "Context namespace reserve error=%u\n",
+                     static_cast<unsigned>(reserved.error()));
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+    if (const auto published = assembled.value()->publish(); !published) {
+        std::fprintf(stderr, "Context publish error=%u\n",
+                     static_cast<unsigned>(published.error()));
         std::filesystem::remove_all(path, fs_error);
         return false;
     }
