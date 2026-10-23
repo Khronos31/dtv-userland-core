@@ -218,15 +218,23 @@ bool add_sid_start_mismatch_object_allow(const wchar_t* path)
             const_cast<LPWSTR>(path), SE_FILE_OBJECT, DACL_SECURITY_INFORMATION,
             nullptr, nullptr, &installed, nullptr, &installed_descriptor) == ERROR_SUCCESS &&
         installed != nullptr) {
+        std::printf("windows_sid_start_fixture_readback_acl_count=%lu\n",
+            static_cast<unsigned long>(installed->AceCount));
         for (DWORD index = 0U; index < installed->AceCount; ++index) {
             void* raw = nullptr;
             if (::GetAce(installed, index, &raw) == 0 || raw == nullptr) continue;
             const auto* header = static_cast<ACE_HEADER*>(raw);
-            if (header->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE ||
-                header->AceSize < fixed_sid_offset + user_size) continue;
+            std::printf("windows_sid_start_fixture_readback_ace index=%lu type=%u size=%u\n",
+                static_cast<unsigned long>(index), static_cast<unsigned>(header->AceType),
+                static_cast<unsigned>(header->AceSize));
+            if (header->AceType != ACCESS_ALLOWED_OBJECT_ACE_TYPE) continue;
             const auto* bytes = static_cast<const std::uint8_t*>(raw);
+            if (header->AceSize < sizeof(ACE_HEADER) + sizeof(ACCESS_MASK) + sizeof(DWORD))
+                continue;
             const DWORD installed_flags = *reinterpret_cast<const DWORD*>(
                 bytes + sizeof(ACE_HEADER) + sizeof(ACCESS_MASK));
+            std::printf("windows_sid_start_fixture_readback_object flags=%lu\n",
+                static_cast<unsigned long>(installed_flags));
             if (header->AceSize < actual_sid_offset + everyone_size ||
                 header->AceSize < fixed_sid_offset + user_size) continue;
             const bool actual_sid_is_everyone = ::EqualSid(const_cast<std::uint8_t*>(
