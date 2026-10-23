@@ -63,19 +63,23 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
     if (frame.header.opcode == dtv::userland::wire::kOpcodeStartStream &&
         reply.action == dtv::userland::wire::InboundAction::respond &&
         reply.frame.size >= dtv::userland::wire::kHeaderSize) {
-        const auto request = dtv::userland::wire::decode_start_request(frame.payload);
-        const auto response = dtv::userland::wire::decode_start_response(
-            {reply.frame.data + dtv::userland::wire::kHeaderSize,
-             reply.frame.size - dtv::userland::wire::kHeaderSize});
-        if (!request || !response ||
-            !remember_stream(index, request.value().lease_id,
-                             response.value().stream_id))
-            enter_fatal();
+        const auto header = dtv::userland::wire::decode_header(
+            {reply.frame.data, dtv::userland::wire::kHeaderSize});
+        if (header && header.value().kind == dtv::userland::wire::Kind::response) {
+            const auto request = dtv::userland::wire::decode_start_request(frame.payload);
+            const auto response = dtv::userland::wire::decode_start_response(
+                {reply.frame.data + dtv::userland::wire::kHeaderSize,
+                 reply.frame.size - dtv::userland::wire::kHeaderSize});
+            if (!request || !response ||
+                !remember_stream(index, request.value().lease_id,
+                                 response.value().stream_id))
+                enter_fatal();
+        }
     }
     if (reply.action == dtv::userland::wire::InboundAction::close) {
         slot.state = SlotState::tombstone;
-        slot.close_pending = reply.cleanup_required &&
-            reply.cleanup.kind == AuthorityJobKind::disconnect;
+        slot.close_pending = slot.close_pending || (reply.cleanup_required &&
+            reply.cleanup.kind == AuthorityJobKind::disconnect);
         if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
         if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
         if (slot.close_pending) close_owned_streams(index);
@@ -90,11 +94,16 @@ Error HostAuthorityBridge::response_sent(std::uint8_t index,
     Slot& slot = slots_[index];
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
     if (complete_frame) {
+        AuthorityJob rejected{};
         const Error error = authority_owner_.authority().response_sent(
-            *slot.session, true, *this, nullptr);
+            *slot.session, true, *this, &rejected);
         if (error == Error::OK && slot.session->client_id() == 0U) {
             slot.state = SlotState::tombstone;
             slot.session.reset();
+        } else if (rejected.kind == AuthorityJobKind::disconnect) {
+            slot.state = SlotState::tombstone;
+            slot.session.reset();
+            retain_cleanup(rejected, index);
         }
         return error;
     }
@@ -485,6 +494,13 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
     if (!slots_ || index >= kHostAuthoritySessionCapacity ||
         job.key.request_id > 0xffffffffU) return false;
     Slot& slot = slots_[index];
+    if (job.kind == AuthorityJobKind::disconnect && has_owned_streams(index)) {
+        slot.state = SlotState::tombstone;
+        slot.close_pending = true;
+        retain_cleanup(job, index);
+        close_owned_streams(index);
+        return true;
+    }
     if (job.kind == AuthorityJobKind::disconnect && slot.inflight != 0U) {
         retain_cleanup(job, index);
         return true;

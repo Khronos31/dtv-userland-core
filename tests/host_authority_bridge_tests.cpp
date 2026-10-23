@@ -924,6 +924,305 @@ bool test_authority_stream_prepare_commit_stop()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool test_rejected_start_does_not_record_stream()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    Stream stream;
+    TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
+    if (!tuner.configure_strict_capabilities() ||
+        !tuner.configure_stream_contract(
+            dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL))
+        return false;
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    auto created = ControlWorkerLanes::create(card, tuner);
+    if (!created) return false;
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+        return false;
+    const auto first = bridge.open_session();
+    const auto other = bridge.open_session();
+    if (!first || !other || !hello(bridge, first.value()) ||
+        !hello(bridge, other.value())) return false;
+    std::uint64_t lease = 0U;
+    std::uint64_t other_lease = 0U;
+    if (!acquire(bridge, first.value(), 2U, lease) ||
+        !tune(bridge, first.value(), list.epoch, lease) ||
+        !acquire(bridge, other.value(), 3U, other_lease)) return false;
+
+    auto status = tuner.engine_status();
+    if (!status) return false;
+    w::StartRequest start_request;
+    start_request.epoch = list.epoch;
+    start_request.lease_id = lease;
+    start_request.tune_revision = status.value().tune_metadata[2U].current_revision + 1U;
+    std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+    const auto size = w::encode_start_request(start_request,
+        {payload.data(), payload.size()});
+    w::Context context;
+    context.epoch = list.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto rejected = size ? bridge.accept(first.value(),
+        frame(w::kOpcodeStartStream, 5U, {payload.data(), size.value()}),
+        context, snapshot, 100U) : dtv::userland::detail::AuthorityReply{};
+    const auto rejected_header = rejected.frame.size >= w::kHeaderSize
+        ? w::decode_header({rejected.frame.data, w::kHeaderSize})
+        : Result<w::Header>::failure(Error::INVALID_ARGUMENT);
+    if (rejected.action != w::InboundAction::respond || !rejected_header ||
+        rejected_header.value().kind != w::Kind::error_response ||
+        bridge.response_sent(first.value(), true) != Error::OK) {
+        std::cerr << "rejected START response was not handled as an error response action="
+                  << static_cast<unsigned>(rejected.action) << " size="
+                  << rejected.frame.size << " header=" << static_cast<bool>(rejected_header)
+                  << " kind=" << (rejected_header
+                      ? static_cast<unsigned>(rejected_header.value().kind) : 0U)
+                  << " connected=" << bridge.session_connected_for_test(first.value())
+                  << " fatal=" << bridge.counts().fatal_unresolved << "\n";
+        return false;
+    }
+
+    status = tuner.engine_status();
+    if (!status) return false;
+    start_request.tune_revision = status.value().tune_metadata[2U].current_revision;
+    const auto valid_size = w::encode_start_request(start_request,
+        {payload.data(), payload.size()});
+    const auto accepted = valid_size ? bridge.accept(first.value(),
+        frame(w::kOpcodeStartStream, 6U, {payload.data(), valid_size.value()}),
+        context, snapshot, 101U) : dtv::userland::detail::AuthorityReply{};
+    if (accepted.action != w::InboundAction::respond ||
+        bridge.response_sent(first.value(), true) != Error::OK) {
+        std::cerr << "valid START after rejected START failed\n";
+        return false;
+    }
+    const auto accepted_header = w::decode_header({accepted.frame.data, w::kHeaderSize});
+    const auto accepted_response = w::decode_start_response(
+        {accepted.frame.data + w::kHeaderSize,
+         accepted.frame.size - w::kHeaderSize});
+    if (!accepted_header || accepted_header.value().kind != w::Kind::response ||
+        !accepted_response || accepted_response.value().stream_id == 0U ||
+        !tune(bridge, other.value(), list.epoch, other_lease)) {
+        std::cerr << "START rejection disturbed later client progress\n";
+        return false;
+    }
+    if (bridge.close_session(first.value()) != Error::OK ||
+        !wait_free(bridge, first.value()) ||
+        bridge.close_session(other.value()) != Error::OK ||
+        !wait_free(bridge, other.value())) {
+        std::cerr << "START rejection fixture close wait failed\n";
+        return false;
+    }
+    status = tuner.engine_status();
+    if (!status || status.value().leased[2U] || status.value().leased[3U] ||
+        backend.capture_starts != 0U || backend.capture_stops != 0U ||
+        bridge.begin_shutdown() != Error::OK) {
+        std::cerr << "START rejection fixture lease cleanup failed\n";
+        return false;
+    }
+    const auto shutdown_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < shutdown_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!bridge.stopped() || bridge.shutdown_result() != Error::OK) {
+        std::cerr << "START rejection fixture shutdown failed result="
+                  << static_cast<unsigned>(bridge.shutdown_result()) << "\n";
+        return false;
+    }
+    return true;
+}
+
+bool test_stream_owned_disconnect_submit_entry_points()
+{
+    for (unsigned scenario = 0U; scenario < 2U; ++scenario) {
+        Backend backend;
+        Nonce nonce;
+        Time time;
+        Stream stream;
+        TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
+        if (!tuner.configure_strict_capabilities() ||
+            !tuner.configure_stream_contract(
+                dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL))
+            return false;
+        CardBackend card_backend;
+        CardSession card_session;
+        CardService card(card_backend, card_session);
+        auto created = ControlWorkerLanes::create(card, tuner);
+        if (!created) return false;
+        const auto list = make_list();
+        w::ServerHello server{list.epoch, list.producer, 0U};
+        HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+        if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+            return false;
+        const auto control = bridge.open_session();
+        if (!control || !hello(bridge, control.value())) return false;
+        std::uint64_t lease = 0U;
+        if (!acquire(bridge, control.value(), 2U, lease) ||
+            !tune(bridge, control.value(), list.epoch, lease)) return false;
+        const auto engine = tuner.engine_status();
+        if (!engine) return false;
+        w::StartRequest start_request;
+        start_request.epoch = list.epoch;
+        start_request.lease_id = lease;
+        start_request.tune_revision = engine.value().tune_metadata[2U].current_revision;
+        std::array<std::uint8_t, w::kMaxControlPayload> start_payload{};
+        const auto start_size = w::encode_start_request(start_request,
+            {start_payload.data(), start_payload.size()});
+        w::Context context;
+        context.epoch = list.epoch;
+        context.state = w::ContextState::ready;
+        w::Snapshot snapshot;
+        const auto started = start_size ? bridge.accept(control.value(),
+            frame(w::kOpcodeStartStream, 5U,
+                  {start_payload.data(), start_size.value()}), context,
+            snapshot, 100U) : dtv::userland::detail::AuthorityReply{};
+        const auto started_response = started.frame.size >= w::kHeaderSize
+            ? w::decode_start_response(
+                {started.frame.data + w::kHeaderSize,
+                 started.frame.size - w::kHeaderSize})
+            : Result<w::StartResponse>::failure(Error::INVALID_ARGUMENT);
+        if (started.action != w::InboundAction::respond || !started_response ||
+            bridge.response_sent(control.value(), true) != Error::OK) {
+            std::cerr << "N2 setup START failed scenario=" << scenario << "\n";
+            return false;
+        }
+        const auto data = bridge.open_data_session();
+        if (!data) return false;
+        w::AttachRequest attach;
+        attach.epoch = list.epoch;
+        attach.lease_id = lease;
+        attach.stream_id = started_response.value().stream_id;
+        attach.attach_token = started_response.value().attach_token;
+        if (bridge.prepare_data_attach(data.value(), control.value(), attach, 101U) != Error::OK)
+            return false;
+        HostAuthorityAttachResult prepared{};
+        const auto prepare_until = std::chrono::steady_clock::now() +
+            std::chrono::seconds(5);
+        while (!prepared.ready && std::chrono::steady_clock::now() < prepare_until) {
+            (void)bridge.poll();
+            prepared = bridge.take_data_attach_result(data.value());
+            if (!prepared.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!prepared.ready || prepared.error != Error::OK ||
+            bridge.data_attach_response_sent(data.value(), true) != Error::OK) {
+            std::cerr << "N2 setup ATTACH failed scenario=" << scenario << "\n";
+            return false;
+        }
+
+        if (scenario == 0U) {
+            auto invalid_peer_frame = frame(w::kOpcodeList, 6U, {});
+            invalid_peer_frame.header.kind = w::Kind::response;
+            const auto closed = bridge.accept(control.value(), invalid_peer_frame,
+                context, snapshot, 102U);
+            if (closed.action != w::InboundAction::close || closed.cleanup_required) {
+                std::cerr << "N2 framing close did not accept deferred cleanup\n";
+                return false;
+            }
+        } else if (bridge.response_sent(control.value(), false) != Error::OK) {
+            std::cerr << "N2 partial response close failed\n";
+            return false;
+        }
+        const std::uint64_t client = bridge.client_id(control.value());
+        if (client == 0U || bridge.counts().fatal_unresolved != 0U) {
+            std::cerr << "N2 disconnect slot was not retained for stream cleanup\n";
+            return false;
+        }
+        const auto cleanup_until = std::chrono::steady_clock::now() +
+            std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < cleanup_until) {
+            (void)bridge.poll();
+            const auto current = tuner.engine_status();
+            if (bridge.client_id(control.value()) == 0U &&
+                bridge.data_counts().free == kHostAuthoritySessionCapacity && current &&
+                !current.value().leased[2U]) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        const auto final_status = tuner.engine_status();
+        if (bridge.client_id(control.value()) != 0U ||
+            bridge.data_counts().free != kHostAuthoritySessionCapacity || !final_status ||
+            final_status.value().leased[2U] || backend.capture_starts != 1U ||
+            backend.capture_stops != 1U || bridge.counts().fatal_unresolved != 0U) {
+            std::cerr << "N2 stream cleanup did not finish scenario=" << scenario
+                      << " client=" << bridge.client_id(control.value())
+                      << " data-free=" << bridge.data_counts().free
+                      << " lease=" << (final_status && final_status.value().leased[2U])
+                      << " capture=" << backend.capture_starts << "/"
+                      << backend.capture_stops << " fatal="
+                      << bridge.counts().fatal_unresolved << "\n";
+            return false;
+        }
+        if (bridge.begin_shutdown() != Error::OK) return false;
+        const auto shutdown_until = std::chrono::steady_clock::now() +
+            std::chrono::seconds(5);
+        while (!bridge.stopped() && std::chrono::steady_clock::now() < shutdown_until) {
+            (void)bridge.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        if (!bridge.stopped() || bridge.shutdown_result() != Error::OK) {
+            std::cerr << "N2 shutdown failed scenario=" << scenario << "\n";
+            return false;
+        }
+    }
+
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    auto created = ControlWorkerLanes::create(card, tuner);
+    if (!created) return false;
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto control = bridge.open_session();
+    if (!control) return false;
+    std::array<std::uint8_t, w::kHelloRequestSize> payload{};
+    const auto size = w::encode_hello_request(
+        {{1U, 0U}, {1U, 0U}, w::kFeatureCardService, 0U},
+        {payload.data(), payload.size()});
+    w::Context context;
+    w::Snapshot snapshot;
+    const auto close_after = size ? bridge.accept(control.value(),
+        frame(w::kOpcodeHello, 1U, {payload.data(), size.value()}),
+        context, snapshot, 0U) : dtv::userland::detail::AuthorityReply{};
+    if (close_after.action != w::InboundAction::respond ||
+        !close_after.close_after_reply || close_after.cleanup_required) {
+        std::cerr << "N2 close-after-reply response shape failed action="
+                  << static_cast<unsigned>(close_after.action) << " close="
+                  << close_after.close_after_reply << " cleanup="
+                  << close_after.cleanup_required << "\n";
+        return false;
+    }
+    if (bridge.response_sent(control.value(), true) != Error::OK ||
+        !wait_free(bridge, control.value())) {
+        std::cerr << "N2 close-after-reply disconnect failed\n";
+        return false;
+    }
+    if (bridge.begin_shutdown() != Error::OK) {
+        std::cerr << "N2 close-after-reply begin shutdown failed\n";
+        return false;
+    }
+    const auto stop_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < stop_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!bridge.stopped() || bridge.shutdown_result() != Error::OK) {
+        std::cerr << "N2 close-after-reply shutdown failed\n";
+        return false;
+    }
+    return true;
+}
+
 bool test_control_close_cleans_owned_stream_before_disconnect()
 {
     for (unsigned scenario = 0U; scenario < 4U; ++scenario) {
@@ -1707,6 +2006,14 @@ int main()
     }
     if (!test_control_close_cleans_owned_stream_before_disconnect()) {
         std::cerr << "control close stream cleanup ordering fixture failed\n";
+        return 1;
+    }
+    if (!test_rejected_start_does_not_record_stream()) {
+        std::cerr << "rejected START response fixture failed\n";
+        return 1;
+    }
+    if (!test_stream_owned_disconnect_submit_entry_points()) {
+        std::cerr << "stream-owned DISCONNECT submit entry-point fixture failed\n";
         return 1;
     }
     if (!test_duplicate_completion_is_ignored()) {
