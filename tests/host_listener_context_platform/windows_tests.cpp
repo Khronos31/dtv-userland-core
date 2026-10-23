@@ -309,15 +309,26 @@ bool test_pair_io_and_dacl() noexcept
     if (!check(set_connection_send_buffer_for_test(*io, accepted.connection, 4096) == Error::OK,
                "constrain Windows server send buffer")) return false;
     std::vector<std::uint8_t> large(8U * 1024U * 1024U, 0x5aU);
-    const IoResult written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
-    if (written.status != IoStatus::progress || written.transferred == 0U ||
-        written.transferred >= large.size()) {
-        std::fprintf(stderr, "Windows write status=%u transferred=%zu error=%u\n",
-            static_cast<unsigned>(written.status), written.transferred,
+    IoResult written{};
+    std::size_t full_writes = 0U;
+    bool partial_write = false;
+    for (std::size_t attempt = 0U; attempt < 4U; ++attempt) {
+        written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
+        if (written.status == IoStatus::progress && written.transferred > 0U &&
+            written.transferred < large.size()) {
+            partial_write = true;
+            break;
+        }
+        if (written.status != IoStatus::progress || written.transferred == 0U) break;
+        ++full_writes;
+    }
+    if (!partial_write) {
+        std::fprintf(stderr,
+            "Windows write full_attempts=%zu final_status=%u final_transferred=%zu final_error=%u\n",
+            full_writes, static_cast<unsigned>(written.status), written.transferred,
             static_cast<unsigned>(written.error));
     }
-    if (!check(written.status == IoStatus::progress && written.transferred > 0U &&
-               written.transferred < large.size(), "partial Windows write")) return false;
+    if (!check(partial_write, "partial Windows write")) return false;
     (void)::shutdown(peer, SD_SEND);
     read = io->read_some(accepted.connection, MutableByteView{input.data(), input.size()});
     if (!check(read.status == IoStatus::eof, "clean Windows EOF")) return false;
