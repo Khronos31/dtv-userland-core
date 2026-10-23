@@ -734,6 +734,72 @@ bool test_rejected_disconnect_submit_retains_cleanup()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool test_accept_close_rejected_cleanup_is_retained()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    ControlWorkerStartupOptions options;
+    options.reject_next_authority_cleanup_submit = true;
+    auto created = ControlWorkerLanes::create_for_test(card, tuner, options);
+    if (!created) return false;
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto slot = bridge.open_session();
+    if (!slot || !hello(bridge, slot.value())) return false;
+    std::uint64_t lease = 0U;
+    if (!acquire(bridge, slot.value(), 2U, lease)) return false;
+    const std::uint64_t client = bridge.client_id(slot.value());
+    auto status = tuner.engine_status();
+    if (!status || !status.value().leased[2U]) return false;
+
+    w::Context context;
+    w::Snapshot snapshot;
+    auto invalid_peer_frame = frame(w::kOpcodeList, 3U, {});
+    invalid_peer_frame.header.kind = w::Kind::response;
+    const auto reply = bridge.accept(slot.value(), invalid_peer_frame,
+                                     context, snapshot, 0U);
+    if (reply.action != w::InboundAction::close || !reply.cleanup_required ||
+        reply.cleanup.kind != dtv::userland::detail::AuthorityJobKind::disconnect ||
+        bridge.counts().active != 0U || bridge.counts().tombstone != 1U ||
+        bridge.client_id(slot.value()) != client ||
+        bridge.session_connected_for_test(slot.value())) {
+        std::cerr << "accept-close did not retain the rejected cleanup in a tombstone\n";
+        return false;
+    }
+    if (bridge.close_session(slot.value()) != Error::NOT_FOUND ||
+        bridge.counts().tombstone != 1U || bridge.client_id(slot.value()) != client) {
+        std::cerr << "close_session changed the accept-close cleanup owner\n";
+        return false;
+    }
+    status = tuner.engine_status();
+    if (!status || !status.value().leased[2U]) {
+        std::cerr << "lease cleared before typed cleanup completion\n";
+        return false;
+    }
+    if (!wait_free(bridge, slot.value())) {
+        std::cerr << "poll owner did not retry and complete accept-close cleanup\n";
+        return false;
+    }
+    status = tuner.engine_status();
+    if (!status || status.value().leased[2U] || bridge.client_id(slot.value()) != 0U) {
+        std::cerr << "typed cleanup completion did not clear lease and slot\n";
+        return false;
+    }
+    if (bridge.begin_shutdown() != Error::OK) return false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return bridge.stopped() && bridge.shutdown_result() == Error::OK;
+}
+
 bool test_rollback_cleanup_does_not_block_other_session()
 {
     Backend backend;
@@ -976,7 +1042,8 @@ bool test_fatal_late_acquire_is_not_finalized_early()
     if (early != Error::OK || bridge->stopped() || other_ingress_stops != 1U ||
         bridge->shutdown_result() != Error::NOT_READY ||
         bridge->counts().tombstone + bridge->counts().fatal_unresolved != 2U ||
-        bridge->counts().active != 0U) {
+        bridge->counts().active != 0U ||
+        !bridge->fatal_unresolved_for_test(first.value())) {
         const auto counts = bridge->counts();
         std::cerr << "fatal early poll=" << static_cast<unsigned>(early)
                   << " stopped=" << bridge->stopped() << " counts=" << counts.free
@@ -984,6 +1051,12 @@ bool test_fatal_late_acquire_is_not_finalized_early()
                   << counts.fatal_unresolved << " result="
                   << static_cast<unsigned>(bridge->shutdown_result()) << "\n";
         backend->release_open();
+        return false;
+    }
+    const auto late_acquire_status = tuner->engine_status();
+    if (!late_acquire_status || !late_acquire_status.value().leased[2U]) {
+        backend->release_open();
+        std::cerr << "fatal late ACQUIRE was not directly observed as leased\n";
         return false;
     }
     backend->release_open();
@@ -1038,6 +1111,10 @@ int main()
     }
     if (!test_rejected_disconnect_submit_retains_cleanup()) {
         std::cerr << "rejected DISCONNECT submit fixture failed\n";
+        return 1;
+    }
+    if (!test_accept_close_rejected_cleanup_is_retained()) {
+        std::cerr << "accept-close rejected cleanup fixture failed\n";
         return 1;
     }
     if (!test_rollback_cleanup_does_not_block_other_session()) {
