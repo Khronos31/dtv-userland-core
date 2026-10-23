@@ -585,12 +585,14 @@ struct FakeControlServer final {
 
 bool send_event(Socket peer, std::uint16_t opcode, ByteView payload)
 {
-    std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxTsDataPayload> frame{};
+    constexpr std::size_t capacity = wire::kHeaderSize + wire::kMaxTsDataPayload;
+    std::unique_ptr<std::uint8_t[]> frame(new (std::nothrow) std::uint8_t[capacity]);
+    if (!frame) return false;
     const wire::Header header{wire::Kind::event, opcode, 0U,
                               static_cast<std::uint32_t>(payload.size)};
     const auto size = wire::encode_frame(
-        header, payload, MutableByteView{frame.data(), frame.size()});
-    return size && send_all(peer, frame.data(), size.value());
+        header, payload, MutableByteView{frame.get(), capacity});
+    return size && send_all(peer, frame.get(), size.value());
 }
 
 bool send_stream_end(Socket peer, const wire::StreamFinal& final)
@@ -617,7 +619,6 @@ struct FakeDataServer final {
     void start()
     {
         worker = std::thread([this]() {
-            std::fprintf(stderr, "fake_data:accept\n");
             const Socket peer = listener.accept_one();
             if (peer == kInvalidSocket) {
                 good.store(false);
@@ -639,7 +640,6 @@ struct FakeDataServer final {
                 close_socket(peer);
                 return;
             }
-            std::fprintf(stderr, "fake_data:attach\n");
             const auto attach = wire::decode_attach_request(request_frame.payload);
             if (!attach || attach.value().epoch != service.hello.epoch ||
                 attach.value().lease_id != 77U || attach.value().stream_id != 99U ||
@@ -677,7 +677,6 @@ struct FakeDataServer final {
                 close_socket(peer);
                 return;
             }
-            std::fprintf(stderr, "fake_data:packet\n");
             if (!close_before_stream_end) {
                 std::unique_lock<std::mutex> lock(service.stop_mutex);
                 if (!service.stop_changed.wait_for(lock, std::chrono::seconds(5), [this]() {
@@ -814,7 +813,6 @@ bool run_ts_lifecycle(bool close_before_stream_end)
     px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
     const auto result = px4::userland::cli::test_access::run_wire_with_roots(
         args, profile, output, clock, signal, roots, &failure, &diagnostics);
-    std::fprintf(stderr, "fake_ts:runner_return\n");
     data_server.join();
     control_server.join();
     const bool server_completed = control_server.good.load() && data_server.good.load() &&
@@ -926,11 +924,8 @@ int main()
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
 #endif
     const bool ctl = test_host_ctl_real_server();
-    std::fprintf(stderr, "integration:ctl_return\n");
     const bool ts = run_ts_lifecycle(false);
-    std::fprintf(stderr, "integration:ts_return\n");
     const bool eof = run_ts_lifecycle(true);
-    std::fprintf(stderr, "integration:eof_return\n");
     const bool unsupported = test_unsupported_candidate_then_live_instance();
     const bool security = test_security_refusal_stops_search();
 #if defined(_WIN32)
