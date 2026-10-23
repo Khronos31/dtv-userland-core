@@ -5,6 +5,10 @@
 #include "dtv/userland/host_runtime/control_socket.h"
 #include "px4/tuner_service.h"
 
+#if defined(_WIN32)
+#include "windows/windows_security.h"
+#endif
+
 #include <array>
 #include <atomic>
 #include <chrono>
@@ -317,7 +321,16 @@ bool lifecycle()
                      static_cast<unsigned>(fs_error.value()));
         return false;
     }
-#if !defined(_WIN32)
+#if defined(_WIN32)
+    const std::wstring runtime_path = std::filesystem::path(path).wstring();
+    if (!px4::userland::windows_security::set_current_user_owner_and_dacl(
+            runtime_path.c_str()) ||
+        !px4::userland::windows_security::verify_runtime_parent(runtime_path.c_str())) {
+        std::fprintf(stderr, "runtime directory DACL setup/readback failed\n");
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+#else
     std::filesystem::permissions(path, std::filesystem::perms::owner_all,
                                  std::filesystem::perm_options::replace, fs_error);
     if (fs_error) {

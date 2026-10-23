@@ -3,6 +3,7 @@
 
 #include <array>
 #include <chrono>
+#include <cstdlib>
 #include <iostream>
 #include <condition_variable>
 #include <mutex>
@@ -1472,7 +1473,15 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
     CardBackend card_backend;
     CardSession card_session;
     CardService card(card_backend, card_session);
-    auto created = ControlWorkerLanes::create(card, tuner, "/tmp");
+    const char* worker_runtime_directory = "/tmp";
+#if defined(_WIN32)
+    worker_runtime_directory = std::getenv("LOCALAPPDATA");
+    if (worker_runtime_directory == nullptr || worker_runtime_directory[0] == '\0') {
+        std::cerr << "failed ATTACH fixture LOCALAPPDATA is not set\n";
+        return false;
+    }
+#endif
+    auto created = ControlWorkerLanes::create(card, tuner, worker_runtime_directory);
     if (!created) {
         std::cerr << "failed ATTACH fixture worker create error="
                   << static_cast<unsigned>(created.error()) << "\n";
