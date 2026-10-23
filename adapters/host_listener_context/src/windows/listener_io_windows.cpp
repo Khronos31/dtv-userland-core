@@ -543,6 +543,20 @@ public:
         return Error::OK;
     }
 
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+    Error set_connection_send_buffer_for_test(ConnectionToken connection, int bytes) noexcept
+    {
+        std::size_t index = 0U;
+        std::uint32_t generation = 0U;
+        if (bytes <= 0 || !connection_slot(connection, index, generation))
+            return Error::INVALID_ARGUMENT;
+        if (::setsockopt(connections_[index].socket, SOL_SOCKET, SO_SNDBUF,
+                reinterpret_cast<const char*>(&bytes), sizeof(bytes)) != 0)
+            return socket_error(::WSAGetLastError());
+        return Error::OK;
+    }
+#endif
+
     IoResult read_some(ConnectionToken connection, MutableByteView output) noexcept override
     {
         std::size_t index = 0U;
@@ -810,6 +824,14 @@ private:
 };
 
 }  // namespace
+
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+Error set_connection_send_buffer_for_test(ListenerIo& io, ConnectionToken connection,
+                                          int bytes) noexcept
+{
+    return static_cast<WindowsListenerIo&>(io).set_connection_send_buffer_for_test(connection, bytes);
+}
+#endif
 
 std::unique_ptr<ListenerIo> create_listener_io() noexcept
 {

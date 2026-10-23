@@ -27,6 +27,11 @@
 using namespace dtv::userland;
 using namespace dtv::userland::host_listener_context::detail;
 
+namespace dtv::userland::host_listener_context::detail {
+Error set_connection_send_buffer_for_test(ListenerIo& io, ConnectionToken connection,
+                                          int bytes) noexcept;
+}
+
 namespace {
 
 namespace windows_security = px4::userland::windows_security;
@@ -301,6 +306,8 @@ bool test_pair_io_and_dacl() noexcept
     read = io->read_some(accepted.connection, MutableByteView{input.data(), input.size()});
     if (!check(read.status == IoStatus::progress && read.transferred == 1U && input[0] == 'x',
                "read Windows fragment")) return false;
+    if (!check(set_connection_send_buffer_for_test(*io, accepted.connection, 4096) == Error::OK,
+               "constrain Windows server send buffer")) return false;
     std::vector<std::uint8_t> large(8U * 1024U * 1024U, 0x5aU);
     const IoResult written = io->write_some(accepted.connection, ByteView{large.data(), large.size()});
     if (written.status != IoStatus::progress || written.transferred == 0U ||
