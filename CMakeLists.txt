@@ -679,8 +679,29 @@ if(DTV_USERLAND_BUILD_TESTING)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE)
+        add_library(dtv_userland_host_authority_bridge_test STATIC
+            adapters/host_daemon/src/host_authority_bridge.cpp)
+        set_target_properties(dtv_userland_host_authority_bridge_test PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS OFF)
+        target_compile_features(dtv_userland_host_authority_bridge_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_authority_bridge_test PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>)
+        target_link_libraries(dtv_userland_host_authority_bridge_test PUBLIC
+            dtv::host_authority_owner dtv::host_workers)
+        if(MSVC)
+            target_compile_options(dtv_userland_host_authority_bridge_test PRIVATE /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(dtv_userland_host_authority_bridge_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        target_compile_definitions(dtv_userland_host_authority_bridge_test PRIVATE
+            PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS=1)
         add_executable(host_authority_bridge_tests tests/host_authority_bridge_tests.cpp)
-        target_link_libraries(host_authority_bridge_tests PRIVATE dtv::host_authority_bridge)
+        target_link_libraries(host_authority_bridge_tests PRIVATE
+            dtv_userland_host_authority_bridge_test)
         target_compile_definitions(host_authority_bridge_tests PRIVATE
             PX4_CONTROL_WORKERS_TEST_ACCESS=1 PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS=1)
         add_test(NAME host_authority_bridge_tests COMMAND host_authority_bridge_tests)
