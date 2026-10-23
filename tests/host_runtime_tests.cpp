@@ -158,6 +158,24 @@ bool socket_transport_test()
 
 bool windows_control_signal_test()
 {
+    struct ConsoleLifecycle final {
+        bool allocated = false;
+        bool ready = false;
+        ConsoleLifecycle() noexcept
+        {
+            if (::GetConsoleWindow() != nullptr) ready = true;
+            else if (::AllocConsole() != 0) {
+                allocated = true;
+                ready = true;
+            }
+        }
+        ~ConsoleLifecycle() { if (allocated) (void)::FreeConsole(); }
+    } console;
+    if (!console.ready) {
+        std::printf("windows_console_setup=FAIL error=%lu\n",
+                    static_cast<unsigned long>(::GetLastError()));
+        return false;
+    }
     std::array<wchar_t, MAX_PATH> executable{};
     const DWORD length = ::GetModuleFileNameW(nullptr, executable.data(),
                                                static_cast<DWORD>(executable.size()));
@@ -170,10 +188,14 @@ bool windows_control_signal_test()
     startup.cb = sizeof(startup);
     PROCESS_INFORMATION process{};
     if (::CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-            CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process) == 0)
+            CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process) == 0) {
+        std::printf("windows_signal_child_create=FAIL error=%lu\n",
+                    static_cast<unsigned long>(::GetLastError()));
         return false;
+    }
     const bool sent = ::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
                                                  process.dwProcessId) != 0;
+    const DWORD signal_error = sent ? ERROR_SUCCESS : ::GetLastError();
     const DWORD waited = sent ? ::WaitForSingleObject(process.hProcess, 6000U) : WAIT_FAILED;
     if (waited != WAIT_OBJECT_0) (void)::TerminateProcess(process.hProcess, 1U);
     DWORD exit_code = 1U;
@@ -182,6 +204,9 @@ bool windows_control_signal_test()
     (void)::CloseHandle(process.hProcess);
     const bool passed = sent && waited == WAIT_OBJECT_0 && exit_code == 0U;
     if (passed) std::puts("windows_ctrl_break_lifecycle=PASS");
+    else std::printf("windows_ctrl_break_lifecycle=FAIL signal_error=%lu wait=%lu exit=%lu\n",
+        static_cast<unsigned long>(signal_error), static_cast<unsigned long>(waited),
+        static_cast<unsigned long>(exit_code));
     return passed;
 }
 #else
