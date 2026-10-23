@@ -617,6 +617,7 @@ struct FakeDataServer final {
     void start()
     {
         worker = std::thread([this]() {
+            std::fprintf(stderr, "fake_data:accept\n");
             const Socket peer = listener.accept_one();
             if (peer == kInvalidSocket) {
                 good.store(false);
@@ -638,6 +639,7 @@ struct FakeDataServer final {
                 close_socket(peer);
                 return;
             }
+            std::fprintf(stderr, "fake_data:attach\n");
             const auto attach = wire::decode_attach_request(request_frame.payload);
             if (!attach || attach.value().epoch != service.hello.epoch ||
                 attach.value().lease_id != 77U || attach.value().stream_id != 99U ||
@@ -675,6 +677,7 @@ struct FakeDataServer final {
                 close_socket(peer);
                 return;
             }
+            std::fprintf(stderr, "fake_data:packet\n");
             if (!close_before_stream_end) {
                 std::unique_lock<std::mutex> lock(service.stop_mutex);
                 if (!service.stop_changed.wait_for(lock, std::chrono::seconds(5), [this]() {
@@ -811,6 +814,7 @@ bool run_ts_lifecycle(bool close_before_stream_end)
     px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
     const auto result = px4::userland::cli::test_access::run_wire_with_roots(
         args, profile, output, clock, signal, roots, &failure, &diagnostics);
+    std::fprintf(stderr, "fake_ts:runner_return\n");
     data_server.join();
     control_server.join();
     const bool server_completed = control_server.good.load() && data_server.good.load() &&
@@ -922,8 +926,11 @@ int main()
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
 #endif
     const bool ctl = test_host_ctl_real_server();
+    std::fprintf(stderr, "integration:ctl_return\n");
     const bool ts = run_ts_lifecycle(false);
+    std::fprintf(stderr, "integration:ts_return\n");
     const bool eof = run_ts_lifecycle(true);
+    std::fprintf(stderr, "integration:eof_return\n");
     const bool unsupported = test_unsupported_candidate_then_live_instance();
     const bool security = test_security_refusal_stops_search();
 #if defined(_WIN32)
