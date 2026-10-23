@@ -5,8 +5,20 @@ on:
     paths:
       - '.github/workflows/host-worker-installed-sanitizer.yml'
       - 'CMakeLists.txt'
-      - 'adapters/host_daemon/**'
-      - 'adapters/host_facade/include/px4/control_execution_layout.h'
+      - 'adapters/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/**'
+      - 'cmake/**'
+  push:
+    branches:
+      - main
+    paths:
+      - '.github/workflows/host-worker-installed-sanitizer.yml'
+      - 'CMakeLists.txt'
+      - 'adapters/**'
+      - 'include/**'
+      - 'src/**'
       - 'tests/**'
       - 'cmake/**'
 
