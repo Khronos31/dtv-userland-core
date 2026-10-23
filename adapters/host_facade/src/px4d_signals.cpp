@@ -70,6 +70,13 @@ bool cleanup_complete() noexcept
     return cleanup_complete_flag.load(std::memory_order_acquire);
 }
 
+#if defined(DTV_USERLAND_SIGNAL_TESTING)
+bool dispatch_console_control_for_test(std::uint32_t control_type) noexcept
+{
+    return console_control_handler(static_cast<DWORD>(control_type)) != FALSE;
+}
+#endif
+
 [[noreturn]] void exit_after_close_deadline(int status) noexcept
 {
     (void)::TerminateProcess(::GetCurrentProcess(), static_cast<UINT>(status));

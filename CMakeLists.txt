@@ -885,8 +885,22 @@ if(DTV_USERLAND_BUILD_TESTING)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_RUNTIME AND DTV_USERLAND_BUILD_HOST_FACADE)
+        set(_dtv_userland_host_facade_test_target dtv::host_facade)
+        if(WIN32)
+            add_library(dtv_userland_host_facade_test STATIC
+                adapters/host_facade/src/px4d_signals.cpp)
+            target_compile_features(dtv_userland_host_facade_test PUBLIC cxx_std_17)
+            target_include_directories(dtv_userland_host_facade_test PUBLIC
+                $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>)
+            target_compile_definitions(dtv_userland_host_facade_test PUBLIC
+                DTV_USERLAND_SIGNAL_TESTING=1)
+            target_link_libraries(dtv_userland_host_facade_test PUBLIC shell32)
+            target_compile_options(dtv_userland_host_facade_test PRIVATE /EHs-c- /GR- /W4)
+            set(_dtv_userland_host_facade_test_target dtv_userland_host_facade_test)
+        endif()
         add_executable(host_runtime_tests tests/host_runtime_tests.cpp)
-        target_link_libraries(host_runtime_tests PRIVATE dtv::host_runtime dtv::host_facade)
+        target_link_libraries(host_runtime_tests PRIVATE
+            dtv::host_runtime ${_dtv_userland_host_facade_test_target})
         add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
     endif()
     if(DTV_USERLAND_BUILD_HOST_CTL)

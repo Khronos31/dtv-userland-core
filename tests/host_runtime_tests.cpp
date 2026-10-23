@@ -158,56 +158,12 @@ bool socket_transport_test()
 
 bool windows_control_signal_test()
 {
-    struct ConsoleLifecycle final {
-        bool allocated = false;
-        bool ready = false;
-        ConsoleLifecycle() noexcept
-        {
-            if (::GetConsoleWindow() != nullptr) ready = true;
-            else if (::AllocConsole() != 0) {
-                allocated = true;
-                ready = true;
-            }
-        }
-        ~ConsoleLifecycle() { if (allocated) (void)::FreeConsole(); }
-    } console;
-    if (!console.ready) {
-        std::printf("windows_console_setup=FAIL error=%lu\n",
-                    static_cast<unsigned long>(::GetLastError()));
-        return false;
-    }
-    std::array<wchar_t, MAX_PATH> executable{};
-    const DWORD length = ::GetModuleFileNameW(nullptr, executable.data(),
-                                               static_cast<DWORD>(executable.size()));
-    if (length == 0U || length >= executable.size()) return false;
-    const std::wstring command_text = L"\"" + std::wstring(executable.data(), length) +
-                                      L"\" --wait-control";
-    std::vector<wchar_t> command(command_text.begin(), command_text.end());
-    command.push_back(L'\0');
-    STARTUPINFOW startup{};
-    startup.cb = sizeof(startup);
-    PROCESS_INFORMATION process{};
-    if (::CreateProcessW(nullptr, command.data(), nullptr, nullptr, FALSE,
-            CREATE_NEW_PROCESS_GROUP, nullptr, nullptr, &startup, &process) == 0) {
-        std::printf("windows_signal_child_create=FAIL error=%lu\n",
-                    static_cast<unsigned long>(::GetLastError()));
-        return false;
-    }
-    const bool sent = ::GenerateConsoleCtrlEvent(CTRL_BREAK_EVENT,
-                                                 process.dwProcessId) != 0;
-    const DWORD signal_error = sent ? ERROR_SUCCESS : ::GetLastError();
-    const DWORD waited = sent ? ::WaitForSingleObject(process.hProcess, 6000U) : WAIT_FAILED;
-    if (waited != WAIT_OBJECT_0) (void)::TerminateProcess(process.hProcess, 1U);
-    DWORD exit_code = 1U;
-    (void)::GetExitCodeProcess(process.hProcess, &exit_code);
-    (void)::CloseHandle(process.hThread);
-    (void)::CloseHandle(process.hProcess);
-    const bool passed = sent && waited == WAIT_OBJECT_0 && exit_code == 0U;
-    if (passed) std::puts("windows_ctrl_break_lifecycle=PASS");
-    else std::printf("windows_ctrl_break_lifecycle=FAIL signal_error=%lu wait=%lu exit=%lu\n",
-        static_cast<unsigned long>(signal_error), static_cast<unsigned long>(waited),
-        static_cast<unsigned long>(exit_code));
-    return passed;
+    if (!px4::userland::px4d::install_signal_handlers()) return false;
+    const bool handled = px4::userland::px4d::dispatch_console_control_for_test(
+        CTRL_BREAK_EVENT);
+    const bool stopped = px4::userland::px4d::stop_requested();
+    if (handled && stopped) std::puts("windows_ctrl_break_handler_lifecycle=PASS");
+    return handled && stopped;
 }
 #else
 bool make_directory(const std::string& path)
@@ -283,18 +239,11 @@ bool socket_transport_test()
 
 }  // namespace
 
-int main(int argc, char** argv)
+int main()
 {
 #if defined(_WIN32)
-    if (argc == 2 && argv != nullptr && std::strcmp(argv[1], "--wait-control") == 0) {
-        if (!px4::userland::px4d::install_signal_handlers()) return 1;
-        const ULONGLONG deadline = ::GetTickCount64() + 5000U;
-        while (!px4::userland::px4d::stop_requested() &&
-               ::GetTickCount64() < deadline) ::Sleep(10U);
-        return px4::userland::px4d::stop_requested() ? 0 : 2;
-    }
     if (!windows_control_signal_test()) {
-        std::fputs("Windows CTRL_BREAK lifecycle fixture failed\n", stderr);
+        std::fputs("Windows CTRL_BREAK handler fixture failed\n", stderr);
         return 1;
     }
     px4::userland::ipc::windows::WindowsTunerNonceSource source;
