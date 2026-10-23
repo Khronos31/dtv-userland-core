@@ -24,6 +24,7 @@ struct ContextConfig final {
     wire::ListResponse canonical_list;
     wire::Context context;
     ::dtv::userland::detail::ControlAuthority::TuneValidator validate_tune = nullptr;
+    std::uint64_t stream_engine_epoch = 0U;
     std::uint64_t stream_arm_budget_ms = 0U;
 };
 
