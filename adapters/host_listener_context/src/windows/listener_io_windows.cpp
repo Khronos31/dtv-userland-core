@@ -25,6 +25,9 @@
 #include <memory>
 #include <new>
 #include <string>
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+#include <cstdio>
+#endif
 
 namespace dtv::userland::host_listener_context::detail {
 namespace {
@@ -282,7 +285,13 @@ public:
         PACL acl = nullptr;
         windows_security::SidBuffer sid_storage{};
         if (!windows_security::build_current_user_security(attributes, descriptor, acl,
-                                                            sid_storage)) return Error::UNSUPPORTED;
+                                                            sid_storage)) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows reserve stage=build-lock-security failed win32=%lu\n",
+                static_cast<unsigned long>(::GetLastError()));
+#endif
+            return Error::UNSUPPORTED;
+        }
         lock_handle_ = ::CreateFileW(lock_path_.c_str(), GENERIC_READ | GENERIC_WRITE,
             FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, &attributes,
             CREATE_NEW, FILE_ATTRIBUTE_NORMAL | FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
@@ -294,18 +303,39 @@ public:
         }
         const DWORD open_error = lock_handle_ == INVALID_HANDLE_VALUE ? ::GetLastError() : ERROR_SUCCESS;
         (void)::LocalFree(acl);
-        if (lock_handle_ == INVALID_HANDLE_VALUE) return open_error == ERROR_SHARING_VIOLATION ?
-            Error::BUSY : Error::UNSUPPORTED;
+        if (lock_handle_ == INVALID_HANDLE_VALUE) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows reserve stage=open-lock failed path=%ls error=%lu\n",
+                lock_path_.c_str(), static_cast<unsigned long>(open_error));
+#endif
+            return open_error == ERROR_SHARING_VIOLATION ? Error::BUSY : Error::UNSUPPORTED;
+        }
         BY_HANDLE_FILE_INFORMATION lock_info{};
-        if (::GetFileInformationByHandle(lock_handle_, &lock_info) == 0 ||
-            (lock_info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) != 0U ||
-            !verify_current_user_security(lock_path_.c_str())) {
+        const BOOL lock_info_ok = ::GetFileInformationByHandle(lock_handle_, &lock_info);
+        const DWORD lock_info_error = lock_info_ok == 0 ? ::GetLastError() : ERROR_SUCCESS;
+        const bool lock_is_regular = lock_info_ok != 0 &&
+            (lock_info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U;
+        const bool lock_security_ok = lock_is_regular && verify_current_user_security(lock_path_.c_str());
+        if (!lock_is_regular || !lock_security_ok) {
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr,
+                "Windows reserve stage=verify-lock failed path=%ls handle_info=%u handle_error=%lu attrs=%lu security=%u security_error=%lu\n",
+                lock_path_.c_str(), lock_info_ok != 0 ? 1U : 0U,
+                static_cast<unsigned long>(lock_info_error),
+                static_cast<unsigned long>(lock_info.dwFileAttributes),
+                lock_security_ok ? 1U : 0U,
+                static_cast<unsigned long>(::GetLastError()));
+#endif
             (void)::CloseHandle(lock_handle_); lock_handle_ = INVALID_HANDLE_VALUE;
             return Error::UNSUPPORTED;
         }
         if (::LockFileEx(lock_handle_, LOCKFILE_EXCLUSIVE_LOCK | LOCKFILE_FAIL_IMMEDIATELY,
                 0U, MAXDWORD, MAXDWORD, &lock_overlap_) == 0) {
             const DWORD error = ::GetLastError();
+#ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
+            std::fprintf(stderr, "Windows reserve stage=lock-file failed path=%ls error=%lu\n",
+                lock_path_.c_str(), static_cast<unsigned long>(error));
+#endif
             (void)::CloseHandle(lock_handle_); lock_handle_ = INVALID_HANDLE_VALUE;
             return error == ERROR_LOCK_VIOLATION ? Error::BUSY : Error::UNSUPPORTED;
         }

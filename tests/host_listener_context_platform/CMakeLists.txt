@@ -3,6 +3,8 @@ if(WIN32)
     add_executable(host_listener_context_platform_tests
         windows_tests.cpp
         ${_listener_context_root}/adapters/host_listener_context/src/windows/listener_io_windows.cpp)
+    target_compile_definitions(host_listener_context_platform_tests PRIVATE
+        DTV_LISTENER_CONTEXT_DIAGNOSTICS=1)
     target_include_directories(host_listener_context_platform_tests PRIVATE
         ${_listener_context_root}/adapters/host_listener_context/src
         ${_listener_context_root}/adapters/host_runtime/include)
