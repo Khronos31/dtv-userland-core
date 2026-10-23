@@ -39,7 +39,8 @@ bool put_root(RuntimeRootCandidates& roots, const char* path) noexcept
 
 bool valid_instance(const char* value) noexcept
 {
-    if (value == nullptr || value[0] == '\0') return false;
+    if (value == nullptr || value[0] == '\0' || std::strcmp(value, ".") == 0 ||
+        std::strcmp(value, "..") == 0) return false;
     const std::size_t length = std::strlen(value);
     if (length > 64U) return false;
     for (std::size_t index = 0U; index < length; ++index) {
@@ -123,6 +124,8 @@ Result<RuntimeInstanceDiscovery> discover_runtime_instances(
         root.data(), root_size);
     (void)::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, product_slug, -1,
         slug.data(), slug_size);
+    root.resize(static_cast<std::size_t>(root_size - 1));
+    slug.resize(static_cast<std::size_t>(slug_size - 1));
     std::wstring pattern = root + L"\\" + slug + L"\\v1\\*";
     WIN32_FIND_DATAW data{};
     HANDLE search = ::FindFirstFileW(pattern.c_str(), &data);
