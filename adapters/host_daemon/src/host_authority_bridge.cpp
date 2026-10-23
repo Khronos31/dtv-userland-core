@@ -647,6 +647,12 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 data.attach_result.ready = true;
             } else {
                 data.drained = true;
+                data.attach_result.error = completion.error == Error::OK
+                    ? Error::NOT_READY : completion.error;
+                data.attach_result.response.epoch =
+                    authority_owner_.authority().server().epoch;
+                data.attach_result.response.stream_id = data.ticket.stream_id;
+                data.attach_result.ready = data.connection_open;
                 (void)tuner_service_.authority_abort_attach_v1(
                     data.ticket, completion.error == Error::OK
                         ? Error::OK : completion.error);

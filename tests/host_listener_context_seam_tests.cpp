@@ -42,5 +42,10 @@ int main()
 {
     FakeListenerIo io;
     ListenerPair pair;
-    return io.publish_pair(pair) == Error::OK ? 0 : 1;
+    if (io.publish_pair(pair) != Error::OK) return 1;
+    dtv::userland::host_listener_context::ContextConfig config;
+    const auto assembled =
+        dtv::userland::host_listener_context::EnclosureContext::assemble(
+            nullptr, nullptr, config);
+    return !assembled && assembled.error() == Error::INVALID_ARGUMENT ? 0 : 2;
 }

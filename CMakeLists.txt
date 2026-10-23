@@ -303,16 +303,35 @@ if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
         message(FATAL_ERROR
             "DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE")
     endif()
-    add_library(dtv_userland_host_listener_context INTERFACE)
+    set(_dtv_userland_host_listener_context_sources
+        adapters/host_listener_context/src/enclosure_context.cpp)
+    if(WIN32)
+        list(APPEND _dtv_userland_host_listener_context_sources
+            adapters/host_listener_context/src/windows/listener_io_windows.cpp)
+    else()
+        list(APPEND _dtv_userland_host_listener_context_sources
+            adapters/host_listener_context/src/posix/listener_io_posix.cpp)
+    endif()
+    add_library(dtv_userland_host_listener_context STATIC
+        ${_dtv_userland_host_listener_context_sources})
     add_library(dtv::host_listener_context ALIAS dtv_userland_host_listener_context)
     set_target_properties(dtv_userland_host_listener_context PROPERTIES
         EXPORT_NAME host_listener_context)
-    target_compile_features(dtv_userland_host_listener_context INTERFACE cxx_std_17)
-    target_include_directories(dtv_userland_host_listener_context INTERFACE
+    target_compile_features(dtv_userland_host_listener_context PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_listener_context PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-    target_link_libraries(dtv_userland_host_listener_context INTERFACE
+    target_include_directories(dtv_userland_host_listener_context PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
+    target_link_libraries(dtv_userland_host_listener_context PUBLIC
         dtv::host_runtime dtv::host_authority_bridge)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_listener_context PRIVATE /EHs-c- /GR- /W4)
+        target_link_libraries(dtv_userland_host_listener_context PUBLIC advapi32 ws2_32)
+    else()
+        target_compile_options(dtv_userland_host_listener_context PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
 endif()
 
 if(DTV_USERLAND_BUILD_HOST_FACADE)
@@ -765,14 +784,50 @@ install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland
 
 if(DTV_USERLAND_BUILD_TESTING)
     if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
+        add_library(dtv_userland_host_listener_context_test STATIC
+            adapters/host_listener_context/src/enclosure_context.cpp
+            tests/host_listener_context_fake_io.cpp)
+        target_compile_features(dtv_userland_host_listener_context_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_listener_context_test PUBLIC
+            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/include
+            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
+        target_link_libraries(dtv_userland_host_listener_context_test PUBLIC
+            dtv::host_runtime dtv::host_authority_bridge)
+        if(MSVC)
+            target_compile_options(dtv_userland_host_listener_context_test PRIVATE
+                /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(dtv_userland_host_listener_context_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
         add_executable(host_listener_context_seam_tests
             tests/host_listener_context_seam_tests.cpp)
-        target_include_directories(host_listener_context_seam_tests PRIVATE
-            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
         target_link_libraries(host_listener_context_seam_tests PRIVATE
-            dtv::host_listener_context)
+            dtv_userland_host_listener_context_test)
         add_test(NAME host_listener_context_seam_tests
             COMMAND host_listener_context_seam_tests)
+        add_executable(host_listener_context_tests
+            tests/host_listener_context_tests.cpp)
+        target_link_libraries(host_listener_context_tests PRIVATE
+            dtv_userland_host_listener_context_test)
+        add_test(NAME host_listener_context_tests
+            COMMAND host_listener_context_tests)
+        set_tests_properties(host_listener_context_tests PROPERTIES TIMEOUT 30)
+        add_executable(host_listener_context_integration_tests
+            tests/host_listener_context_integration_tests.cpp)
+        target_link_libraries(host_listener_context_integration_tests PRIVATE
+            dtv::host_listener_context)
+        if(MSVC)
+            target_compile_options(host_listener_context_integration_tests PRIVATE
+                /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(host_listener_context_integration_tests PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME host_listener_context_integration_tests
+            COMMAND host_listener_context_integration_tests)
+        set_tests_properties(host_listener_context_integration_tests PROPERTIES TIMEOUT 45)
+        add_subdirectory(tests/host_listener_context_platform)
     endif()
 
     add_executable(foundation_tests tests/foundation_tests.cpp)

@@ -89,7 +89,8 @@ public:
             capture_condition.notify_all();
             capture_condition.wait(lock, [this] { return capture_released; });
         }
-        return Result<void>::success();
+        return fail_capture_start ? Result<void>::failure(Error::UNSUPPORTED)
+                                  : Result<void>::success();
     }
     Result<void> stop_capture(std::uint8_t, ipc::System) noexcept override
     {
@@ -100,6 +101,7 @@ public:
     std::array<unsigned, 8U> closes{};
     unsigned capture_starts = 0U;
     unsigned capture_stops = 0U;
+    bool fail_capture_start = false;
     void block_open(std::uint8_t receiver) noexcept
     {
         std::lock_guard<std::mutex> lock(gate_mutex);
@@ -210,6 +212,11 @@ public:
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
     {
+        if (!attached) {
+            final.counters = counters;
+            final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
+            return Result<void>::success();
+        }
         if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         attached = false;
         final.counters = counters;
@@ -225,12 +232,13 @@ public:
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
     {
-        return same(attachment) ? Result<TunerStreamFinalSnapshot>::success(final)
-                                : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        return !attached || same(attachment)
+            ? Result<TunerStreamFinalSnapshot>::success(final)
+            : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
-        if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
+        if (attached && !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         final_released = true;
         return Result<void>::success();
     }
@@ -1447,6 +1455,75 @@ bool test_authority_stream_prepare_commit_stop()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool test_failed_attach_prepare_is_reported_to_data_owner()
+{
+    Backend backend;
+    backend.fail_capture_start = true;
+    Nonce nonce;
+    Time time;
+    Stream stream;
+    TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
+    if (!tuner.configure_strict_capabilities() ||
+        !tuner.configure_stream_contract(
+            dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL)) return false;
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    auto created = ControlWorkerLanes::create(card, tuner, "/tmp");
+    if (!created) return false;
+    const auto list = make_list();
+    const w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+        return false;
+    const auto control = bridge.open_session();
+    if (!control || !hello(bridge, control.value())) return false;
+    std::uint64_t lease = 0U;
+    if (!acquire(bridge, control.value(), 2U, lease, 3U) ||
+        !tune(bridge, control.value(), list.epoch, lease, 4U)) return false;
+    const auto status = tuner.engine_status();
+    if (!status || status.value().tune_metadata[2U].current_revision == 0U) return false;
+    w::StartRequest start;
+    start.epoch = list.epoch;
+    start.lease_id = lease;
+    start.tune_revision = status.value().tune_metadata[2U].current_revision;
+    std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+    const auto size = w::encode_start_request(start, {payload.data(), payload.size()});
+    if (!size) return false;
+    w::Context context;
+    context.epoch = list.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto started = bridge.accept(control.value(), frame(w::kOpcodeStartStream, 7U,
+        {payload.data(), size.value()}), context, snapshot, 100U);
+    if (started.action != w::InboundAction::respond ||
+        bridge.response_sent(control.value(), true) != Error::OK) return false;
+    const auto start_response = w::decode_start_response(
+        {started.frame.data + w::kHeaderSize, started.frame.size - w::kHeaderSize});
+    if (!start_response) return false;
+    const auto data = bridge.open_data_session();
+    if (!data) return false;
+    w::AttachRequest attach;
+    attach.epoch = list.epoch;
+    attach.lease_id = lease;
+    attach.stream_id = start_response.value().stream_id;
+    attach.attach_token = start_response.value().attach_token;
+    if (bridge.prepare_data_attach(data.value(), control.value(), attach, 101U) != Error::OK)
+        return false;
+    HostAuthorityAttachResult result{};
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!result.ready && std::chrono::steady_clock::now() < deadline) {
+        (void)bridge.poll();
+        result = bridge.take_data_attach_result(data.value());
+        if (!result.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!result.ready || result.error != Error::UNSUPPORTED ||
+        result.response.stream_id != start_response.value().stream_id) return false;
+    (void)bridge.close_data_session(data.value());
+    bridge.close_session_for_test(control.value());
+    return static_cast<bool>(created.value()->stop_and_join());
+}
+
 bool test_rejected_start_does_not_record_stream()
 {
     Backend backend;
@@ -2545,6 +2622,10 @@ int main(int argc, char** argv)
     }
     if (!test_authority_stream_prepare_commit_stop()) {
         std::cerr << "Authority stream prepare/commit/STOP fixture failed\n";
+        return 1;
+    }
+    if (!test_failed_attach_prepare_is_reported_to_data_owner()) {
+        std::cerr << "failed ATTACH prepare result fixture failed\n";
         return 1;
     }
     if (!test_control_close_cleans_owned_stream_before_disconnect()) {

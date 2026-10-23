@@ -19,7 +19,6 @@ struct ContextConfig final {
     std::string instance;
     host_runtime::EndpointAccess access =
         host_runtime::EndpointAccess::private_user;
-    std::int64_t expected_peer_uid = -1;
     wire::ServerHello server;
     wire::ListResponse canonical_list;
     wire::Context context;
