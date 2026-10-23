@@ -4,7 +4,7 @@ $root = (Get-Location).Path
 $signalPath = Join-Path $root 'adapters/host_facade/src/px4d_signals.cpp'
 $socketPath = Join-Path $root 'adapters/host_runtime/src/control_socket.cpp'
 $signalLog = Join-Path $root 'signal-registration-old-behavior.log'
-$signalApiOmittedLog = Join-Path $root 'signal-registration-api-omitted.log'
+$signalApiOmittedLog = Join-Path $root 'signal-registration-api-call-replaced.log'
 $aceLog = Join-Path $root 'sid-start-old-behavior.log'
 $signalOriginal = [System.IO.File]::ReadAllText($signalPath)
 $socketOriginal = [System.IO.File]::ReadAllText($socketPath)
@@ -46,23 +46,16 @@ finally {
 }
 
 try {
-    $apiBlock = '    const BOOL result = ::SetConsoleCtrlHandler(handler, add);' +
-        [Environment]::NewLine + '#if defined(DTV_USERLAND_SIGNAL_TESTING)' +
-        [Environment]::NewLine + '    if (result != FALSE)' +
-        [Environment]::NewLine +
-        '        successful_registrations_for_test.fetch_add(1U, std::memory_order_relaxed);' +
-        [Environment]::NewLine + '#endif' + [Environment]::NewLine + '    return result;'
-    $apiOmitted = '    (void)handler;' + [Environment]::NewLine +
-        '    (void)add;' + [Environment]::NewLine +
-        '    return TRUE;'
-    $signalApiOmitted = $signalOriginal.Replace($apiBlock, $apiOmitted)
-    if ($signalApiOmitted -eq $signalOriginal) {
+    $apiCall = '    const BOOL result = ::SetConsoleCtrlHandler(handler, add);'
+    $apiCallReplaced = '    const BOOL result = TRUE;'
+    $signalApiCallReplaced = $signalOriginal.Replace($apiCall, $apiCallReplaced)
+    if ($signalApiCallReplaced -eq $signalOriginal) {
         throw 'Signal API-call-omitted mutation source anchor was not found'
     }
-    [System.IO.File]::WriteAllText($signalPath, $signalApiOmitted, $encoding)
+    [System.IO.File]::WriteAllText($signalPath, $signalApiCallReplaced, $encoding)
     Build-PrimaryFixture 'host_runtime_tests'
     Expect-PrimaryFailure 'host_runtime_tests' `
-        'windows_signal_success_counter_after_api_success=FAIL' $signalApiOmittedLog
+        'windows_signal_os_registration_observed=FAIL' $signalApiOmittedLog
 }
 finally {
     [System.IO.File]::WriteAllText($signalPath, $signalOriginal, $encoding)

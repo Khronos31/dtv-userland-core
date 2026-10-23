@@ -397,13 +397,19 @@ bool windows_control_signal_test()
         std::fputs("windows_signal_success_counter_after_api_success=FAIL\n", stderr);
         return false;
     }
+    const bool observed_os_registration =
+        px4::userland::px4d::unregister_signal_handler_for_test();
+    if (observed_os_registration)
+        std::puts("windows_signal_os_registration_observed=PASS");
+    else
+        std::fputs("windows_signal_os_registration_observed=FAIL\n", stderr);
     const bool handled = px4::userland::px4d::dispatch_console_control_for_test(
         CTRL_BREAK_EVENT);
     const bool stopped = px4::userland::px4d::stop_requested();
     if (handled && stopped) std::puts("windows_ctrl_break_handler_lifecycle=PASS");
     if (rejected_registration)
         std::puts("windows_console_handler_registration_failure_rejected=PASS");
-    return handled && stopped;
+    return observed_os_registration && handled && stopped;
 }
 #else
 bool make_directory(const std::string& path)

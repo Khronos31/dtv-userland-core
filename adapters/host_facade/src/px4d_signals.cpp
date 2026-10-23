@@ -111,6 +111,11 @@ bool dispatch_console_control_for_test(std::uint32_t control_type) noexcept
 {
     return console_control_handler(static_cast<DWORD>(control_type)) != FALSE;
 }
+
+bool unregister_signal_handler_for_test() noexcept
+{
+    return ::SetConsoleCtrlHandler(console_control_handler, FALSE) != FALSE;
+}
 #endif
 
 [[noreturn]] void exit_after_close_deadline(int status) noexcept
