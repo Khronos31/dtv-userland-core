@@ -565,7 +565,7 @@ bool close_handoff_and_pending_owner()
     while (!polling.load(std::memory_order_acquire))
         std::this_thread::yield();
     const bool entered_poll = io.wait_poll();
-    const auto first = context->close(Timeout{0U});
+    const auto first = context->close(Timeout{15000U});
     const bool entered_cleanup = io.wait_unpublish();
     const bool retained = io.reserved() && io.published();
     const auto second = context->close(Timeout{0U});
