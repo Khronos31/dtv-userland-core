@@ -4,6 +4,7 @@ $root = (Get-Location).Path
 $signalPath = Join-Path $root 'adapters/host_facade/src/px4d_signals.cpp'
 $socketPath = Join-Path $root 'adapters/host_runtime/src/control_socket.cpp'
 $signalLog = Join-Path $root 'signal-registration-old-behavior.log'
+$signalApiOmittedLog = Join-Path $root 'signal-registration-api-omitted.log'
 $aceLog = Join-Path $root 'sid-start-old-behavior.log'
 $signalOriginal = [System.IO.File]::ReadAllText($signalPath)
 $socketOriginal = [System.IO.File]::ReadAllText($socketPath)
@@ -39,6 +40,24 @@ try {
     Build-PrimaryFixture 'host_runtime_tests'
     Expect-PrimaryFailure 'host_runtime_tests' `
         'windows_signal_success_counter_after_failure=FAIL' $signalLog
+}
+finally {
+    [System.IO.File]::WriteAllText($signalPath, $signalOriginal, $encoding)
+}
+
+try {
+    $apiCall = '    const BOOL result = ::SetConsoleCtrlHandler(handler, add);'
+    $apiOmitted = '    (void)handler;' + [Environment]::NewLine +
+        '    (void)add;' + [Environment]::NewLine +
+        '    return TRUE;'
+    $signalApiOmitted = $signalOriginal.Replace($apiCall, $apiOmitted)
+    if ($signalApiOmitted -eq $signalOriginal) {
+        throw 'Signal API-call-omitted mutation source anchor was not found'
+    }
+    [System.IO.File]::WriteAllText($signalPath, $signalApiOmitted, $encoding)
+    Build-PrimaryFixture 'host_runtime_tests'
+    Expect-PrimaryFailure 'host_runtime_tests' `
+        'windows_signal_success_counter_after_api_success=FAIL' $signalApiOmittedLog
 }
 finally {
     [System.IO.File]::WriteAllText($signalPath, $signalOriginal, $encoding)

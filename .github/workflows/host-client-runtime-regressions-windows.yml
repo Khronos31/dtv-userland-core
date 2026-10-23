@@ -60,5 +60,6 @@ jobs:
           path: |
             windows-primary-fixtures.log
             signal-registration-old-behavior.log
+            signal-registration-api-omitted.log
             sid-start-old-behavior.log
           if-no-files-found: warn
