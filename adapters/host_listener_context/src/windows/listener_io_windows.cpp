@@ -249,12 +249,17 @@ bool delete_if_identity(const wchar_t* path, const PathIdentity& expected) noexc
     if (file == INVALID_HANDLE_VALUE) return ::GetLastError() == ERROR_FILE_NOT_FOUND;
     BY_HANDLE_FILE_INFORMATION info{};
     const BOOL queried = ::GetFileInformationByHandle(file, &info);
+    FILE_ATTRIBUTE_TAG_INFO tag{};
+    const BOOL tag_queried = ::GetFileInformationByHandleEx(file, FileAttributeTagInfo,
+        &tag, sizeof(tag));
     const PathIdentity current{info.dwVolumeSerialNumber,
         (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow,
         queried != 0};
     bool removed = false;
-    if (queried != 0 && same_identity(expected, current) &&
-        (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U) {
+    if (queried != 0 && tag_queried != 0 && same_identity(expected, current) &&
+        (tag.FileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U &&
+        (tag.FileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U &&
+        tag.ReparseTag == IO_REPARSE_TAG_AF_UNIX) {
         FILE_DISPOSITION_INFO disposition{};
         disposition.DeleteFile = TRUE;
         removed = ::SetFileInformationByHandle(file, FileDispositionInfo,
