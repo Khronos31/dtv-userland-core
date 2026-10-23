@@ -56,8 +56,10 @@ bool to_wide(const std::string& input, std::wstring& output) noexcept
         input.c_str(), -1, nullptr, 0);
     if (count <= 0) return false;
     output.resize(static_cast<std::size_t>(count));
-    return ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
-        input.c_str(), -1, output.data(), count) == count;
+    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS,
+            input.c_str(), -1, output.data(), count) != count) return false;
+    output.resize(static_cast<std::size_t>(count - 1));
+    return true;
 }
 
 bool make_runtime(std::wstring& output, std::string& utf8) noexcept
@@ -197,11 +199,39 @@ bool test_pair_io_and_dacl() noexcept
         }
     }
     if (!check(reserved == Error::OK, "reserve Windows private pair")) return false;
+    std::wstring root_wide;
+    if (!check(to_wide(root, root_wide), "runtime path conversion")) return false;
+    const std::wstring product_path = root_wide + L"\\listener-test";
+    const std::wstring version_path = product_path + L"\\v1";
+    const std::wstring instance_path = version_path + L"\\instance";
+    const auto secure_directory = [](const std::wstring& path) noexcept {
+        const DWORD attributes = ::GetFileAttributesW(path.c_str());
+        return attributes != INVALID_FILE_ATTRIBUTES &&
+            (attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U &&
+            (attributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U &&
+            windows_security::verify_runtime_parent(path.c_str());
+    };
+    if (!check(secure_directory(product_path) && secure_directory(version_path) &&
+               secure_directory(instance_path),
+               "private product, version, and instance directory paths")) return false;
+    const std::wstring lock_path = instance_path + L"\\.listener.lock";
+    const DWORD lock_attributes = ::GetFileAttributesW(lock_path.c_str());
+    if (!check(lock_attributes != INVALID_FILE_ATTRIBUTES &&
+               (lock_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
+               endpoint_dacl_is_current_user_only(lock_path.c_str()),
+               "private regular lock file at instance path")) return false;
     auto competitor = create_listener_io();
     if (!check(competitor->reserve_pair(control, data) == Error::BUSY,
                "exclusive namespace lease")) return false;
     ListenerPair pair{};
     if (!check(io->publish_pair(pair) == Error::OK, "publish Windows pair")) return false;
+    const DWORD control_attributes = ::GetFileAttributesW(control_path.c_str());
+    const DWORD data_attributes = ::GetFileAttributesW(data_path.c_str());
+    if (!check(control_attributes != INVALID_FILE_ATTRIBUTES &&
+               data_attributes != INVALID_FILE_ATTRIBUTES &&
+               (control_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U &&
+               (data_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U,
+               "control and data socket paths created under instance directory")) return false;
     if (!check(io->release_namespace() == Error::BUSY &&
                competitor->reserve_pair(control, data) == Error::BUSY,
                "published pair retains exclusive namespace lease")) return false;
