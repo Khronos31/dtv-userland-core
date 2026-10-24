@@ -339,6 +339,10 @@ endif()
 if(DTV_USERLAND_BUILD_HOST_FACADE)
     add_library(dtv_userland_host_facade STATIC
         adapters/host_facade/src/px4d_signals.cpp)
+    if(WIN32)
+        target_sources(dtv_userland_host_facade PRIVATE
+            adapters/host_facade/src/windows_stdin.cpp)
+    endif()
     add_library(dtv::host_facade ALIAS dtv_userland_host_facade)
     set_target_properties(dtv_userland_host_facade PROPERTIES
         EXPORT_NAME host_facade
@@ -1015,6 +1019,12 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_link_libraries(host_runtime_tests PRIVATE
             dtv::host_runtime ${_dtv_userland_host_facade_test_target})
         add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
+    endif()
+    if(WIN32 AND DTV_USERLAND_BUILD_HOST_FACADE)
+        add_executable(windows_stdin_monitor_tests tests/windows_stdin_monitor_tests.cpp)
+        target_link_libraries(windows_stdin_monitor_tests PRIVATE dtv::host_facade)
+        add_test(NAME windows_stdin_monitor_tests COMMAND windows_stdin_monitor_tests)
+        set_tests_properties(windows_stdin_monitor_tests PROPERTIES TIMEOUT 15)
     endif()
     if(WIN32 AND DTV_USERLAND_BUILD_HOST_RUNTIME)
         add_executable(host_runtime_discovery_windows_tests
