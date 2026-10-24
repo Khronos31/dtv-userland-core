@@ -536,10 +536,14 @@ bool default_runtime_roots_test()
              px4::userland::ipc::posix::EndpointAccess::private_user,
              "siano-userland"}, px4::userland::Timeout{1000U});
     };
-    for (unsigned attempt = 0U; attempt < 3U && ok; ++attempt) {
-        if (attempt == 1U) {
+    auto refused_unsafe = connect_default();
+    pollfd unsafe_pending{server, POLLIN, 0};
+    ok = ok && !refused_unsafe && refused_unsafe.error() ==
+        px4::userland::Error::UNSUPPORTED && ::poll(&unsafe_pending, 1U, 0) == 0;
+    for (unsigned attempt = 0U; attempt < 2U && ok; ++attempt) {
+        if (attempt == 0U) {
             ok = saved_xdg.set(long_xdg.c_str());
-        } else if (attempt == 2U) {
+        } else {
             const std::string missing_xdg = base + "/missing-xdg";
             ok = saved_xdg.set(missing_xdg.c_str());
         }
