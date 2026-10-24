@@ -29,9 +29,14 @@ session instead of being copied into worker closures.
 
 The injected `ControlAuthorityExecutor` is a nonblocking publication seam. A
 `AuthorityJob` owns its `SessionKey` and admitted tune ticket or acquire,
-release, rollback, and disconnect identifiers by value; it contains no
-session pointer. The host worker invokes `ControlAuthority::execute_job_value()`
-outside the poll loop and posts the typed `AuthorityCompletion` back to that
+independent LNB power, release, rollback, and disconnect values by value; it
+contains no session pointer. Independent LNB requests require a canonical
+receiver capability that declares both 0 V and 15 V, run on the shared LNB
+worker lane, and produce a typed response only after backend success. The
+executor's optional LNB state is a cached enclosure snapshot; an absent value
+is published as unknown in enclosure STATUS. The host worker invokes
+`ControlAuthority::execute_job_value()` outside the poll loop for Engine jobs
+and posts typed `AuthorityCompletion` values for Authority work back to that
 same loop. ACQUIRE dispatch only queues a value job; the worker performs
 `ReceiverEngine::acquire()` and returns the lease ID and receiver. The authority
 checks key and job kind before producing a wire reply. If a successful acquire

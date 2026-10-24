@@ -19,7 +19,7 @@ struct SessionKey final {
 };
 
 enum class AuthorityJobKind : std::uint8_t {
-    acquire, tune, release, rollback_release, disconnect, card
+    acquire, tune, lnb_power, release, rollback_release, disconnect, card
 };
 
 struct AuthorityCompletion final {
@@ -34,6 +34,7 @@ struct AuthorityCompletion final {
     wire::CardDisconnectResponse card_disconnect{};
     wire::CardTransmitResponse card_transmit{};
     wire::BeginTransactionResponse card_transaction{};
+    bool lnb_enabled = false;
 };
 
 struct AuthorityJob final {
@@ -43,6 +44,7 @@ struct AuthorityJob final {
     std::uint64_t client_id = 0U;
     std::uint64_t lease_id = 0U;
     ReceiverId receiver = 0U;
+    bool lnb_enabled = false;
     Error rollback_error = Error::OK;
     wire::ControlRequestKind card_kind = wire::ControlRequestKind::card_status;
     wire::ControlRequest card_request{};
@@ -67,6 +69,8 @@ public:
         (void)stream_id;
         return Result<StreamStopResult>::failure(Error::UNSUPPORTED);
     }
+    // Returns cached enclosure state only; STATUS must not trigger hardware I/O.
+    virtual wire::Optional<bool> lnb_power_state() noexcept { return {}; }
 };
 
 struct AuthorityReply final {
@@ -111,6 +115,7 @@ private:
     std::uint64_t pending_tune_revision_ = 0U;
     Error pending_error_ = Error::OK;
     ReceiverId pending_receiver_ = 0U;
+    bool pending_lnb_enabled_ = false;
     AuthorityJobKind pending_kind_ = AuthorityJobKind::tune;
     bool used_ = false;
     bool close_after_reply_ = false;

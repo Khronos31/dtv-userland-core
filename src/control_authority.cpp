@@ -57,6 +57,23 @@ const char* card_operation_name(wire::ControlRequestKind kind) noexcept
     }
 }
 
+bool supports_lnb_power(const wire::ListResponse& list) noexcept
+{
+    if (!list.receivers.present) return false;
+    for (std::size_t i = 0U; i < list.receivers.value.count; ++i) {
+        const wire::Capabilities& capabilities = list.receivers.value.items[i].capabilities;
+        if ((capabilities.controls & wire::kControlBitLnb) == 0U) continue;
+        bool supports_off = false;
+        bool supports_on = false;
+        for (std::size_t j = 0U; j < capabilities.lnb.values.count; ++j) {
+            supports_off = supports_off || capabilities.lnb.values.items[j] == 0U;
+            supports_on = supports_on || capabilities.lnb.values.items[j] == 15U;
+        }
+        if (supports_off && supports_on) return true;
+    }
+    return false;
+}
+
 bool same_producer(const wire::Producer& left, const wire::Producer& right) noexcept
 {
     std::array<std::uint8_t, 128> left_bytes{};
@@ -266,6 +283,11 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         Error projected = wire::build_status_shell(canonical_, context, snapshot,
                                                     request.status.scope, status);
         if (projected == Error::OK) {
+            if (request.status.scope.kind == wire::ScopeKind::enclosure) {
+                const auto lnb = executor.lnb_power_state();
+                status.lnb_15v_enabled.present = lnb.present;
+                if (lnb.present) status.lnb_15v_enabled.value = lnb.value;
+            }
             const auto engine_status = engine_.status();
             if (!engine_status) projected = engine_status.error();
             else projected = project_receiver_engine_status(canonical_, engine_status.value(),
@@ -433,9 +455,30 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         queued.queued = true;
         return queued;
     }
-    case wire::ControlRequestKind::lnb_power:
-        return error_reply(session, request.opcode, request.request_id,
-                           Error::UNSUPPORTED, "lnb_power");
+    case wire::ControlRequestKind::lnb_power: {
+        if (!supports_lnb_power(canonical_))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::UNSUPPORTED, "lnb_power");
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, "lnb_power");
+        AuthorityJob job;
+        job.kind = AuthorityJobKind::lnb_power;
+        job.key = SessionKey{session.client_id_, request.request_id};
+        job.client_id = session.client_id_;
+        job.lnb_enabled = request.lnb_power.enabled;
+        if (!executor.submit(job))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::RESOURCE_LIMIT, "lnb_power");
+        session.pending_ = true;
+        session.pending_request_id_ = request.request_id;
+        session.pending_kind_ = AuthorityJobKind::lnb_power;
+        session.pending_lnb_enabled_ = request.lnb_power.enabled;
+        AuthorityReply queued;
+        queued.action = wire::InboundAction::dispatch;
+        queued.queued = true;
+        return queued;
+    }
     case wire::ControlRequestKind::start_stream: {
         if (session.pending_)
             return error_reply(session, request.opcode, request.request_id,
@@ -804,6 +847,27 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
                                card_operation_name(kind));
         return reply(*session, size.value());
     }
+    if (completion.kind == AuthorityJobKind::lnb_power) {
+        if (completion.lnb_enabled != session->pending_lnb_enabled_)
+            return error_reply(*session, wire::kOpcodeLnbPower,
+                               static_cast<std::uint32_t>(key.request_id),
+                               Error::INTERNAL, "lnb_power");
+        if (result != Error::OK)
+            return error_reply(*session, wire::kOpcodeLnbPower,
+                               static_cast<std::uint32_t>(key.request_id), result,
+                               "lnb_power");
+        wire::LnbPowerResponse response;
+        response.epoch = server_.epoch;
+        response.enabled = completion.lnb_enabled;
+        const auto size = wire::encode_record_frame(wire::Kind::response,
+            wire::kOpcodeLnbPower, static_cast<std::uint32_t>(key.request_id), response,
+            &wire::encode_lnb_power_response,
+            MutableByteView{session->response_.data(), session->response_.size()});
+        return size ? reply(*session, size.value())
+                    : error_reply(*session, wire::kOpcodeLnbPower,
+                                  static_cast<std::uint32_t>(key.request_id), size.error(),
+                                  "lnb_power");
+    }
     if (session->pending_kind_ == AuthorityJobKind::tune) {
         if (result != Error::OK)
             return error_reply(*session, wire::kOpcodeTune,
@@ -931,6 +995,9 @@ AuthorityCompletion ControlAuthority::execute_job_value(ReceiverEngine& engine,
         completion.error = result ? Error::OK : result.error();
         return completion;
     }
+    case AuthorityJobKind::lnb_power:
+        completion.error = Error::UNSUPPORTED;
+        return completion;
     case AuthorityJobKind::release:
     case AuthorityJobKind::rollback_release: {
         const auto result = engine.release(job.client_id, job.lease_id);
