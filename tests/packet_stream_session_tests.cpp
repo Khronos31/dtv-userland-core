@@ -167,6 +167,29 @@ bool test_detach_drain_final()
     return true;
 }
 
+bool test_detach_empty_returns_terminal_eof()
+{
+    PacketStreamSession session;
+    const Attachment id = identity(8U);
+    CHECK(attach(session, id, 2U));
+    CHECK(detach(session, id));
+    std::array<std::uint8_t, PacketStreamSession::packet_size> output{};
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        const auto ticket = session.begin_read_locked(id);
+        CHECK(ticket);
+        const auto eof = session.finish_read_locked(
+            id, ticket.value(), MutableByteView{output.data(), output.size()});
+        CHECK(eof && eof.value().eof && !eof.value().timed_out);
+        CHECK(eof.value().bytes == 0U &&
+              eof.value().terminal == StreamTerminal::stopped);
+        CHECK(!session.draining);
+    }
+    CHECK(session.release_final(id));
+    CHECK(attach(session, identity(9U), 2U));
+    return true;
+}
+
 bool test_old_ticket_cannot_read_replacement()
 {
     PacketStreamSession session;
@@ -257,6 +280,7 @@ int main()
 {
     return test_legacy_overflow() && test_v1_evict_and_wrap() &&
                    test_detach_drain_final() &&
+                   test_detach_empty_returns_terminal_eof() &&
                    test_old_ticket_cannot_read_replacement() &&
                    test_blocked_reader_wakes_on_detach()
                ? 0

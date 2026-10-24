@@ -70,7 +70,7 @@ Result<void> PacketStreamSession::detach_locked(
     final_snapshot_valid = true;
     attached = false;
     terminal = final_terminal;
-    draining = count != 0U;
+    draining = true;
     changed.notify_all();
     return Result<void>::success();
 }
