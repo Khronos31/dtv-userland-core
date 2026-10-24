@@ -80,6 +80,8 @@ enum class ControlWorkerOperation : std::uint8_t {
     card_release_connection,
     card_shutdown,
     tuner_authority_job,
+    card_authority_job,
+    card_authority_cleanup,
 };
 
 // Internal routing/ownership classification. This is separate from
@@ -227,6 +229,7 @@ public:
                         const ControlWorkerTask& task) noexcept;
     Result<ControlWorkerLane> authority_lane(std::uint8_t receiver,
                                              bool cleanup) const noexcept;
+    ControlWorkerLane reader_lane() const noexcept;
     bool try_pop(ControlWorkerLane lane, ControlWorkerCompletion& completion) noexcept;
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     std::size_t pending_completions_for_test(ControlWorkerLane lane) const noexcept;
@@ -247,6 +250,9 @@ public:
 private:
     static dtv::userland::detail::AuthorityCompletion execute_authority_job(
         TunerService& tuner_service,
+        const dtv::userland::detail::AuthorityJob& job) noexcept;
+    static dtv::userland::detail::AuthorityCompletion execute_card_authority_job(
+        CardService& card_service,
         const dtv::userland::detail::AuthorityJob& job) noexcept;
     struct Impl;
     explicit ControlWorkerLanes(std::unique_ptr<Impl> impl) noexcept;
