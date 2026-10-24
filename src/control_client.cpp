@@ -107,6 +107,9 @@ Result<void> exchange(ClientTransport& transport, std::uint16_t opcode,
     return Result<void>::success();
 }
 
+bool status_identity_matches(const StatusSnapshot& snapshot, ByteView expected_product,
+                             ByteView expected_instance) noexcept;
+
 Error remote_error(std::uint32_t code) noexcept
 {
     switch (code) {
@@ -129,6 +132,46 @@ Error remote_error(std::uint32_t code) noexcept
     case 255U: return Error::INTERNAL;
     default: return Error::PROTOCOL_ERROR;
     }
+}
+
+bool status_identity_matches(const StatusSnapshot& snapshot,
+                             const StatusAssertion& assertion) noexcept
+{
+    if (!status_identity_matches(snapshot, assertion.expected_product,
+                                 assertion.expected_instance)) return false;
+    if (assertion.expected_device == nullptr) return true;
+    const auto& expected = *assertion.expected_device;
+    if (expected.kind == identity::IdentityKind::serial) {
+        if (expected.serial.length == 0U ||
+            expected.serial.length > expected.serial.bytes.size()) return false;
+        if (!snapshot.list.enclosure.present) return false;
+        const auto& actual = snapshot.list.enclosure.value.identity;
+        return actual.serial_state == IdentitySerialState::present &&
+               actual.serial.present &&
+               actual.serial.value.length == expected.serial.length &&
+               std::memcmp(actual.serial.value.bytes.data(), expected.serial.bytes.data(),
+                           expected.serial.length) == 0;
+    }
+    if (expected.kind != identity::IdentityKind::usb_topology ||
+        expected.topology.count == 0U ||
+        expected.topology.count > expected.topology.paths.size() ||
+        snapshot.list.functions.count != expected.topology.count) return false;
+    for (std::size_t index = 0U; index < expected.topology.count; ++index) {
+        bool found = false;
+        for (std::size_t candidate = 0U; candidate < snapshot.list.functions.count;
+             ++candidate) {
+            const auto& actual = snapshot.list.functions.items[candidate].location.usb_path;
+            const auto& path = expected.topology.paths[index];
+            if (path.length == 0U || path.length > path.bytes.size()) return false;
+            if (actual.present && actual.value.length == path.length &&
+                std::memcmp(actual.value.bytes.data(), path.bytes.data(), path.length) == 0) {
+                found = true;
+                break;
+            }
+        }
+        if (!found) return false;
+    }
+    return true;
 }
 
 Result<void> roundtrip(ClientTransport& transport, std::uint16_t opcode,
@@ -524,6 +567,12 @@ StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout,
 LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
                              Timeout timeout) noexcept
 {
+    return set_lnb_power(transport, enabled, timeout, StatusAssertion{});
+}
+
+LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
+                             Timeout timeout, const StatusAssertion& assertion) noexcept
+{
     LnbPowerResult result{};
     if (timeout.milliseconds == 0U) {
         result.error = Error::INVALID_ARGUMENT;
@@ -541,6 +590,11 @@ LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
     if (!status) {
         result.error = status.error;
         result.remote_error_code = status.remote_error_code;
+        return result;
+    }
+    if (!status_identity_matches(status.snapshot, assertion)) {
+        result.error = Error::NOT_FOUND;
+        transport.close();
         return result;
     }
 
@@ -614,8 +668,9 @@ CardOpenResult begin_card(TimedClientTransport& transport,
         result.remote_error_code = status.remote_error_code;
         return result;
     }
-    if (!status_identity_matches(status.snapshot, options.expected_product,
-                                 options.expected_instance) ||
+    const StatusAssertion assertion{options.expected_product, options.expected_instance,
+                                    options.expected_device};
+    if (!status_identity_matches(status.snapshot, assertion) ||
         !lists_reader(status.snapshot.list, options.reader_id)) {
         result.error = Error::NOT_FOUND;
         transport.close();
