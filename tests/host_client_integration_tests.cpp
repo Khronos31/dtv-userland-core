@@ -38,6 +38,7 @@
 #include <condition_variable>
 #include <cstdio>
 #include <cstdint>
+#include <cstdlib>
 #include <cstring>
 #include <filesystem>
 #include <memory>
@@ -208,6 +209,28 @@ struct RuntimeTree final {
         }
     }
 };
+
+#if !defined(_WIN32)
+class EnvironmentValue final {
+public:
+    explicit EnvironmentValue(const char* name) : name_(name)
+    {
+        const char* value = std::getenv(name);
+        had_value_ = value != nullptr;
+        if (had_value_) value_ = value;
+    }
+    ~EnvironmentValue()
+    {
+        if (had_value_) (void)::setenv(name_.c_str(), value_.c_str(), 1);
+        else (void)::unsetenv(name_.c_str());
+    }
+    bool set(const char* value) const { return ::setenv(name_.c_str(), value, 1) == 0; }
+private:
+    std::string name_;
+    std::string value_;
+    bool had_value_ = false;
+};
+#endif
 
 struct Listener final {
     Socket socket = kInvalidSocket;
@@ -774,11 +797,31 @@ px4::userland::cli::Px4TsArguments test_ts_arguments(std::uint64_t packet_count)
 bool test_host_ctl_real_server()
 {
     RuntimeTree tree;
-    if (!tree.create() || !tree.create_instance("ctl-live")) return false;
+    RuntimeTree empty_root;
+    if (!tree.create() || !empty_root.create()) return false;
+#if !defined(_WIN32)
+    const std::string parent_root = tree.root;
+    tree.root = child_path(parent_root, ("dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()))).c_str());
+    if (!make_directory(tree.root)) return false;
+    tree.directories.push_back(tree.root);
+#endif
+    if (!tree.create_instance("ctl-live")) return false;
+#if !defined(_WIN32)
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
+    if (!saved_xdg.set(empty_root.root.c_str()) || !saved_tmp.set(parent_root.c_str()))
+        return false;
+#endif
     Listener control;
     if (!control.bind(tree.root, "ctl-live", "control.sock")) return false;
     FakeService service("ctl-live");
-    FakeControlServer server(control, service, 2U);
+    FakeControlServer server(control, service,
+#if !defined(_WIN32)
+                             4U
+#else
+                             2U
+#endif
+    );
     server.start();
 
     dtv::userland::host_ctl::Profile profile{};
@@ -794,8 +837,25 @@ bool test_host_ctl_real_server()
         6, list_args, profile);
     const int status_status = dtv::userland::host_ctl::run_control_cli(
         6, status_args, profile);
+#if !defined(_WIN32)
+    const char* missing_explicit_args[] = {"fake-ctl", "--runtime-dir",
+        empty_root.root.c_str(), "--instance", "ctl-live", "list"};
+    const char* default_list_args[] = {"fake-ctl", "--instance", "ctl-live", "list"};
+    const char* default_status_args[] = {"fake-ctl", "--instance", "ctl-live", "status"};
+    const int missing_explicit_status =
+        dtv::userland::host_ctl::run_control_cli(6, missing_explicit_args, profile);
+    const int default_list_status =
+        dtv::userland::host_ctl::run_control_cli(4, default_list_args, profile);
+    const int default_status_status =
+        dtv::userland::host_ctl::run_control_cli(4, default_status_args, profile);
+#else
+    const int missing_explicit_status = 3;
+    const int default_list_status = 0;
+    const int default_status_status = 0;
+#endif
     server.join();
-    return list_status == 0 && status_status == 0 && server.good.load();
+    return list_status == 0 && status_status == 0 && missing_explicit_status == 3 &&
+           default_list_status == 0 && default_status_status == 0 && server.good.load();
 }
 
 bool run_ts_lifecycle(bool close_before_stream_end,

@@ -7,14 +7,40 @@
 #include <dtv/userland/json.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace dtv::userland::host_ctl {
 namespace {
+
+class SocketStreamTransport final : public wire::TimedClientTransport {
+public:
+    explicit SocketStreamTransport(px4::userland::ipc::posix::SocketStream& stream) noexcept
+        : stream_(stream) {}
+    Result<void> write_all(ByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.write_all(bytes, timeout);
+    }
+    Result<std::size_t> read_some(MutableByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.read_some(bytes, timeout);
+    }
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void close() noexcept override { stream_.close(); }
+
+private:
+    px4::userland::ipc::posix::SocketStream& stream_;
+};
 
 enum class Command : std::uint8_t { none, list, status };
 
@@ -228,23 +254,41 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         return 2;
     }
     instance.assign(normalized.bytes.data(), normalized.length);
-    std::string runtime_directory = arguments.runtime_directory;
-    if (runtime_directory.empty()) {
-        const auto roots = px4::userland::ipc::posix::client_runtime_roots();
-        if (!roots) return exit_status(roots.error());
-        runtime_directory.assign(roots.value().paths[0].data());
+    const auto access = arguments.group ?
+        px4::userland::ipc::posix::EndpointAccess::shared_group :
+        px4::userland::ipc::posix::EndpointAccess::private_user;
+    px4::userland::ipc::posix::SocketStream default_stream;
+    SocketStreamTransport default_transport(default_stream);
+    std::unique_ptr<wire::TimedClientTransport> owned_transport;
+    wire::TimedClientTransport* transport = nullptr;
+    if (arguments.runtime_directory.empty()) {
+        const px4::userland::ipc::posix::EndpointConfig endpoint{
+            nullptr, instance.c_str(), "control.sock", access,
+            profile.product_slug};
+        auto connected = px4::userland::ipc::posix::SocketStream::connect(
+            endpoint, Timeout{5000U});
+        if (!connected) {
+            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
+                         static_cast<unsigned int>(connected.error()));
+            return exit_status(connected.error());
+        }
+        default_stream = std::move(connected.value());
+        transport = &default_transport;
+    } else {
+        const host_runtime::EndpointConfig endpoint{
+            arguments.runtime_directory, profile.product_slug, instance,
+            arguments.group ? host_runtime::EndpointAccess::shared_group :
+                              host_runtime::EndpointAccess::private_user};
+        auto connected = host_runtime::connect_control(endpoint, Timeout{5000U});
+        if (!connected) {
+            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
+                         static_cast<unsigned int>(connected.error()));
+            return exit_status(connected.error());
+        }
+        owned_transport = std::move(connected.value());
+        transport = owned_transport.get();
     }
-    const host_runtime::EndpointConfig endpoint{
-        runtime_directory, profile.product_slug, instance,
-        arguments.group ? host_runtime::EndpointAccess::shared_group :
-                          host_runtime::EndpointAccess::private_user};
-    auto transport = host_runtime::connect_control(endpoint, Timeout{5000U});
-    if (!transport) {
-        std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                     static_cast<unsigned int>(transport.error()));
-        return exit_status(transport.error());
-    }
-    const auto snapshot = wire::fetch_status(*transport.value(), Timeout{5000U});
+    const auto snapshot = wire::fetch_status(*transport, Timeout{5000U});
     if (!snapshot) {
         std::fprintf(stderr, "%s: status failed (%u, remote=%u)\n", profile.tool_name,
             static_cast<unsigned int>(snapshot.error),
