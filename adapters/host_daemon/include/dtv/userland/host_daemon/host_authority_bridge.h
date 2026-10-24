@@ -224,6 +224,8 @@ private:
         bool cleanup_pending = false;
         bool cleanup_accepted = false;
         bool cleanup_inflight = false;
+        bool card_cleanup_done = false;
+        bool card_cleanup_inflight = false;
         bool deferred_session = false;
         bool close_pending = false;
         bool response_ready = false;
