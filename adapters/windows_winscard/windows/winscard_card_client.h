@@ -55,8 +55,6 @@ public:
     // type.
     Result<std::vector<std::uint8_t>> transmit(ByteView apdu) noexcept;
     Result<ReaderStatus> status() noexcept;
-    Result<void> begin_transaction() noexcept;
-    Result<void> end_transaction(ipc::Disposition disposition) noexcept;
     Result<void> disconnect(ipc::Disposition disposition) noexcept;
 
 private:

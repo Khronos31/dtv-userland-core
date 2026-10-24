@@ -464,28 +464,6 @@ private:
             reply_size_ = encoded.value();
             return true;
         }
-        if (request.kind == w::ControlRequestKind::begin_transaction) {
-            w::BeginTransactionResponse response{};
-            response.key = request.begin_transaction.key;
-            const auto encoded = w::encode_record_frame(
-                w::Kind::response, request.opcode, request.request_id, response,
-                w::encode_begin_transaction_response,
-                MutableByteView{reply_.data(), reply_.size()});
-            if (!encoded) return false;
-            reply_size_ = encoded.value();
-            return true;
-        }
-        if (request.kind == w::ControlRequestKind::end_transaction) {
-            w::Header header{};
-            header.kind = w::Kind::response;
-            header.opcode = request.opcode;
-            header.request_id = request.request_id;
-            const auto encoded = w::encode_header(
-                header, MutableByteView{reply_.data(), reply_.size()});
-            if (!encoded) return false;
-            reply_size_ = encoded.value();
-            return true;
-        }
         if (request.kind == w::ControlRequestKind::card_reset) {
             if (fault_ == Fault::card_reset_remote_error) {
                 const auto encoded = w::encode_error_frame(
@@ -1125,30 +1103,6 @@ void test_card_reset_and_transmit()
         ByteView{oversized.data(), oversized.size()}, dtv::userland::Timeout{1000U});
     CHECK(!length_result && length_result.error == Error::INVALID_ARGUMENT);
     CHECK(invalid_length.closed() && invalid_length.request_count() == 5U);
-}
-
-void test_card_transactions()
-{
-    FakeTransport transport(Fault::none, false, w::kFeatureCardService, true);
-    w::CardClientOptions options{};
-    options.reader_id = 23U;
-    const auto opened = w::begin_card(
-        transport, options, dtv::userland::Timeout{1000U});
-    CHECK(opened);
-    auto session = opened.session;
-    const auto began = w::card_begin_transaction(
-        transport, session, dtv::userland::Timeout{1000U});
-    CHECK(began && began.error == Error::OK);
-    CHECK(transport.request_id(5U) == 6U &&
-          transport.request_opcode(5U) == w::kOpcodeBeginTransaction);
-    const auto ended = w::card_end_transaction(
-        transport, session, w::Disposition::leave, dtv::userland::Timeout{1000U});
-    CHECK(ended && ended.error == Error::OK);
-    CHECK(transport.request_id(6U) == 7U &&
-          transport.request_opcode(6U) == w::kOpcodeEndTransaction);
-    CHECK(session.card_handle == opened.session.card_handle &&
-          session.bound_generation == opened.session.bound_generation);
-    CHECK(!transport.closed());
 }
 
 void test_card_session_failures_close_without_retry()
@@ -1860,7 +1814,6 @@ int main()
     test_lnb_power_client_success_and_failures();
     test_card_session_status_and_disconnect();
     test_card_reset_and_transmit();
-    test_card_transactions();
     test_card_session_failures_close_without_retry();
     test_begin_recording_validator_and_two_budgets();
     test_recording_pid_buffers_accept_limits_and_reject_invalid_values();

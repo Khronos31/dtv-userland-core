@@ -611,29 +611,6 @@ Result<ReaderStatus> CardClient::status() noexcept
     return Result<ReaderStatus>::success(std::move(status));
 }
 
-Result<void> CardClient::begin_transaction() noexcept
-{
-    if (!transport_ || session_.card_handle == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    const auto result = wire::card_begin_transaction(
-        *transport_, session_, Timeout{kRequestTimeoutMs});
-    if (!result) forget();
-    return result ? Result<void>::success() : Result<void>::failure(result.error);
-}
-
-Result<void> CardClient::end_transaction(Disposition disposition) noexcept
-{
-    if (disposition != Disposition::leave && disposition != Disposition::reset)
-        return Result<void>::failure(Error::INVALID_ARGUMENT);
-    if (!transport_ || session_.card_handle == 0U)
-        return Result<void>::failure(Error::NOT_FOUND);
-    const auto result = wire::card_end_transaction(
-        *transport_, session_, static_cast<wire::Disposition>(disposition),
-        Timeout{kRequestTimeoutMs});
-    if (!result) forget();
-    return result ? Result<void>::success() : Result<void>::failure(result.error);
-}
-
 Result<void> CardClient::disconnect(Disposition disposition) noexcept
 {
     if (disposition != Disposition::leave && disposition != Disposition::reset)
