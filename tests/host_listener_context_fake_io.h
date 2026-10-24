@@ -30,11 +30,14 @@ public:
     void block_writes(dtv::userland::host_listener_context::detail::ConnectionToken connection,
                       bool blocked);
     void block_unpublish();
+    void fail_unpublish_after_cleanup();
     bool wait_unpublish();
     bool wait_poll();
     void release_unpublish();
     bool reserved() const;
     bool published() const;
+    std::size_t unpublish_count() const;
+    std::size_t namespace_release_count() const;
 
 private:
     friend void set_fake_listener_io_control(FakeListenerIoControl*) noexcept;
