@@ -107,7 +107,7 @@ if(DTV_USERLAND_BUILD_CONTROL)
     target_include_directories(dtv_userland_control PUBLIC
         $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/include>
         $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
-    target_link_libraries(dtv_userland_control PUBLIC dtv::wire)
+    target_link_libraries(dtv_userland_control PUBLIC dtv::wire dtv::identity)
 endif()
 
 if(MSVC)

@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "host_ctl.h"
+#include "host_ctl_test_access.h"
 #include "host_ts_test_access.h"
 
 #include <dtv/userland/control_connection.h>
@@ -410,6 +411,8 @@ struct FakeService final {
     std::atomic<bool> saw_tune{false};
     std::atomic<bool> saw_start{false};
     std::atomic<bool> saw_status{false};
+    std::atomic<unsigned int> status_count{0U};
+    std::atomic<unsigned int> list_count{0U};
     std::atomic<bool> saw_stop{false};
     std::atomic<bool> saw_release{false};
     std::atomic<bool> saw_lnb_on{false};
@@ -419,14 +422,18 @@ struct FakeService final {
     std::atomic<unsigned int> release_count{0U};
     bool unsupported_status = false;
     bool refuse_lnb_power = false;
+    unsigned int replace_serial_at_list = 0U;
+    std::string replacement_serial;
     std::mutex stop_mutex;
     std::condition_variable stop_changed;
 
-    explicit FakeService(const std::string& instance)
+    explicit FakeService(const std::string& instance,
+                         const std::string& product = "test-product",
+                         const std::string& serial = {})
     {
         for (std::size_t i = 0U; i < hello.epoch.size(); ++i)
             hello.epoch[i] = static_cast<std::uint8_t>(0xa0U + i);
-        set_text(hello.producer.product, "test-product");
+        set_text(hello.producer.product, product.c_str());
         set_text(hello.producer.version, "1.0.0-test");
         list.epoch = hello.epoch;
         list.producer = hello.producer;
@@ -435,8 +442,15 @@ struct FakeService final {
         list.topology.expected_function_count.present = true;
         list.topology.expected_function_count.value = 1U;
         list.enclosure.present = true;
-        list.enclosure.value.identity.serial_state = wire::IdentitySerialState::absent;
-        list.enclosure.value.identity.uniqueness = wire::Uniqueness::not_applicable;
+        if (serial.empty()) {
+            list.enclosure.value.identity.serial_state = wire::IdentitySerialState::absent;
+            list.enclosure.value.identity.uniqueness = wire::Uniqueness::not_applicable;
+        } else {
+            list.enclosure.value.identity.serial_state = wire::IdentitySerialState::present;
+            list.enclosure.value.identity.serial.present = true;
+            list.enclosure.value.identity.uniqueness = wire::Uniqueness::unique_in_scan;
+            set_text(list.enclosure.value.identity.serial.value, serial.c_str());
+        }
         list.functions.count = 1U;
         list.functions.items[0U].id = 0U;
         list.functions.items[0U].vid = 0x1234U;
@@ -474,11 +488,20 @@ struct FakeService final {
     bool dispatch(Socket peer, const wire::ControlRequest& request)
     {
         if (request.kind == wire::ControlRequestKind::list) {
+            const unsigned int current_list = list_count.fetch_add(1U) + 1U;
+            if (replace_serial_at_list != 0U && current_list >= replace_serial_at_list) {
+                list.enclosure.value.identity.serial_state = wire::IdentitySerialState::present;
+                list.enclosure.value.identity.serial.present = true;
+                list.enclosure.value.identity.serial.value.length = 0U;
+                set_text(list.enclosure.value.identity.serial.value,
+                         replacement_serial.c_str());
+            }
             return send_record(peer, request.opcode, request.request_id, list,
                                &wire::encode_list_response);
         }
         if (request.kind == wire::ControlRequestKind::status) {
             saw_status.store(true);
+            status_count.fetch_add(1U);
             if (unsupported_status) {
                 std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> output{};
                 const auto frame = wire::encode_error_frame(
@@ -800,6 +823,145 @@ bool add_root(const std::string& value,
     std::memcpy(roots.paths[roots.count].data(), value.c_str(), value.size() + 1U);
     ++roots.count;
     return true;
+}
+
+bool matches_fake_serial(const wire::ListResponse& list,
+                         const dtv::userland::identity::ResolvedIdentity& expected) noexcept
+{
+    if (!list.enclosure.present || expected.kind !=
+        dtv::userland::identity::IdentityKind::serial) return false;
+    const auto& observed = list.enclosure.value.identity;
+    return observed.serial_state == wire::IdentitySerialState::present &&
+           observed.serial.present &&
+           observed.serial.value.length == expected.serial.length &&
+           std::memcmp(observed.serial.value.bytes.data(), expected.serial.bytes.data(),
+                       expected.serial.length) == 0;
+}
+
+dtv::userland::host_ctl::Profile fake_serial_ctl_profile()
+{
+    dtv::userland::host_ctl::Profile profile{};
+    profile.tool_name = "fake-ctl";
+    profile.product_slug = "test-product";
+    profile.product_version = "1.0.0-test";
+    profile.product = dtv::userland::identity::Product::px4;
+    profile.serial_selector_supported = true;
+    profile.matches_serial = matches_fake_serial;
+    profile.lnb_power_supported = true;
+    return profile;
+}
+
+bool test_host_ctl_device_instance_discovery()
+{
+    RuntimeTree empty_root;
+    RuntimeTree wrong_root;
+    RuntimeTree live_root;
+    if (!empty_root.create() || !wrong_root.create() || !live_root.create() ||
+        !wrong_root.create_instance("other-serial") ||
+        !live_root.create_instance("base-serial")) return false;
+    Listener wrong_control;
+    Listener live_control;
+    if (!wrong_control.bind(wrong_root.root, "other-serial", "control.sock") ||
+        !live_control.bind(live_root.root, "base-serial", "control.sock")) return false;
+    FakeService wrong_service("other-serial", "test-product", "other");
+    FakeService live_service("base-serial", "test-product", "expected");
+    FakeControlServer wrong_server(wrong_control, wrong_service, 1U);
+    FakeControlServer live_server(live_control, live_service, 2U);
+    wrong_server.start();
+    live_server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(empty_root.root, roots) || !add_root(wrong_root.root, roots) ||
+        !add_root(live_root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "serial:expected", "list"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    wrong_server.join();
+    live_server.join();
+    return status == 0 && wrong_server.good.load() && live_server.good.load() &&
+           wrong_service.saw_status.load() && live_service.saw_status.load();
+}
+
+bool test_host_ctl_device_instance_ambiguity()
+{
+    RuntimeTree first_root;
+    RuntimeTree second_root;
+    if (!first_root.create() || !second_root.create() ||
+        !first_root.create_instance("first-instance") ||
+        !second_root.create_instance("second-instance")) return false;
+    Listener first_control;
+    Listener second_control;
+    if (!first_control.bind(first_root.root, "first-instance", "control.sock") ||
+        !second_control.bind(second_root.root, "second-instance", "control.sock")) return false;
+    FakeService first_service("first-instance", "test-product", "expected");
+    FakeService second_service("second-instance", "test-product", "expected");
+    FakeControlServer first_server(first_control, first_service, 1U);
+    FakeControlServer second_server(second_control, second_service, 1U);
+    first_server.start();
+    second_server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(first_root.root, roots) || !add_root(second_root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "serial:expected", "status"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    first_server.join();
+    second_server.join();
+    return status == 3 && first_server.good.load() && second_server.good.load() &&
+           first_service.saw_status.load() && second_service.saw_status.load();
+}
+
+bool test_host_ctl_device_reconnect_identity()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("base-serial")) return false;
+    Listener control;
+    if (!control.bind(root.root, "base-serial", "control.sock")) return false;
+    FakeService service("base-serial", "test-product", "expected");
+    service.list.receivers.value.items[0U].capabilities.controls = wire::kControlBitLnb;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.count = 2U;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.items[0U] = 0U;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.items[1U] = 15U;
+    service.replace_serial_at_list = 3U;
+    service.replacement_serial = "replacement";
+    FakeControlServer server(control, service, 3U);
+    server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "serial:expected", "lnb-on"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    server.join();
+    return status == 3 && server.good.load() && service.status_count.load() == 3U &&
+           service.lnb_power_count.load() == 0U;
+}
+
+bool test_host_ctl_device_security_refusal_stops_search()
+{
+    RuntimeTree refused_root;
+    RuntimeTree live_root;
+    if (!refused_root.create() || !refused_root.create_instance("unsafe-instance") ||
+        !live_root.create() || !live_root.create_instance("safe-instance")) return false;
+    Listener refused;
+    Listener live;
+    if (!refused.bind(refused_root.root, "unsafe-instance", "control.sock") ||
+        !live.bind(live_root.root, "safe-instance", "control.sock")) return false;
+#if defined(_WIN32)
+    if (!add_everyone_allow(refused.path_wide.c_str())) return false;
+#else
+    if (::chmod(refused.path.c_str(), 0666) != 0) return false;
+#endif
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(refused_root.root, roots) || !add_root(live_root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "serial:expected", "list"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    return status == 3 && !live.has_pending();
 }
 
 px4::userland::cli::Px4TsArguments test_ts_arguments(std::uint64_t packet_count)
@@ -1219,6 +1381,10 @@ int main()
 #endif
     const bool ctl = test_host_ctl_real_server();
     const bool lnb_ctl = test_host_ctl_lnb_commands();
+    const bool ctl_discovery = test_host_ctl_device_instance_discovery();
+    const bool ctl_ambiguous = test_host_ctl_device_instance_ambiguity();
+    const bool ctl_reconnect_identity = test_host_ctl_device_reconnect_identity();
+    const bool ctl_security = test_host_ctl_device_security_refusal_stops_search();
     const bool lnb_unsupported = test_host_ctl_lnb_unsupported_by_device();
     const bool lnb_refused = test_host_ctl_lnb_remote_refusal();
     const bool ts = run_ts_lifecycle(false);
@@ -1237,6 +1403,10 @@ int main()
 #endif
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
     if (lnb_ctl) std::puts("fake_server_host_ctl_lnb_on_off=PASS");
+    if (ctl_discovery) std::puts("fake_server_host_ctl_device_instance_discovery=PASS");
+    if (ctl_ambiguous) std::puts("fake_server_host_ctl_device_ambiguity=PASS");
+    if (ctl_reconnect_identity) std::puts("fake_server_host_ctl_reconnect_identity=PASS");
+    if (ctl_security) std::puts("fake_server_host_ctl_security_refusal=PASS");
     if (lnb_unsupported) std::puts("fake_server_host_ctl_lnb_unsupported=PASS");
     if (lnb_refused) std::puts("fake_server_host_ctl_lnb_remote_refusal=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
@@ -1247,6 +1417,8 @@ int main()
     if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && lnb_ctl && lnb_unsupported && lnb_refused && ts && eof && overlong &&
+    return ctl && lnb_ctl && ctl_discovery && ctl_ambiguous &&
+           ctl_reconnect_identity && ctl_security && lnb_unsupported && lnb_refused &&
+           ts && eof && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }

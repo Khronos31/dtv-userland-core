@@ -234,6 +234,25 @@ bool matches_device(const wire::ListResponse& list,
     return list.functions.count == expected.topology.count;
 }
 
+bool matches_target(const wire::StatusSnapshot& snapshot, const Profile& profile,
+                    std::string_view instance, bool has_device_assertion,
+                    const identity::ResolvedIdentity& expected_identity,
+                    const wire::StatusSnapshot* previous) noexcept
+{
+    const auto& producer = snapshot.status.producer.product;
+    if (producer.length != std::strlen(profile.product_slug) ||
+        std::memcmp(producer.bytes.data(), profile.product_slug, producer.length) != 0 ||
+        !snapshot.status.context.instance.present ||
+        snapshot.status.context.instance.value.length != instance.size() ||
+        std::memcmp(snapshot.status.context.instance.value.bytes.data(),
+                    instance.data(), instance.size()) != 0 ||
+        (has_device_assertion &&
+         !matches_device(snapshot.list, expected_identity, profile)) ||
+        (previous != nullptr && snapshot.status.context.epoch !=
+                                    previous->status.context.epoch)) return false;
+    return true;
+}
+
 int exit_status(Error error, bool card_operation = false) noexcept
 {
     switch (error) {
@@ -316,7 +335,9 @@ bool print_list(const wire::ListResponse& list, const wire::StatusResponse& stat
 
 }  // namespace
 
-int run_control_cli(int argc, const char* const* argv, const Profile& profile) noexcept
+static int run_control_cli_impl(
+    int argc, const char* const* argv, const Profile& profile,
+    const px4::userland::ipc::posix::RuntimeRootCandidates* roots_override) noexcept
 {
     if (argc == 2 && argv != nullptr && argv[1] != nullptr &&
         std::strcmp(argv[1], "--version") == 0) {
@@ -354,39 +375,168 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         return 3;
     }
 #endif
-    std::string instance = arguments.instance;
-    if (instance.empty() && !arguments.device.empty()) {
+    identity::ResolvedIdentity expected_identity{};
+    const bool has_device_assertion = !arguments.device.empty();
+    if (has_device_assertion) {
         const auto selector = identity::parse_device_selector(arguments.device);
         if (!selector || (selector.value().kind == identity::SelectorKind::serial &&
                           !profile.serial_selector_supported)) return 2;
         const auto resolved = identity::resolve_selector(profile.product, selector.value());
         if (!resolved) return exit_status(resolved.error());
-        const auto automatic = identity::auto_instance(resolved.value());
-        if (!automatic) return exit_status(automatic.error());
-        instance.assign(automatic.value().bytes.data(), automatic.value().length);
+        expected_identity = resolved.value();
     }
+    std::string instance = arguments.instance;
     identity::InstanceText normalized{};
-    if (instance.empty() || !normalized_instance(instance, normalized, profile)) {
+    if (!instance.empty() && !normalized_instance(instance, normalized, profile)) {
         std::fprintf(stderr, "%s: --instance is required and must be valid\n",
                      profile.tool_name);
         return 2;
     }
-    instance.assign(normalized.bytes.data(), normalized.length);
+    if (!instance.empty()) instance.assign(normalized.bytes.data(), normalized.length);
+    if (instance.empty() && !has_device_assertion) {
+        std::fprintf(stderr, "%s: --instance is required unless --device is supplied\n",
+                     profile.tool_name);
+        return 2;
+    }
     const auto access = arguments.group ?
         px4::userland::ipc::posix::EndpointAccess::shared_group :
         px4::userland::ipc::posix::EndpointAccess::private_user;
-    const px4::userland::ipc::posix::EndpointConfig default_endpoint{
-        nullptr, instance.c_str(), "control.sock", access, profile.product_slug};
-    const host_runtime::EndpointConfig explicit_endpoint{
-        arguments.runtime_directory, profile.product_slug, instance,
-        arguments.group ? host_runtime::EndpointAccess::shared_group :
-                          host_runtime::EndpointAccess::private_user};
+    std::string selected_runtime_directory = arguments.runtime_directory;
+    wire::StatusSnapshot discovered_snapshot{};
+    bool has_discovered_snapshot = false;
+    if (instance.empty()) {
+        px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+        if (!selected_runtime_directory.empty()) {
+            roots.count = 1U;
+            if (selected_runtime_directory.size() >= roots.paths[0U].size())
+                return exit_status(Error::INVALID_ARGUMENT);
+            std::memcpy(roots.paths[0U].data(), selected_runtime_directory.c_str(),
+                        selected_runtime_directory.size() + 1U);
+        } else if (roots_override != nullptr) {
+            roots = *roots_override;
+        } else {
+            const auto candidates = px4::userland::ipc::posix::client_runtime_roots();
+            if (!candidates) return exit_status(candidates.error());
+            roots = candidates.value();
+        }
+        if (roots.count > roots.paths.size()) return exit_status(Error::INVALID_ARGUMENT);
+        const std::uint64_t required_features =
+            arguments.command == Command::card_status && profile.card_supported
+                ? wire::kFeatureCardService : 0U;
+        const auto deadline = std::chrono::steady_clock::now() +
+                              std::chrono::milliseconds(2000);
+        std::size_t matches = 0U;
+        std::string matched_root;
+        std::string matched_instance;
+        const auto remaining = [&deadline]() noexcept -> std::uint32_t {
+            const auto now = std::chrono::steady_clock::now();
+            if (now >= deadline) return 0U;
+            const auto value = std::chrono::duration_cast<std::chrono::milliseconds>(
+                deadline - now).count();
+            return static_cast<std::uint32_t>(value > 0 ? value : 1);
+        };
+        for (std::size_t root_index = 0U; root_index < roots.count; ++root_index) {
+            const std::uint32_t root_budget = remaining();
+            if (root_budget == 0U) return exit_status(Error::TIMEOUT);
+            const std::string root(roots.paths[root_index].data());
+            const std::string probe_instance = "ctl-root-probe-" + std::to_string(
+                static_cast<unsigned long long>(
+                    std::chrono::steady_clock::now().time_since_epoch().count()));
+            const host_runtime::EndpointConfig root_endpoint{
+                root, profile.product_slug, probe_instance,
+                arguments.group ? host_runtime::EndpointAccess::shared_group :
+                                  host_runtime::EndpointAccess::private_user};
+            auto root_probe = host_runtime::connect_control(root_endpoint,
+                                                            Timeout{root_budget});
+            if (root_probe) {
+                root_probe.value()->close();
+            } else if (root_probe.error() == Error::UNSUPPORTED) {
+                return exit_status(root_probe.error());
+            } else if (root_probe.error() == Error::INVALID_ARGUMENT &&
+                       selected_runtime_directory.empty()) {
+                continue;
+            } else if (root_probe.error() != Error::NOT_FOUND &&
+                       root_probe.error() != Error::NOT_READY) {
+                return exit_status(root_probe.error());
+            }
+            const auto discovered = px4::userland::ipc::posix::discover_runtime_instances(
+                root.c_str(), access, profile.product_slug);
+            if (!discovered) {
+                if (discovered.error() == Error::NOT_FOUND) continue;
+                return exit_status(discovered.error());
+            }
+            if (discovered.value().canonical_collision) return exit_status(Error::NOT_FOUND);
+            for (std::size_t candidate = 0U; candidate < discovered.value().count; ++candidate) {
+                const std::uint32_t budget = remaining();
+                if (budget == 0U) return exit_status(Error::TIMEOUT);
+                const std::string candidate_instance(
+                    discovered.value().instances[candidate].data());
+#if !defined(_WIN32)
+                const auto minimum_path = host_runtime::control_endpoint_path(
+                    {"/", profile.product_slug, candidate_instance});
+                if (!minimum_path) return exit_status(minimum_path.error());
+                const auto candidate_path = host_runtime::control_endpoint_path(
+                    {root, profile.product_slug, candidate_instance});
+                if (!candidate_path) {
+                    if (selected_runtime_directory.empty()) continue;
+                    return exit_status(candidate_path.error());
+                }
+#endif
+                const host_runtime::EndpointConfig endpoint{
+                    root, profile.product_slug, candidate_instance,
+                    arguments.group ? host_runtime::EndpointAccess::shared_group :
+                                      host_runtime::EndpointAccess::private_user};
+                auto probe = host_runtime::connect_control(endpoint, Timeout{budget});
+                if (!probe) {
+                    if (probe.error() == Error::NOT_FOUND ||
+                        probe.error() == Error::NOT_READY) continue;
+                    return exit_status(probe.error());
+                }
+                const std::uint32_t fetch_budget = remaining();
+                if (fetch_budget == 0U) {
+                    probe.value()->close();
+                    return exit_status(Error::TIMEOUT);
+                }
+                const auto snapshot = wire::fetch_status(
+                    *probe.value(), Timeout{fetch_budget}, required_features);
+                probe.value()->close();
+                if (!snapshot && (snapshot.error == Error::NOT_FOUND ||
+                                  snapshot.error == Error::NOT_READY ||
+                                  snapshot.error == Error::UNSUPPORTED)) continue;
+                if (!snapshot) return exit_status(snapshot.error);
+                const auto& producer = snapshot.snapshot.status.producer.product;
+                if (producer.length != std::strlen(profile.product_slug) ||
+                    std::memcmp(producer.bytes.data(), profile.product_slug,
+                                producer.length) != 0 ||
+                    !snapshot.snapshot.status.context.instance.present ||
+                    snapshot.snapshot.status.context.instance.value.length !=
+                        candidate_instance.size() ||
+                    std::memcmp(snapshot.snapshot.status.context.instance.value.bytes.data(),
+                                candidate_instance.data(), candidate_instance.size()) != 0 ||
+                    (has_device_assertion &&
+                     !matches_device(snapshot.snapshot.list, expected_identity, profile)))
+                    continue;
+                ++matches;
+                if (matches == 1U) {
+                    matched_root = root;
+                    matched_instance = candidate_instance;
+                    discovered_snapshot = snapshot.snapshot;
+                }
+            }
+        }
+        if (matches != 1U) return exit_status(Error::NOT_FOUND);
+        selected_runtime_directory = matched_root;
+        instance = matched_instance;
+        has_discovered_snapshot = true;
+    }
     px4::userland::ipc::posix::SocketStream default_stream;
     SocketStreamTransport default_transport(default_stream);
     std::unique_ptr<wire::TimedClientTransport> owned_transport;
     wire::TimedClientTransport* transport = nullptr;
     const auto connect_control = [&]() {
-        if (arguments.runtime_directory.empty()) {
+        if (selected_runtime_directory.empty()) {
+            const px4::userland::ipc::posix::EndpointConfig default_endpoint{
+                nullptr, instance.c_str(), "control.sock", access, profile.product_slug};
             auto connected = px4::userland::ipc::posix::SocketStream::connect(
                 default_endpoint, Timeout{5000U});
             if (!connected) return connected.error();
@@ -394,6 +544,10 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
             transport = &default_transport;
             return Error::OK;
         }
+        const host_runtime::EndpointConfig explicit_endpoint{
+            selected_runtime_directory, profile.product_slug, instance,
+            arguments.group ? host_runtime::EndpointAccess::shared_group :
+                              host_runtime::EndpointAccess::private_user};
         auto connected = host_runtime::connect_control(explicit_endpoint, Timeout{5000U});
         if (!connected) {
             return connected.error();
@@ -417,26 +571,10 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
             static_cast<unsigned int>(snapshot.remote_error_code));
         return exit_status(snapshot.error);
     }
-    const auto& producer = snapshot.snapshot.status.producer.product;
+    if (!matches_target(snapshot.snapshot, profile, instance, has_device_assertion,
+                        expected_identity,
+                        has_discovered_snapshot ? &discovered_snapshot : nullptr)) return 3;
     const std::size_t product_length = std::strlen(profile.product_slug);
-    if (producer.length != product_length ||
-        std::memcmp(producer.bytes.data(), profile.product_slug, product_length) != 0) {
-        std::fprintf(stderr, "%s: endpoint belongs to another product\n", profile.tool_name);
-        return 3;
-    }
-    if (!snapshot.snapshot.status.context.instance.present ||
-        snapshot.snapshot.status.context.instance.value.length != instance.size() ||
-        std::memcmp(snapshot.snapshot.status.context.instance.value.bytes.data(),
-                    instance.data(), instance.size()) != 0) {
-        std::fprintf(stderr, "%s: endpoint instance mismatch\n", profile.tool_name);
-        return 3;
-    }
-    if (!arguments.device.empty()) {
-        const auto selector = identity::parse_device_selector(arguments.device);
-        const auto expected = selector ? identity::resolve_selector(profile.product, selector.value())
-                                       : Result<identity::ResolvedIdentity>::failure(Error::INVALID_ARGUMENT);
-        if (!expected || !matches_device(snapshot.snapshot.list, expected.value(), profile)) return 3;
-    }
     if (arguments.command == Command::lnb_on || arguments.command == Command::lnb_off) {
         if (!supports_lnb_power(snapshot.snapshot.list)) {
             std::fprintf(stderr, "%s: LNB power is unsupported by this device\n",
@@ -451,7 +589,14 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
                          static_cast<unsigned int>(error));
             return exit_status(error);
         }
-        const auto changed = wire::set_lnb_power(*transport, enabled, Timeout{5000U});
+        const wire::StatusAssertion assertion{
+            ByteView{reinterpret_cast<const std::uint8_t*>(profile.product_slug),
+                     product_length},
+            ByteView{reinterpret_cast<const std::uint8_t*>(instance.data()),
+                     instance.size()},
+            has_device_assertion ? &expected_identity : nullptr};
+        const auto changed = wire::set_lnb_power(*transport, enabled, Timeout{5000U},
+                                                  assertion);
         if (!changed) {
             std::fprintf(stderr, "%s: LNB power failed (%u, remote=%u)\n",
                          profile.tool_name, static_cast<unsigned int>(changed.error),
@@ -515,6 +660,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
             reinterpret_cast<const std::uint8_t*>(profile.product_slug), product_length};
         options.expected_instance = ByteView{
             reinterpret_cast<const std::uint8_t*>(instance.data()), instance.size()};
+        options.expected_device = has_device_assertion ? &expected_identity : nullptr;
         const auto opened = wire::begin_card(
             *transport, options, Timeout{5000U});
         if (!opened) {
@@ -594,5 +740,21 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         std::fflush(stdout) != 0) return 70;
     return 0;
 }
+
+int run_control_cli(int argc, const char* const* argv, const Profile& profile) noexcept
+{
+    return run_control_cli_impl(argc, argv, profile, nullptr);
+}
+
+namespace test_access {
+
+int run_control_cli_with_roots(
+    int argc, const char* const* argv, const Profile& profile,
+    const px4::userland::ipc::posix::RuntimeRootCandidates& roots) noexcept
+{
+    return run_control_cli_impl(argc, argv, profile, &roots);
+}
+
+}  // namespace test_access
 
 }  // namespace dtv::userland::host_ctl

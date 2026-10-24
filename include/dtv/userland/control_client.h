@@ -3,6 +3,7 @@
 #define DTV_USERLAND_CONTROL_CLIENT_H
 
 #include <dtv/userland/records.h>
+#include <dtv/userland/identity.h>
 
 namespace dtv::userland::wire {
 
@@ -63,11 +64,20 @@ struct LnbPowerResult final {
     explicit operator bool() const noexcept { return error == Error::OK; }
 };
 
+struct StatusAssertion final {
+    ByteView expected_product{};
+    ByteView expected_instance{};
+    // Optional resolved identity remains borrowed for the duration of the call.
+    const identity::ResolvedIdentity* expected_device = nullptr;
+};
+
 // Fetches status and sends one independent LNB power request on that
 // connection. The response reports the requested control state, not measured
 // voltage; failures close the transport and are never retried.
 LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
                              Timeout timeout) noexcept;
+LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
+                             Timeout timeout, const StatusAssertion& assertion) noexcept;
 
 struct CardClientOptions final {
     std::uint16_t reader_id = 0U;
@@ -79,6 +89,8 @@ struct CardClientOptions final {
     // for the call.
     ByteView expected_product{};
     ByteView expected_instance{};
+    // Optional resolved identity remains borrowed for the duration of begin_card.
+    const identity::ResolvedIdentity* expected_device = nullptr;
 };
 
 struct CardClientSession final {
