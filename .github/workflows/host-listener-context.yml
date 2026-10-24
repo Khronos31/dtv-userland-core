@@ -1,0 +1,171 @@
+name: Host Listener Context
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/host-listener-context.yml'
+      - 'adapters/host_listener_context/**'
+      - 'adapters/host_daemon/**'
+      - 'adapters/host_runtime/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/host_listener_context*'
+      - 'tests/host_listener_context_platform/**'
+      - 'tests/host_authority_bridge_tests.cpp'
+      - 'tests/consumer/host_listener_context/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/host-listener-context.yml'
+      - 'adapters/host_listener_context/**'
+      - 'adapters/host_daemon/**'
+      - 'adapters/host_runtime/**'
+      - 'include/**'
+      - 'src/**'
+      - 'tests/host_listener_context*'
+      - 'tests/host_listener_context_platform/**'
+      - 'tests/host_authority_bridge_tests.cpp'
+      - 'tests/consumer/host_listener_context/**'
+      - 'CMakeLists.txt'
+      - 'cmake/**'
+
+permissions:
+  contents: read
+
+jobs:
+  linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
+      - name: Build
+        run: cmake --build build --parallel 2
+      - name: Run Linux listener and bridge tests
+        run: ctest --test-dir build -R '^(host_listener_context_.*|host_authority_bridge_tests)$' --output-on-failure
+      - name: Measure Context fixture peak RSS
+        run: |
+          python3 -c 'import resource, subprocess; p = subprocess.run(["build/host_listener_context_tests"], check=True); print("host_listener_context_tests_peak_rss_kib=" + str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))'
+      - name: Install
+        run: cmake --install build --prefix "$RUNNER_TEMP/dtv-listener-context-install"
+      - name: Configure installed consumer
+        run: >-
+          cmake -S tests/consumer/host_listener_context -B consumer-build
+          -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/dtv-listener-context-install"
+      - name: Build and run installed consumer
+        run: cmake --build consumer-build --parallel 2 && consumer-build/host_listener_context_consumer
+
+  thread_sanitizer:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure TSan
+        env:
+          CC: clang
+          CXX: clang++
+        run: >-
+          cmake -S . -B build-tsan
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
+          -DCMAKE_CXX_FLAGS="-fsanitize=thread -g -O1"
+          -DCMAKE_EXE_LINKER_FLAGS="-fsanitize=thread"
+      - name: Build TSan targets
+        run: cmake --build build-tsan --parallel 2 --target host_listener_context_tests host_listener_context_integration_tests host_authority_bridge_tests
+      - name: Run TSan tests
+        run: ctest --test-dir build-tsan -R '^(host_listener_context_tests|host_listener_context_integration_tests|host_authority_bridge_tests)$' --output-on-failure
+
+  windows:
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure MSVC
+        run: >-
+          cmake -S . -B build -A x64
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
+      - name: Build
+        run: cmake --build build --config Release --parallel 2
+      - name: Prepare protected runtime parent
+        shell: pwsh
+        run: |
+          $runtimeRoot = Join-Path $env:RUNNER_TEMP 'dtv-userland-core-listener-runtime'
+          New-Item -ItemType Directory -Force -Path $runtimeRoot | Out-Null
+          $identity = [System.Security.Principal.WindowsIdentity]::GetCurrent()
+          $acl = Get-Acl $runtimeRoot
+          $acl.SetOwner($identity.User)
+          $acl.SetAccessRuleProtection($true, $false)
+          $rule = [System.Security.AccessControl.FileSystemAccessRule]::new(
+            $identity.User,
+            [System.Security.AccessControl.FileSystemRights]::FullControl,
+            [System.Security.AccessControl.InheritanceFlags]::ContainerInherit -bor
+              [System.Security.AccessControl.InheritanceFlags]::ObjectInherit,
+            [System.Security.AccessControl.PropagationFlags]::None,
+            [System.Security.AccessControl.AccessControlType]::Allow)
+          $acl.SetAccessRule($rule)
+          Set-Acl -Path $runtimeRoot -AclObject $acl
+          Add-Content -Path $env:GITHUB_ENV -Value "LOCALAPPDATA=$runtimeRoot"
+          Write-Host "listener_runtime_parent=$runtimeRoot"
+      - name: Run Windows listener and bridge tests
+        run: ctest --test-dir build -C Release -R '^(host_listener_context_.*|host_authority_bridge_tests)$' --output-on-failure
+      - name: Measure Context fixture peak working set
+        shell: pwsh
+        run: |
+          $process = Start-Process -FilePath '.\build\Release\host_listener_context_tests.exe' -PassThru
+          $peak = 0
+          while (-not $process.HasExited) {
+            $process.Refresh()
+            if ($process.WorkingSet64 -gt $peak) { $peak = $process.WorkingSet64 }
+            Start-Sleep -Milliseconds 1
+          }
+          if ($process.ExitCode -ne 0) { throw "listener Context test exit=$($process.ExitCode)" }
+          Write-Host "host_listener_context_tests_peak_working_set_bytes=$peak"
+      - name: Install
+        run: cmake --install build --config Release --prefix '${{ runner.temp }}\dtv-listener-context-install'
+      - name: Configure installed consumer
+        run: cmake -S tests/consumer/host_listener_context -B consumer-build -A x64 -DCMAKE_PREFIX_PATH='${{ runner.temp }}\dtv-listener-context-install'
+      - name: Build and run installed consumer
+        shell: pwsh
+        run: |
+          cmake --build consumer-build --config Release
+          if ($LASTEXITCODE -ne 0) { throw "consumer build exit=$LASTEXITCODE" }
+          .\consumer-build\Release\host_listener_context_consumer.exe

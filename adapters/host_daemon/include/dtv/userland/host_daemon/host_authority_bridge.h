@@ -142,6 +142,14 @@ public:
         return slots_ && slot < kHostAuthoritySessionCapacity && slots_[slot].session &&
                slots_[slot].session->connected();
     }
+    bool stream_owned_for_test(std::uint8_t slot,
+                               std::uint64_t stream_id) const noexcept
+    {
+        if (!slots_ || slot >= kHostAuthoritySessionCapacity) return false;
+        for (const auto& stream : slots_[slot].streams)
+            if (stream.active && stream.stream_id == stream_id) return true;
+        return false;
+    }
     bool close_pending_for_test(std::uint8_t slot) const noexcept
     {
         return slots_ && slot < kHostAuthoritySessionCapacity &&
@@ -167,6 +175,10 @@ public:
     void force_next_terminal_unquiesced_for_test() noexcept
     {
         force_next_terminal_unquiesced_ = true;
+    }
+    void force_terminal_unquiesced_for_test(bool force) noexcept
+    {
+        force_terminal_unquiesced_ = force;
     }
     bool terminal_observed_for_test() const noexcept { return terminal_observed_; }
     bool terminal_quiesced_for_test() const noexcept { return terminal_quiesced_; }
@@ -215,6 +227,7 @@ private:
         bool deferred_session = false;
         bool close_pending = false;
         bool response_ready = false;
+        Error quiesced_sticky_cleanup_error = Error::OK;
     };
     struct DataSlot final {
         std::uint64_t generation = 0U;
@@ -223,7 +236,10 @@ private:
         dtv::userland::detail::StreamAttachTicket ticket{};
         HostAuthorityAttachResult attach_result{};
         bool attach_pending = false;
+        bool attach_failed = false;
         bool prepared = false;
+        bool cleanup_quiesced = false;
+        bool final_available = false;
         bool cleanup_pending = false;
         bool cleanup_inflight = false;
         bool connection_open = false;
@@ -240,6 +256,7 @@ private:
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;
+    Error finish_failed_attach_cleanup(std::size_t slot) noexcept;
     Result<dtv::userland::detail::StreamStopResult> stop_stream_impl(
         std::uint8_t control_slot, std::uint64_t lease_id,
         std::uint64_t stream_id, bool retain_submit_rejection) noexcept;
@@ -269,6 +286,7 @@ private:
     bool stopped_ = false;
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
     bool force_next_terminal_unquiesced_ = false;
+    bool force_terminal_unquiesced_ = false;
     bool terminal_observed_ = false;
     bool terminal_quiesced_ = false;
     bool forced_terminal_unquiesced_ = false;
