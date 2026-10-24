@@ -243,16 +243,14 @@ public:
         const TunerAttachment& attachment) const noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!attached && missing_final_when_unattached_)
+        if (!same(attachment) || (!attached && missing_final_when_unattached_))
             return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-        return !attached || same(attachment)
-            ? Result<TunerStreamFinalSnapshot>::success(final)
-            : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        return Result<TunerStreamFinalSnapshot>::success(final);
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (attached && !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
+        if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         final_released = true;
         return Result<void>::success();
     }
@@ -279,6 +277,7 @@ private:
         return identity.owner_client_id == other.owner_client_id &&
             identity.lease_id == other.lease_id &&
             identity.attachment_id == other.attachment_id &&
+            identity.receiver == other.receiver && identity.system == other.system &&
             identity.nonce == other.nonce;
     }
     TunerAttachment identity{};
