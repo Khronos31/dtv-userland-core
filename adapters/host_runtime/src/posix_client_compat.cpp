@@ -88,18 +88,27 @@ int open_directory_path(const char* path, bool require_private_final,
         const int next = ::openat(current, component.c_str(),
             O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (next < 0) {
+            const int error = errno;
             (void)::close(current);
+            errno = error;
             return -1;
         }
         struct stat info{};
         const char* after = cursor;
         while (*after == '/') ++after;
-        if (::fstat(next, &info) != 0 ||
-            (require_private_final && *after == '\0'
+        if (::fstat(next, &info) != 0) {
+            const int error = errno;
+            (void)::close(next);
+            (void)::close(current);
+            errno = error;
+            return -1;
+        }
+        if ((require_private_final && *after == '\0'
                 ? !safe_private_directory(info, owner)
                 : !safe_parent_directory(info, owner))) {
             (void)::close(next);
             (void)::close(current);
+            errno = EPERM;
             return -1;
         }
         (void)::close(current);
@@ -108,6 +117,7 @@ int open_directory_path(const char* path, bool require_private_final,
     }
     if (!saw_component && require_private_final) {
         (void)::close(current);
+        errno = EPERM;
         return -1;
     }
     return current;
@@ -119,6 +129,20 @@ bool validate_private_root(const char* path, uid_t owner) noexcept
     if (root < 0) return false;
     (void)::close(root);
     return true;
+}
+
+enum class PrivateRootStatus : std::uint8_t { valid, missing, overlong, refused };
+
+PrivateRootStatus check_private_root(const char* path, uid_t owner) noexcept
+{
+    const int root = open_directory_path(path, true, owner);
+    if (root >= 0) {
+        (void)::close(root);
+        return PrivateRootStatus::valid;
+    }
+    if (errno == ENOENT) return PrivateRootStatus::missing;
+    if (errno == ENAMETOOLONG) return PrivateRootStatus::overlong;
+    return PrivateRootStatus::refused;
 }
 
 bool create_private_root(const char* path, uid_t owner) noexcept
@@ -405,7 +429,11 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
         if (!dtv::userland::host_runtime::endpoint_path(candidate_path_config))
             continue;
         path_usable = true;
-        if (!validate_private_root(root, ::geteuid())) continue;
+        const PrivateRootStatus root_status = check_private_root(root, ::geteuid());
+        if (root_status == PrivateRootStatus::missing ||
+            root_status == PrivateRootStatus::overlong) continue;
+        if (root_status == PrivateRootStatus::refused)
+            return Result<SocketStream>::failure(Error::UNSUPPORTED);
         auto connected = connect_root(root);
         if (!connected) {
             if (connected.error() == Error::NOT_FOUND ||
