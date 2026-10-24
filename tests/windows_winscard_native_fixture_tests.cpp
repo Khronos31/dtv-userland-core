@@ -263,8 +263,14 @@ private:
             std::size_t reply_size = inbound.reply_size;
             if (inbound.action == wire::InboundAction::dispatch) {
                 if (!dispatch(request, connected,
-                        MutableByteView{output.data(), output.size()}, reply_size)) break;
+                        MutableByteView{output.data(), output.size()}, reply_size)) {
+                    std::fprintf(stderr, "mock dispatch failed: kind=%u id=%u\\n",
+                        static_cast<unsigned>(request.kind), request.request_id);
+                    break;
+                }
             } else if (inbound.action != wire::InboundAction::respond) {
+                std::fprintf(stderr, "mock connection rejected: action=%u code=%u\\n",
+                    static_cast<unsigned>(inbound.action), inbound.code);
                 break;
             }
             if (!send_all(peer, output.data(), reply_size)) break;
@@ -412,9 +418,17 @@ int run(const wchar_t* dll_path)
         SCARDCONTEXT context = 0U;
         CHECK(establish(SCARD_SCOPE_USER, nullptr, nullptr, &context) == SCARD_S_SUCCESS);
         DWORD characters = 0U;
-        CHECK(list(context, nullptr, nullptr, &characters) == SCARD_S_SUCCESS);
+        const LONG size_result = list(context, nullptr, nullptr, &characters);
+        std::fprintf(stderr, "reader list size result=0x%08lx characters=%lu\\n",
+                     static_cast<unsigned long>(size_result),
+                     static_cast<unsigned long>(characters));
+        CHECK(size_result == SCARD_S_SUCCESS);
         std::vector<wchar_t> readers(characters);
-        CHECK(list(context, nullptr, readers.data(), &characters) == SCARD_S_SUCCESS);
+        const LONG list_result = list(context, nullptr, readers.data(), &characters);
+        std::fprintf(stderr, "reader list result=0x%08lx characters=%lu\\n",
+                     static_cast<unsigned long>(list_result),
+                     static_cast<unsigned long>(characters));
+        CHECK(list_result == SCARD_S_SUCCESS);
         const std::wstring px4_name = L"DTV userland (px4:fixture-p/reader-0)";
         const std::wstring asicen_name = L"DTV userland (asicen:fixture-a/reader-0)";
         bool found_px4 = false;
