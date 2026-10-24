@@ -1,0 +1,12 @@
+{
+  "source_repository": "Khronos31/px4-userland",
+  "source_revision": "e6ca3c0267f33b84977158be94e109ad112e0b6f",
+  "license": "GPL-2.0-only",
+  "source_sha256": {
+    "userland/tools/px4d_windows_stdin.h": "09a35650693ebfef04b21604ea3735b789572690172b5fa3cd60fe590230097c",
+    "userland/tools/px4d_windows_stdin.cpp": "c54eb4d156f41a74e041104f4604b16af7e3a81d995dae284c50aba7384b956b",
+    "userland/tests/windows_stdin_monitor_tests.cpp": "015801d2814377303fe1cc32bf685238bada324e20de1d0f6b8de245f4fdf99b"
+  },
+  "adaptation": "Header path and guard only. The optional Windows host_facade target owns the existing monitor implementation and four anonymous-pipe/file tests. No CLI or stop semantics change.",
+  "follow_up": "PX4 and ASICEN should replace their product-local px4d_windows_stdin helper with this Core header and dtv::host_facade after the Core commit is accepted; those product changes are separate follow-up work."
+}
