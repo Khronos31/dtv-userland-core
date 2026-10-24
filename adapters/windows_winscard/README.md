@@ -9,10 +9,10 @@ separately licensed.
 The complete GPL version 2 license text is preserved in `COPYING`, copied
 verbatim from the PX4 source repository's `LICENSE`.
 
-`dtv_windows_winscard_client` and any DLL created by
-`dtv_add_windows_winscard_dll()` are opt-in, build-tree-only targets. They are
-not installed or exported. A product supplies its namespace/version, expected
-UDTV product slug, reader prefix, runtime environment variable, host facade
-includes, and client-only support target; Core never links back to a product
-target. There is no implicit PX4 default, so enabling the adapter without those
-values fails configuration.
+`dtv_windows_winscard_client` and `dtv_windows_winscard` are opt-in,
+build-tree-only targets. The latter produces the single product-independent
+`WinSCard.dll` artifact used by PX4 and ASICEN; it is not installed or exported
+by Core. The DLL scans only the PX4 and ASICEN v1 namespaces, includes the
+product, instance and reader ID in each local reader name, and uses the shared
+`DTV_USERLAND_RUNTIME_DIR` override. Product builds must stage the same Core
+DLL bytes and must not link a product-specific support target into the DLL.

@@ -34,7 +34,7 @@ using namespace ipc::posix;
 namespace wire = dtv::userland::wire;
 using Clock = std::chrono::steady_clock;
 
-constexpr std::size_t kMaxDiscoveryEntries = 64U;
+constexpr std::size_t kMaxDiscoveryEntries = 128U;
 constexpr std::uint32_t kDiscoveryTimeoutMs = 1500U;
 constexpr std::uint32_t kEndpointTimeoutMs = 200U;
 constexpr std::uint32_t kRequestTimeoutMs = 4000U;
@@ -244,7 +244,7 @@ struct RuntimePins final {
     std::wstring product_path;
     std::wstring version_path;
 
-    Result<void> open(const std::string& runtime) noexcept
+    Result<void> open(const std::string& runtime, const Product& selected_product) noexcept
     {
         const auto parsed = local_runtime_path(runtime);
         if (!parsed) return Result<void>::failure(parsed.error());
@@ -272,12 +272,12 @@ struct RuntimePins final {
         }
         product_path = path;
         if (product_path.back() != L'\\') product_path += L'\\';
-        product_path += kProductNamespaceW;
+        product_path += selected_product.namespace_component;
         const auto product_opened = product.open(product_path, true);
         if (!product_opened) return product_opened;
         if (!verified_security(product.get(), true))
             return Result<void>::failure(Error::INVALID_ARGUMENT);
-        // The published layout is <runtime>/px4-userland/v1/<instance>.
+        // The published layout is <runtime>/<product>/v1/<instance>.
         version_path = product_path + L"\\" + kProductVersionW;
         const auto version_opened = version.open(version_path, true);
         if (!version_opened) return version_opened;
@@ -299,14 +299,15 @@ Result<void> pin_instance(const RuntimePins& runtime, const std::string& instanc
 }
 
 Result<std::unique_ptr<SocketTransport>> open_transport(
-    const std::string& runtime, const std::string& instance,
+    const std::string& runtime, const Product& product, const std::string& instance,
     Clock::time_point deadline) noexcept
 {
     const Timeout timeout = remaining_timeout(deadline);
     if (timeout.milliseconds == 0U)
         return Result<std::unique_ptr<SocketTransport>>::failure(Error::TIMEOUT);
     const EndpointConfig endpoint{runtime.c_str(), instance.c_str(),
-                                   kControlEndpointName, EndpointAccess::private_user};
+                                   "control.sock", EndpointAccess::private_user,
+                                   product.slug};
     auto stream = SocketStream::connect(endpoint, timeout);
     if (!stream) return Result<std::unique_ptr<SocketTransport>>::failure(stream.error());
     return Result<std::unique_ptr<SocketTransport>>::success(
@@ -318,18 +319,26 @@ ByteView byte_view(const char* bytes, std::size_t size) noexcept
     return ByteView{reinterpret_cast<const std::uint8_t*>(bytes), size};
 }
 
-ByteView product_slug_view() noexcept
+ByteView product_slug_view(const Product& product) noexcept
 {
-    return byte_view(kProductSlug, sizeof(kProductSlug) - 1U);
+    return byte_view(product.slug, std::strlen(product.slug));
+}
+
+const Product* find_product(std::string_view slug) noexcept
+{
+    for (const auto& product : kProducts) {
+        if (slug == product.slug) return &product;
+    }
+    return nullptr;
 }
 
 bool matching_identity(const wire::StatusSnapshot& snapshot,
-                       const std::string& instance) noexcept
+                       const Product& product, const std::string& instance) noexcept
 {
-    const auto& product = snapshot.list.producer.product;
-    const auto expected_product = product_slug_view();
-    if (expected_product.size != product.length ||
-        std::memcmp(expected_product.data, product.bytes.data(),
+    const auto& actual_product = snapshot.list.producer.product;
+    const auto expected_product = product_slug_view(product);
+    if (expected_product.size != actual_product.length ||
+        std::memcmp(expected_product.data, actual_product.bytes.data(),
                     expected_product.size) != 0)
         return false;
     const auto& actual_instance = snapshot.status.context.instance;
@@ -379,74 +388,78 @@ bool terminal_error(Error error) noexcept
 Result<std::vector<Reader>> list_readers(const std::string& runtime_root) noexcept
 {
     const auto deadline = Clock::now() + std::chrono::milliseconds(kDiscoveryTimeoutMs);
-    RuntimePins runtime;
-    const auto opened = runtime.open(runtime_root);
-    if (!opened) {
-        if (opened.error() == Error::NOT_FOUND)
-            return Result<std::vector<Reader>>::success({});
-        return Result<std::vector<Reader>>::failure(opened.error());
-    }
-    std::vector<std::string> instances;
-    const std::wstring pattern = runtime.version_path + L"\\*";
-    WIN32_FIND_DATAW data{};
-    const HANDLE search = ::FindFirstFileW(pattern.c_str(), &data);
-    if (search == INVALID_HANDLE_VALUE) {
-        const DWORD error = ::GetLastError();
-        return error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND
-            ? Result<std::vector<Reader>>::success({})
-            : Result<std::vector<Reader>>::failure(path_error(error));
-    }
-    Error scan_error = Error::OK;
-    std::size_t entries = 0U;
-    do {
-        if (remaining_timeout(deadline).milliseconds == 0U) {
-            scan_error = Error::TIMEOUT;
-            break;
-        }
-        const std::wstring_view name(data.cFileName);
-        if (name == L"." || name == L"..") continue;
-        if (++entries > kMaxDiscoveryEntries) {
-            scan_error = Error::BUFFER_TOO_SMALL;
-            break;
-        }
-        if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
-            (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
-            name.empty() || name.size() > 80U) continue;
-        std::string instance;
-        for (const wchar_t c : name) {
-            if (c > 0x7f) { instance.clear(); break; }
-            instance.push_back(static_cast<char>(c));
-        }
-        if (valid_instance(instance)) instances.push_back(std::move(instance));
-    } while (::FindNextFileW(search, &data) != 0);
-    const DWORD find_error = ::GetLastError();
-    ::FindClose(search);
-    if (scan_error != Error::OK)
-        return Result<std::vector<Reader>>::failure(scan_error);
-    if (find_error != ERROR_NO_MORE_FILES)
-        return Result<std::vector<Reader>>::failure(path_error(find_error));
-    std::sort(instances.begin(), instances.end());
     std::vector<Reader> readers;
-    for (const auto& instance : instances) {
-        if (remaining_timeout(deadline).milliseconds == 0U)
-            return Result<std::vector<Reader>>::failure(Error::TIMEOUT);
-        DirectoryPin pin;
-        if (!pin_instance(runtime, instance, pin)) continue;
-        const auto endpoint_deadline = std::min(
-            deadline, Clock::now() + std::chrono::milliseconds(kEndpointTimeoutMs));
-        auto transport = open_transport(runtime_root, instance, endpoint_deadline);
-        if (!transport) continue;
-        const Timeout timeout = remaining_timeout(endpoint_deadline);
-        if (timeout.milliseconds == 0U) continue;
-        const auto status = wire::fetch_status(*transport.value(), timeout,
-                                               wire::kFeatureCardService);
-        // A CARD_SERVICE endpoint that is not ready, or that does not publish
-        // the reader, is not exposed as a usable reader.
-        if (!status || status.snapshot.status.context.state != wire::ContextState::ready ||
-            !listed_reader(status.snapshot.list, kReaderId) ||
-            !matching_identity(status.snapshot, instance))
-            continue;
-        readers.push_back(Reader{instance, std::string(kReaderPrefix) + instance + ")"});
+    std::size_t entries = 0U;
+    for (const auto& product : kProducts) {
+        RuntimePins runtime;
+        const auto opened = runtime.open(runtime_root, product);
+        if (!opened) {
+            if (opened.error() == Error::NOT_FOUND) continue;
+            return Result<std::vector<Reader>>::failure(opened.error());
+        }
+        std::vector<std::string> instances;
+        const std::wstring pattern = runtime.version_path + L"\\*";
+        WIN32_FIND_DATAW data{};
+        const HANDLE search = ::FindFirstFileW(pattern.c_str(), &data);
+        if (search == INVALID_HANDLE_VALUE) {
+            const DWORD error = ::GetLastError();
+            if (error == ERROR_FILE_NOT_FOUND || error == ERROR_PATH_NOT_FOUND) continue;
+            return Result<std::vector<Reader>>::failure(path_error(error));
+        }
+        Error scan_error = Error::OK;
+        do {
+            if (remaining_timeout(deadline).milliseconds == 0U) {
+                scan_error = Error::TIMEOUT;
+                break;
+            }
+            const std::wstring_view name(data.cFileName);
+            if (name == L"." || name == L"..") continue;
+            if (++entries > kMaxDiscoveryEntries) {
+                scan_error = Error::BUFFER_TOO_SMALL;
+                break;
+            }
+            if ((data.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
+                (data.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U ||
+                name.empty() || name.size() > 80U) continue;
+            std::string instance;
+            for (const wchar_t c : name) {
+                if (c > 0x7f) { instance.clear(); break; }
+                instance.push_back(static_cast<char>(c));
+            }
+            if (valid_instance(instance)) instances.push_back(std::move(instance));
+        } while (::FindNextFileW(search, &data) != 0);
+        const DWORD find_error = ::GetLastError();
+        ::FindClose(search);
+        if (scan_error != Error::OK)
+            return Result<std::vector<Reader>>::failure(scan_error);
+        if (find_error != ERROR_NO_MORE_FILES)
+            return Result<std::vector<Reader>>::failure(path_error(find_error));
+        std::sort(instances.begin(), instances.end());
+        for (const auto& instance : instances) {
+            if (remaining_timeout(deadline).milliseconds == 0U)
+                return Result<std::vector<Reader>>::failure(Error::TIMEOUT);
+            DirectoryPin pin;
+            if (!pin_instance(runtime, instance, pin)) continue;
+            const auto endpoint_deadline = std::min(
+                deadline, Clock::now() + std::chrono::milliseconds(kEndpointTimeoutMs));
+            auto transport = open_transport(runtime_root, product, instance, endpoint_deadline);
+            if (!transport) continue;
+            const Timeout timeout = remaining_timeout(endpoint_deadline);
+            if (timeout.milliseconds == 0U) continue;
+            const auto status = wire::fetch_status(*transport.value(), timeout,
+                                                   wire::kFeatureCardService);
+            // A CARD_SERVICE endpoint that is not ready, or that does not publish
+            // the reader, is not exposed as a usable reader.
+            if (!status ||
+                status.snapshot.status.context.state != wire::ContextState::ready ||
+                !listed_reader(status.snapshot.list, kReaderId) ||
+                !matching_identity(status.snapshot, product, instance))
+                continue;
+            const std::string display_name = std::string(kReaderPrefix) +
+                product.reader_component + ":" + instance + "/reader-" +
+                std::to_string(kReaderId) + ")";
+            readers.push_back(Reader{product.slug, instance, kReaderId, display_name});
+        }
     }
     if (remaining_timeout(deadline).milliseconds == 0U)
         return Result<std::vector<Reader>>::failure(Error::TIMEOUT);
@@ -454,17 +467,21 @@ Result<std::vector<Reader>> list_readers(const std::string& runtime_root) noexce
 }
 
 Result<ReaderStatus> reader_status(const std::string& runtime_root,
-                                  const std::string& instance) noexcept
+                                  const std::string& product_slug,
+                                  const std::string& instance,
+                                  std::uint16_t reader_id) noexcept
 {
     if (!valid_instance(instance)) return Result<ReaderStatus>::failure(Error::INVALID_ARGUMENT);
+    const Product* product = find_product(product_slug);
+    if (product == nullptr) return Result<ReaderStatus>::failure(Error::INVALID_ARGUMENT);
     const auto deadline = Clock::now() + std::chrono::milliseconds(kRequestTimeoutMs);
     RuntimePins runtime;
-    const auto opened = runtime.open(runtime_root);
+    const auto opened = runtime.open(runtime_root, *product);
     if (!opened) return Result<ReaderStatus>::failure(opened.error());
     DirectoryPin pin;
     const auto pinned = pin_instance(runtime, instance, pin);
     if (!pinned) return Result<ReaderStatus>::failure(pinned.error());
-    auto transport = open_transport(runtime_root, instance, deadline);
+    auto transport = open_transport(runtime_root, *product, instance, deadline);
     if (!transport) return Result<ReaderStatus>::failure(transport.error());
     const Timeout fetch_timeout = remaining_timeout(deadline);
     if (fetch_timeout.milliseconds == 0U)
@@ -472,17 +489,17 @@ Result<ReaderStatus> reader_status(const std::string& runtime_root,
     const auto status = wire::fetch_status(*transport.value(), fetch_timeout,
                                            wire::kFeatureCardService);
     if (!status) return Result<ReaderStatus>::failure(status.error);
-    if (!matching_identity(status.snapshot, instance))
+    if (!matching_identity(status.snapshot, *product, instance))
         return Result<ReaderStatus>::failure(Error::NOT_FOUND);
     if (status.snapshot.status.context.state != wire::ContextState::ready)
         return Result<ReaderStatus>::failure(Error::NOT_READY);
-    if (!listed_reader(status.snapshot.list, kReaderId))
+    if (!listed_reader(status.snapshot.list, reader_id))
         return Result<ReaderStatus>::failure(Error::NOT_FOUND);
     // A reader snapshot must not connect or initialize the card: one
     // reader-keyed CARD_STATUS with no owner handle.
     wire::CardClientSession session{};
     session.epoch = status.snapshot.status.context.epoch;
-    session.reader_id = kReaderId;
+    session.reader_id = reader_id;
     session.next_request_id = 4U;
     const Timeout status_timeout = remaining_timeout(deadline);
     if (status_timeout.milliseconds == 0U)
@@ -493,20 +510,24 @@ Result<ReaderStatus> reader_status(const std::string& runtime_root,
 }
 
 Result<std::unique_ptr<CardClient>> CardClient::connect(
-    const std::string& runtime_root, const std::string& instance,
+    const std::string& runtime_root, const std::string& product_slug,
+    const std::string& instance, std::uint16_t reader_id,
     ShareMode mode) noexcept
 {
     if (!valid_instance(instance) ||
         (mode != ShareMode::shared && mode != ShareMode::exclusive))
         return Result<std::unique_ptr<CardClient>>::failure(Error::INVALID_ARGUMENT);
+    const Product* product = find_product(product_slug);
+    if (product == nullptr)
+        return Result<std::unique_ptr<CardClient>>::failure(Error::INVALID_ARGUMENT);
     const auto deadline = Clock::now() + std::chrono::milliseconds(kRequestTimeoutMs);
     RuntimePins runtime;
-    const auto opened = runtime.open(runtime_root);
+    const auto opened = runtime.open(runtime_root, *product);
     if (!opened) return Result<std::unique_ptr<CardClient>>::failure(opened.error());
     DirectoryPin pin;
     const auto pinned = pin_instance(runtime, instance, pin);
     if (!pinned) return Result<std::unique_ptr<CardClient>>::failure(pinned.error());
-    auto transport = open_transport(runtime_root, instance, deadline);
+    auto transport = open_transport(runtime_root, *product, instance, deadline);
     if (!transport) return Result<std::unique_ptr<CardClient>>::failure(transport.error());
     const Timeout timeout = remaining_timeout(deadline);
     if (timeout.milliseconds == 0U)
@@ -515,10 +536,10 @@ Result<std::unique_ptr<CardClient>> CardClient::connect(
     // CARD_STATUS and CARD_CONNECT on this one connection. A non-card daemon
     // is refused with UNSUPPORTED and every failure closes the connection.
     wire::CardClientOptions options{};
-    options.reader_id = kReaderId;
+    options.reader_id = reader_id;
     options.share = static_cast<wire::Share>(mode);
     options.preferred_protocols = 1U;
-    options.expected_product = product_slug_view();
+    options.expected_product = product_slug_view(*product);
     options.expected_instance = byte_view(instance.data(), instance.size());
     const auto card = wire::begin_card(*transport.value(), options, timeout);
     if (!card) return Result<std::unique_ptr<CardClient>>::failure(card.error);

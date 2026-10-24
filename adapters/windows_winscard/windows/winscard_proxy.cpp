@@ -261,7 +261,9 @@ LONG ensure_native_context(Context& context) noexcept
 template <typename Character>
 struct ReaderEntry final {
     std::basic_string<Character> name;
-    std::string instance;  // Empty means Windows owns the reader.
+    std::string product;  // Empty means Windows owns the reader.
+    std::string instance;
+    std::uint16_t reader_id = 0U;
 };
 
 template <typename Character>
@@ -309,8 +311,8 @@ LONG collect_readers(Context& context, std::vector<ReaderEntry<Character>>& read
                                                names.begin() + used, static_cast<Character>(0));
                     if (end == names.begin() + used) return SCARD_F_COMM_ERROR;
                     const auto length = static_cast<std::size_t>(end - names.begin()) - offset;
-                    native_readers.push_back({std::basic_string<Character>(names.data() + offset,
-                                                                           length), {}});
+                    native_readers.push_back({
+                        std::basic_string<Character>(names.data() + offset, length), {}, {}, 0U});
                     offset += length + 1U;
                 }
                 break;
@@ -323,7 +325,7 @@ LONG collect_readers(Context& context, std::vector<ReaderEntry<Character>>& read
         // collides. Never silently route that reader to a virtual device.
         if (std::none_of(native_readers.begin(), native_readers.end(),
                          [&](const auto& item_native) { return item_native.name == name; })) {
-            readers.push_back({name, item.instance});
+            readers.push_back({name, item.product, item.instance, item.reader_id});
         }
     }
     readers.insert(readers.end(), native_readers.begin(), native_readers.end());
@@ -428,11 +430,12 @@ LONG connect(SCARDCONTEXT handle, const Character* reader, DWORD share, DWORD pr
     const auto card = std::make_shared<Card>();
     card->owner = context;
     DWORD negotiated = SCARD_PROTOCOL_UNDEFINED;
-    if (found != readers.end() && !found->instance.empty()) {
+    if (found != readers.end() && !found->product.empty()) {
         if (share != SCARD_SHARE_SHARED && share != SCARD_SHARE_EXCLUSIVE) return SCARD_E_UNSUPPORTED_FEATURE;
         if ((protocols & ~(SCARD_PROTOCOL_T0 | SCARD_PROTOCOL_T1)) != 0U) return SCARD_E_INVALID_PARAMETER;
         if ((protocols & SCARD_PROTOCOL_T1) == 0U) return SCARD_E_PROTO_MISMATCH;
-        auto local = CardClient::connect(context->root, found->instance,
+        auto local = CardClient::connect(context->root, found->product,
+                                           found->instance, found->reader_id,
                                            share == SCARD_SHARE_EXCLUSIVE ?
                                                ipc::ShareMode::exclusive : ipc::ShareMode::shared);
         if (!local) return map_error(local.error());
@@ -775,8 +778,9 @@ extern "C" LONG WINAPI SCardGetStatusChangeW(SCARDCONTEXT handle, DWORD timeout,
     const std::wstring name(states[0].szReader, length);
     const auto found = std::find_if(readers.begin(), readers.end(),
                                    [&](const auto& entry) { return entry.name == name; });
-    if (found != readers.end() && !found->instance.empty()) {
-        const auto status = reader_status(context->root, found->instance);
+    if (found != readers.end() && !found->product.empty()) {
+        const auto status = reader_status(context->root, found->product,
+                                          found->instance, found->reader_id);
         if (!status) return map_error(status.error());
         if (status.value().atr.size() > sizeof(states[0].rgbAtr)) return SCARD_F_COMM_ERROR;
         states[0].dwEventState = SCARD_STATE_CHANGED |

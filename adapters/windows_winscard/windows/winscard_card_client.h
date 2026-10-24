@@ -14,7 +14,9 @@
 namespace px4::userland::windows_card {
 
 struct Reader final {
+    std::string product;
     std::string instance;
+    std::uint16_t reader_id = 0U;
     std::string display_name;
 };
 
@@ -26,23 +28,24 @@ struct ReaderStatus final {
 };
 
 // runtime_root is the UTF-8 local-absolute runtime parent (normally
-// LOCALAPPDATA), not its px4-userland child. Only already-running private
-// endpoints under px4-userland/v1 that advertise CARD_SERVICE with a ready
-// context are returned. Discovery has a 64-entry cap and a 1500 ms cooperative
-// aggregate deadline; it fails rather than returning a partial list if either
-// bound is exhausted.
+// LOCALAPPDATA), not its product child. Only already-running private endpoints
+// under px4-userland/v1 and asicen-userland/v1 that advertise CARD_SERVICE
+// with a ready context are returned. Discovery is bounded across both products.
 Result<std::vector<Reader>> list_readers(const std::string& runtime_root) noexcept;
 
 // One current snapshot, not an idle wait. The shared CARD_STATUS reads the
 // reader's present/initialized/ATR without connecting, initializing the card
 // protocol, resetting, or sending an APDU.
 Result<ReaderStatus> reader_status(const std::string& runtime_root,
-                                  const std::string& instance) noexcept;
+                                  const std::string& product,
+                                  const std::string& instance,
+                                  std::uint16_t reader_id) noexcept;
 
 class CardClient final {
 public:
     static Result<std::unique_ptr<CardClient>> connect(
-        const std::string& runtime_root, const std::string& instance,
+        const std::string& runtime_root, const std::string& product,
+        const std::string& instance, std::uint16_t reader_id,
         ipc::ShareMode mode) noexcept;
     ~CardClient() noexcept;
     CardClient(const CardClient&) = delete;
