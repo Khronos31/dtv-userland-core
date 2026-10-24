@@ -213,6 +213,7 @@ public:
         counters = TunerStreamCounters{};
         counters.packets = 2U;
         counters.bytes = 2U * 188U;
+        counters.queue_drops = 3U;
         final = TunerStreamFinalSnapshot{};
         final_released = false;
         return Result<void>::success();
@@ -270,6 +271,11 @@ public:
             attached ? TunerStreamTerminal::none : TunerStreamTerminal::stopped});
     }
     bool final_released = false;
+    bool is_attached() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return attached;
+    }
 private:
     mutable std::mutex mutex;
     bool same(const TunerAttachment& other) const noexcept
@@ -1264,6 +1270,11 @@ bool test_authority_stream_prepare_commit_stop()
         return false;
     }
     const auto cleanup_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (stream.is_attached() && std::chrono::steady_clock::now() < cleanup_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (stream.is_attached()) return false;
     HostAuthorityStreamEndResult stream_end{};
     bool drained_packet_seen = false;
     while (!stream_end.ready && std::chrono::steady_clock::now() < cleanup_until) {
@@ -1271,7 +1282,8 @@ bool test_authority_stream_prepare_commit_stop()
         const auto draining = bridge.read_data(data.value(),
             {packet.data(), packet.size()}, Timeout{0U});
         if (draining.error == Error::OK && draining.data.packets.size != 0U) {
-            if (draining.data.sequence != 1U) return false;
+            if (draining.data.sequence != 1U ||
+                draining.data.cumulative_queue_dropped_packets != 3U) return false;
             drained_packet_seen = true;
         }
         stream_end = bridge.take_data_stream_end(data.value());

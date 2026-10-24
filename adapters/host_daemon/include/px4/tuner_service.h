@@ -309,6 +309,7 @@ struct TunerStreamReadResult final {
     bool eof = false;
     bool timed_out = false;
     TunerStreamTerminal terminal = TunerStreamTerminal::none;
+    std::uint64_t cumulative_queue_dropped_packets = 0U;
 };
 
 struct TunerStatus final {

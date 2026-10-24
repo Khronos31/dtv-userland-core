@@ -425,14 +425,10 @@ HostAuthorityDataReadResult HostAuthorityBridge::read_data(
         result.error = Error::PROTOCOL_ERROR;
         return result;
     }
-    const auto counts = tuner_service_.authority_stream_stats_v1(data.ticket);
-    if (!counts) {
-        result.error = counts.error();
-        return result;
-    }
     result.data.stream_id = data.ticket.stream_id;
     result.data.sequence = data.next_sequence++;
-    result.data.cumulative_queue_dropped_packets = counts.value().queue_drops;
+    result.data.cumulative_queue_dropped_packets =
+        read.value().cumulative_queue_dropped_packets;
     result.data.packets = ByteView{output.data, read.value().bytes};
     return result;
 }

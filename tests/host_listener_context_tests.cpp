@@ -12,6 +12,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <memory>
+#include <mutex>
 #include <thread>
 #include <vector>
 
@@ -103,6 +104,7 @@ class Stream final : public TunerStreamControl {
 public:
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         attachment_ = attachment;
         attached_ = true;
         packets_remaining_ = 2U;
@@ -110,6 +112,7 @@ public:
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         attached_ = false;
         final_.counters = counters_;
@@ -118,17 +121,21 @@ public:
     }
     Result<TunerStreamCounters> stats(const TunerAttachment& attachment) const noexcept override
     {
-        return same(attachment) ? Result<TunerStreamCounters>::success(counters_)
-                                : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+        std::lock_guard<std::mutex> lock(mutex_);
+        return attached_ && same(attachment)
+            ? Result<TunerStreamCounters>::success(counters_)
+            : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
     }
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         return same(attachment) ? Result<TunerStreamFinalSnapshot>::success(final_)
                                 : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         return same(attachment) ? Result<void>::success()
                                 : Result<void>::failure(Error::NOT_FOUND);
     }
@@ -136,6 +143,7 @@ public:
                                         MutableByteView output,
                                         Timeout) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex_);
         if (!same(attachment)) return Result<TunerStreamReadResult>::failure(Error::NOT_FOUND);
         if (packets_remaining_ != 0U && output.size >= 188U) {
             for (std::size_t i = 0U; i < 188U; ++i)
@@ -150,11 +158,13 @@ public:
             attached_ ? TunerStreamTerminal::none : TunerStreamTerminal::stopped});
     }
 private:
+    mutable std::mutex mutex_;
     bool same(const TunerAttachment& other) const noexcept
     {
         return attachment_.owner_client_id == other.owner_client_id &&
             attachment_.lease_id == other.lease_id &&
             attachment_.attachment_id == other.attachment_id &&
+            attachment_.receiver == other.receiver && attachment_.system == other.system &&
             attachment_.nonce == other.nonce;
     }
     TunerAttachment attachment_{};
