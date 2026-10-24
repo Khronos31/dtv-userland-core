@@ -791,8 +791,11 @@ if(DTV_USERLAND_BUILD_TESTING)
     if(WIN32 AND DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
         add_executable(windows_winscard_native_fixture_tests
             tests/windows_winscard_native_fixture_tests.cpp)
+        target_include_directories(windows_winscard_native_fixture_tests PRIVATE
+            adapters/windows_winscard)
         target_link_libraries(windows_winscard_native_fixture_tests PRIVATE
-            dtv::control dtv::host_runtime ws2_32 bcrypt advapi32)
+            dtv_windows_winscard_client dtv::control dtv::host_runtime
+            ws2_32 bcrypt advapi32)
         add_dependencies(windows_winscard_native_fixture_tests dtv_windows_winscard)
         add_test(NAME windows_winscard_native_fixture_tests
             COMMAND windows_winscard_native_fixture_tests $<TARGET_FILE:dtv_windows_winscard>)

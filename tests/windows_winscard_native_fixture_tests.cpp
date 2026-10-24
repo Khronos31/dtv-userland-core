@@ -17,6 +17,7 @@
 #include <dtv/userland/control_connection.h>
 #include <dtv/userland/host_runtime/control_socket.h>
 #include <windows/windows_security.h>
+#include "windows/winscard_card_client.h"
 #include <dtv/userland/wire.h>
 
 #include <array>
@@ -404,6 +405,11 @@ int run(const wchar_t* dll_path)
     MockControl px4(px4_dir, "px4-userland", "fixture-p");
     MockControl asicen(asicen_dir, "asicen-userland", "fixture-a");
     CHECK(px4.valid() && asicen.valid());
+    const auto direct_readers = px4::userland::windows_card::list_readers(
+        root.runtime.u8string());
+    std::fprintf(stderr, "direct reader discovery=%u count=%lu\\n",
+        static_cast<unsigned>(direct_readers.error()),
+        static_cast<unsigned long>(direct_readers ? direct_readers.value().size() : 0U));
     HMODULE module = ::LoadLibraryW(dll_path);
     CHECK(module != nullptr);
     if (module == nullptr) return failures + 1;
