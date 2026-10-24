@@ -913,6 +913,58 @@ bool test_client_id_domain_and_authority_exhaustion()
     return true;
 }
 
+bool test_card_dispatch_rejects_unadvertised_reader()
+{
+    const ReceiverId ids[] = {2U};
+    auto list = make_list(ids, 1U);
+    list.readers.present = true;
+    list.readers.value.count = 0U;
+    w::ServerHello server{list.epoch, list.producer, w::kFeatureCardService};
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const ReceiverId receiver_ids[] = {2U};
+    ReceiverEngine engine(backend, receiver_ids, 1U, tokens, clock);
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession session(authority);
+    Executor executor;
+    CHECK(authority.open(session) == Error::OK);
+    std::array<std::uint8_t, w::kHelloRequestSize> hello_payload{};
+    const w::HelloRequest hello_request{{1U, 0U}, {1U, 0U},
+                                        w::kFeatureCardService, 0U};
+    const auto hello_size = w::encode_hello_request(
+        hello_request, {hello_payload.data(), hello_payload.size()});
+    CHECK(hello_size);
+    w::Context context;
+    w::Snapshot snapshot;
+    auto reply = authority.accept(session,
+        frame(w::kOpcodeHello, 1U, {hello_payload.data(), hello_size.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.action == w::InboundAction::respond);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    w::CardStatusRequest request{};
+    request.key.epoch = list.epoch;
+    request.key.reader_id = 7U;
+    std::array<std::uint8_t, 64U> payload{};
+    const auto request_size = w::encode_card_status_request(request,
+        {payload.data(), payload.size()});
+    CHECK(request_size);
+    reply = authority.accept(session,
+        frame(w::kOpcodeCardStatus, 2U, {payload.data(), request_size.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.action == w::InboundAction::respond && !reply.queued);
+    CHECK(executor.count == 0U);
+    CHECK(reply.frame.size >= w::kHeaderSize);
+    const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
+    CHECK(header && header.value().opcode == w::kOpcodeCardStatus);
+    const auto error = w::decode_error_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(error && error.value().error.code == static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(authority.close(session).kind == AuthorityJobKind::disconnect);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -925,6 +977,7 @@ int main()
     if (!test_async_acquire_rollback_and_close_ownership()) return 1;
     if (!test_other_receiver_cleanup_while_tune_blocks()) return 1;
     if (!test_client_id_domain_and_authority_exhaustion()) return 1;
+    if (!test_card_dispatch_rejects_unadvertised_reader()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }

@@ -19,7 +19,7 @@ struct SessionKey final {
 };
 
 enum class AuthorityJobKind : std::uint8_t {
-    acquire, tune, release, rollback_release, disconnect
+    acquire, tune, release, rollback_release, disconnect, card
 };
 
 struct AuthorityCompletion final {
@@ -28,6 +28,12 @@ struct AuthorityCompletion final {
     Error error = Error::OK;
     std::uint64_t lease_id = 0U;
     ReceiverId receiver = 0U;
+    wire::ControlRequestKind card_kind = wire::ControlRequestKind::card_status;
+    wire::CardStatusResponse card_status{};
+    wire::CardSessionResult card_session{};
+    wire::CardDisconnectResponse card_disconnect{};
+    wire::CardTransmitResponse card_transmit{};
+    wire::BeginTransactionResponse card_transaction{};
 };
 
 struct AuthorityJob final {
@@ -38,6 +44,8 @@ struct AuthorityJob final {
     std::uint64_t lease_id = 0U;
     ReceiverId receiver = 0U;
     Error rollback_error = Error::OK;
+    wire::ControlRequestKind card_kind = wire::ControlRequestKind::card_status;
+    wire::ControlRequest card_request{};
     // A deferred disconnect is only a close intent; completion must first
     // return the runnable cleanup value.
     bool deferred = false;
@@ -111,6 +119,8 @@ private:
     std::uint16_t pending_selection_value_ = 0U;
     bool pending_ = false;
     bool closed_ = false;
+    wire::ControlRequestKind pending_card_kind_ = wire::ControlRequestKind::card_status;
+    std::uint16_t pending_card_opcode_ = 0U;
 };
 
 class ControlAuthority final {
