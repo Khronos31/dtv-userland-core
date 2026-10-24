@@ -16,3 +16,6 @@ by Core. The DLL scans only the PX4 and ASICEN v1 namespaces, includes the
 product, instance and reader ID in each local reader name, and uses the shared
 `DTV_USERLAND_RUNTIME_DIR` override. Product builds must stage the same Core
 DLL bytes and must not link a product-specific support target into the DLL.
+The adapter exposes the existing begin/end transaction operations for local
+CARD readers. Local `SCardEndTransaction` supports leave and reset; unpower and
+eject dispositions remain unsupported and return an error.

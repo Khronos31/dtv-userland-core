@@ -13,3 +13,5 @@ EXPORTS
     SCardStatusW
     SCardGetStatusChangeW
     g_rgSCardT1Pci DATA
+    SCardBeginTransaction
+    SCardEndTransaction

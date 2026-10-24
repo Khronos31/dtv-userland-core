@@ -118,6 +118,10 @@ NativeApi& native_api() noexcept
         api.list_w = native_function<decltype(api.list_w)>(module, "SCardListReadersW");
         api.connect_a = native_function<decltype(api.connect_a)>(module, "SCardConnectA");
         api.connect_w = native_function<decltype(api.connect_w)>(module, "SCardConnectW");
+        api.begin_transaction = native_function<decltype(api.begin_transaction)>(
+            module, "SCardBeginTransaction");
+        api.end_transaction = native_function<decltype(api.end_transaction)>(
+            module, "SCardEndTransaction");
         api.disconnect = native_function<decltype(api.disconnect)>(module, "SCardDisconnect");
         api.transmit = native_function<decltype(api.transmit)>(module, "SCardTransmit");
         api.status_w = native_function<decltype(api.status_w)>(module, "SCardStatusW");
@@ -649,6 +653,37 @@ extern "C" LONG WINAPI SCardDisconnect(SCARDHANDLE handle, DWORD disposition)
         state.cards.erase(handle);
     }
     return result;
+}
+extern "C" LONG WINAPI SCardBeginTransaction(SCARDHANDLE handle)
+{
+    using namespace px4::userland::windows_card;
+    const auto card = find_card(handle);
+    if (!card) return SCARD_E_INVALID_HANDLE;
+    std::lock_guard<std::mutex> lock(card->mutex);
+    if (!card->active) return SCARD_E_INVALID_HANDLE;
+    if (!card->local) return native_api().begin_transaction(card->native);
+    const auto result = card->local->begin_transaction();
+    return result ? SCARD_S_SUCCESS : map_error(result.error());
+}
+extern "C" LONG WINAPI SCardEndTransaction(SCARDHANDLE handle, DWORD disposition)
+{
+    using namespace px4::userland;
+    using namespace px4::userland::windows_card;
+    const auto card = find_card(handle);
+    if (!card) return SCARD_E_INVALID_HANDLE;
+    std::lock_guard<std::mutex> lock(card->mutex);
+    if (!card->active) return SCARD_E_INVALID_HANDLE;
+    if (disposition != SCARD_LEAVE_CARD && disposition != SCARD_RESET_CARD &&
+        disposition != SCARD_UNPOWER_CARD && disposition != SCARD_EJECT_CARD) {
+        return SCARD_E_INVALID_VALUE;
+    }
+    if (!card->local)
+        return native_api().end_transaction(card->native, disposition);
+    if (disposition != SCARD_LEAVE_CARD && disposition != SCARD_RESET_CARD)
+        return SCARD_E_UNSUPPORTED_FEATURE;
+    const auto result = card->local->end_transaction(
+        disposition == SCARD_RESET_CARD ? ipc::Disposition::reset : ipc::Disposition::leave);
+    return result ? SCARD_S_SUCCESS : map_error(result.error());
 }
 extern "C" LONG WINAPI SCardTransmit(SCARDHANDLE handle, LPCSCARD_IO_REQUEST send_pci,
                                       LPCBYTE send, DWORD send_length,

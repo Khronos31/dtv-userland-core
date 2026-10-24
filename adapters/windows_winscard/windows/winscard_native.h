@@ -21,6 +21,8 @@ struct NativeApi final {
     decltype(&::SCardListReadersW) list_w = nullptr;
     decltype(&::SCardConnectA) connect_a = nullptr;
     decltype(&::SCardConnectW) connect_w = nullptr;
+    decltype(&::SCardBeginTransaction) begin_transaction = nullptr;
+    decltype(&::SCardEndTransaction) end_transaction = nullptr;
     decltype(&::SCardDisconnect) disconnect = nullptr;
     decltype(&::SCardTransmit) transmit = nullptr;
     decltype(&::SCardStatusW) status_w = nullptr;
@@ -29,6 +31,7 @@ struct NativeApi final {
     bool complete() const noexcept
     {
         return establish && release && list_a && list_w && connect_a && connect_w &&
+               begin_transaction && end_transaction &&
                disconnect && transmit && status_w && change_w;
     }
 };

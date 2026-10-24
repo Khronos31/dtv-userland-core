@@ -157,6 +157,21 @@ CardTransmitResult card_transmit(TimedClientTransport& transport,
                                  CardProtocol protocol, ByteView command,
                                  Timeout timeout) noexcept;
 
+struct CardTransactionResult final {
+    Error error = Error::OK;
+    std::uint32_t remote_error_code = 0U;
+    explicit operator bool() const noexcept { return error == Error::OK; }
+};
+
+CardTransactionResult card_begin_transaction(TimedClientTransport& transport,
+                                              CardClientSession& session,
+                                              Timeout timeout) noexcept;
+
+CardTransactionResult card_end_transaction(TimedClientTransport& transport,
+                                            CardClientSession& session,
+                                            Disposition disposition,
+                                            Timeout timeout) noexcept;
+
 struct CardDisconnectResult final {
     // A matching consumed completion clears the session even when cleanup fails;
     // response and remote_error_code preserve the daemon's physical outcome.
