@@ -126,7 +126,7 @@ public:
         set_text(context_.instance.value, instance);
         const auto list_error = wire::validate_list_response(list_);
         if (list_error != dtv::userland::Error::OK)
-            std::fprintf(stderr, "mock LIST invalid: %u\\n",
+            std::fprintf(stderr, "mock LIST invalid: %u\n",
                          static_cast<unsigned>(list_error));
         server_socket_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (server_socket_ == INVALID_SOCKET) return;
@@ -181,7 +181,7 @@ private:
             const auto error = wire::build_status_shell(list_, context_, list_.snapshot,
                 request.status.scope, status);
             if (error != dtv::userland::Error::OK) {
-                std::fprintf(stderr, "mock STATUS invalid: %u\\n",
+                std::fprintf(stderr, "mock STATUS invalid: %u\n",
                              static_cast<unsigned>(error));
                 return false;
             }
@@ -191,7 +191,7 @@ private:
             const auto size = wire::encode_status_frame(request.request_id, status, list_,
                 output);
             if (!size) {
-                std::fprintf(stderr, "mock STATUS encode failed: %u\\n",
+                std::fprintf(stderr, "mock STATUS encode failed: %u\n",
                              static_cast<unsigned>(size.error()));
                 return false;
             }
@@ -282,12 +282,12 @@ private:
             if (inbound.action == wire::InboundAction::dispatch) {
                 if (!dispatch(request, connected,
                         MutableByteView{output.data(), output.size()}, reply_size)) {
-                    std::fprintf(stderr, "mock dispatch failed: kind=%u id=%u\\n",
+                    std::fprintf(stderr, "mock dispatch failed: kind=%u id=%u\n",
                         static_cast<unsigned>(request.kind), request.request_id);
                     break;
                 }
             } else if (inbound.action != wire::InboundAction::respond) {
-                std::fprintf(stderr, "mock connection rejected: action=%u code=%u\\n",
+                std::fprintf(stderr, "mock connection rejected: action=%u code=%u\n",
                     static_cast<unsigned>(inbound.action), inbound.code);
                 break;
             }
@@ -383,7 +383,7 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
     const LONG connect_result = connect(context, name.c_str(), SCARD_SHARE_SHARED,
         SCARD_PROTOCOL_T1, &card, &protocol);
     if (connect_result != SCARD_S_SUCCESS || protocol != SCARD_PROTOCOL_T1) {
-        std::fprintf(stderr, "mocked API connect failed: 0x%08lx\\n",
+        std::fprintf(stderr, "mocked API connect failed: 0x%08lx\n",
                      static_cast<unsigned long>(connect_result));
         return false;
     }
@@ -397,7 +397,7 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
         &active_protocol, atr.data(), &atr_length);
     if (status_result != SCARD_S_SUCCESS || atr_length != 2U || atr[0U] != 0x3bU ||
         atr[1U] != 0x00U || active_protocol != SCARD_PROTOCOL_T1) {
-        std::fprintf(stderr, "mocked API status failed: 0x%08lx atr=%lu\\n",
+        std::fprintf(stderr, "mocked API status failed: 0x%08lx atr=%lu\n",
                      static_cast<unsigned long>(status_result),
                      static_cast<unsigned long>(atr_length));
         return false;
@@ -413,7 +413,7 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
                              response[0U] == 0x90U && response[1U] == 0x00U;
     const LONG disconnected = disconnect(card, SCARD_LEAVE_CARD);
     if (!transmit_ok || disconnected != SCARD_S_SUCCESS)
-        std::fprintf(stderr, "mocked API transmit/disconnect: 0x%08lx/0x%08lx\\n",
+        std::fprintf(stderr, "mocked API transmit/disconnect: 0x%08lx/0x%08lx\n",
             static_cast<unsigned long>(transmitted),
             static_cast<unsigned long>(disconnected));
     return transmit_ok && disconnected == SCARD_S_SUCCESS;
@@ -434,11 +434,6 @@ int run(const wchar_t* dll_path)
     MockControl px4(px4_dir, "px4-userland", "fixture-p");
     MockControl asicen(asicen_dir, "asicen-userland", "fixture-a");
     CHECK(px4.valid() && asicen.valid());
-    const auto direct_readers = px4::userland::windows_card::list_readers(
-        root.runtime.u8string());
-    std::fprintf(stderr, "direct reader discovery=%u count=%lu\\n",
-        static_cast<unsigned>(direct_readers.error()),
-        static_cast<unsigned long>(direct_readers ? direct_readers.value().size() : 0U));
     HMODULE module = ::LoadLibraryW(dll_path);
     CHECK(module != nullptr);
     if (module == nullptr) return failures + 1;
@@ -454,15 +449,9 @@ int run(const wchar_t* dll_path)
         CHECK(establish(SCARD_SCOPE_USER, nullptr, nullptr, &context) == SCARD_S_SUCCESS);
         DWORD characters = 0U;
         const LONG size_result = list(context, nullptr, nullptr, &characters);
-        std::fprintf(stderr, "reader list size result=0x%08lx characters=%lu\\n",
-                     static_cast<unsigned long>(size_result),
-                     static_cast<unsigned long>(characters));
         CHECK(size_result == SCARD_S_SUCCESS);
         std::vector<wchar_t> readers(characters);
         const LONG list_result = list(context, nullptr, readers.data(), &characters);
-        std::fprintf(stderr, "reader list result=0x%08lx characters=%lu\\n",
-                     static_cast<unsigned long>(list_result),
-                     static_cast<unsigned long>(characters));
         CHECK(list_result == SCARD_S_SUCCESS);
         const std::wstring px4_name = L"DTV userland (px4:fixture-p/reader-0)";
         const std::wstring asicen_name = L"DTV userland (asicen:fixture-a/reader-0)";
