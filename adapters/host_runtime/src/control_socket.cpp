@@ -195,13 +195,19 @@ Error socket_error(int value) noexcept
     return Error::INTERNAL;
 }
 
-bool secure_directory(const std::string& path, EndpointAccess access, uid_t owner) noexcept
+enum class DirectoryCheck : std::uint8_t { ready, missing, refused };
+
+DirectoryCheck secure_directory(const std::string& path, EndpointAccess access,
+                                uid_t owner) noexcept
 {
     struct stat info{};
-    if (::lstat(path.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
-        info.st_uid != owner || S_ISLNK(info.st_mode)) return false;
+    if (::lstat(path.c_str(), &info) != 0)
+        return errno == ENOENT ? DirectoryCheck::missing : DirectoryCheck::refused;
+    if (!S_ISDIR(info.st_mode) || info.st_uid != owner || S_ISLNK(info.st_mode))
+        return DirectoryCheck::refused;
     const mode_t forbidden = access == EndpointAccess::private_user ? 0077 : 0007;
-    return (info.st_mode & forbidden) == 0;
+    return (info.st_mode & forbidden) == 0
+        ? DirectoryCheck::ready : DirectoryCheck::refused;
 }
 
 enum class EndpointCheck : std::uint8_t { ready, missing, refused };
@@ -432,11 +438,14 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     const std::size_t version_separator = parent.rfind('/', instance_separator - 1U);
     const std::string product_dir = parent.substr(0U, version_separator);
     const std::string runtime_directory(config.runtime_directory);
-    if (!secure_directory(runtime_directory, config.access, owner) ||
-        !secure_directory(product_dir, config.access, owner) ||
-        !secure_directory(version_dir, config.access, owner) ||
-        !secure_directory(instance_dir, config.access, owner))
-        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
+    const std::array<const std::string*, 4U> directories{
+        &runtime_directory, &product_dir, &version_dir, &instance_dir};
+    for (const std::string* directory : directories) {
+        const DirectoryCheck check = secure_directory(*directory, config.access, owner);
+        if (check != DirectoryCheck::ready)
+            return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(
+                check == DirectoryCheck::missing ? Error::NOT_READY : Error::UNSUPPORTED);
+    }
     struct stat endpoint_before{};
     const EndpointCheck endpoint_check = secure_endpoint(
         path, config.access, owner, endpoint_before);

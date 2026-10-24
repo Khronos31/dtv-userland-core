@@ -143,7 +143,7 @@ bool install_signal_handlers() noexcept
 {
     struct sigaction action {};
     action.sa_handler = stop_signal_handler;
-    if (::sigemptyset(&action.sa_mask) != 0) return false;
+    if ((::sigemptyset)(&action.sa_mask) != 0) return false;
     action.sa_flags = 0;
     struct sigaction previous_int {};
     if (::sigaction(SIGINT, &action, &previous_int) != 0) return false;

@@ -10,6 +10,7 @@
 #include <array>
 #include <cstddef>
 #include <memory>
+#include <string>
 
 namespace px4::userland::ipc::posix {
 
@@ -38,6 +39,8 @@ struct RuntimeInstanceDiscovery final {
 };
 
 Result<RuntimeRootCandidates> client_runtime_roots() noexcept;
+Result<std::string> select_publish_runtime_root(const char* product_slug,
+                                                const char* instance) noexcept;
 Result<RuntimeInstanceDiscovery> discover_runtime_instances(
     const char* runtime_directory, EndpointAccess access,
     const char* product_slug) noexcept;

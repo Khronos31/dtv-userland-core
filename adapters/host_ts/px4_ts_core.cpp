@@ -1136,15 +1136,6 @@ static Result<Px4TsRunResult> run_wire_profile(
     std::string selected_instance = arguments.instance;
     wire::StatusSnapshot discovered_snapshot{};
     bool has_discovered_snapshot = false;
-    // The daemon and host_ctl select the same runtime root when --runtime-dir
-    // is omitted; a product client with an explicit --instance must not skip
-    // that selection.
-    if (arguments.product_cli && !arguments.instance.empty() &&
-        selected_runtime_directory.empty()) {
-        const auto candidates = client_runtime_roots();
-        if (!candidates) return Result<Px4TsRunResult>::failure(candidates.error());
-        selected_runtime_directory.assign(candidates.value().paths[0].data());
-    }
     if (arguments.product_cli && arguments.instance.empty()) {
         ipc::posix::RuntimeRootCandidates roots{};
         if (!arguments.runtime_directory.empty()) {
@@ -1187,10 +1178,30 @@ static Result<Px4TsRunResult> run_wire_profile(
                 const std::uint32_t budget = remaining();
                 if (budget == 0U) return Result<Px4TsRunResult>::failure(Error::TIMEOUT);
                 const std::string candidate_instance(discovered.value().instances[candidate].data());
+                const char* product_slug = profile != nullptr ? profile->product_slug :
+                                                                "px4-userland";
+#if !defined(_WIN32)
+                const auto minimum_control_path = dtv::userland::host_runtime::
+                    control_endpoint_path({"/", product_slug, candidate_instance});
+                const auto minimum_data_path = dtv::userland::host_runtime::
+                    endpoint_path({"/", product_slug, candidate_instance,
+                                   dtv::userland::host_runtime::EndpointAccess::private_user,
+                                   -1, "stream.sock"});
+                if (!minimum_control_path || !minimum_data_path)
+                    return Result<Px4TsRunResult>::failure(
+                        !minimum_control_path ? minimum_control_path.error() :
+                                                minimum_data_path.error());
+                const auto candidate_control_path = dtv::userland::host_runtime::
+                    control_endpoint_path({root, product_slug, candidate_instance});
+                const auto candidate_data_path = dtv::userland::host_runtime::
+                    endpoint_path({root, product_slug, candidate_instance,
+                                   dtv::userland::host_runtime::EndpointAccess::private_user,
+                                   -1, "stream.sock"});
+                if (!candidate_control_path || !candidate_data_path) continue;
+#endif
                 const EndpointConfig endpoint{root.c_str(), candidate_instance.c_str(),
                                               "control.sock", access,
-                                              profile != nullptr ? profile->product_slug :
-                                                                   "px4-userland"};
+                                              product_slug};
                 auto probe = SocketStream::connect(endpoint, Timeout{budget});
                 if (!probe) {
                     if (probe.error() == Error::NOT_FOUND ||

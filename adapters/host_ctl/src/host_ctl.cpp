@@ -7,14 +7,40 @@
 #include <dtv/userland/json.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace dtv::userland::host_ctl {
 namespace {
+
+class SocketStreamTransport final : public wire::TimedClientTransport {
+public:
+    explicit SocketStreamTransport(px4::userland::ipc::posix::SocketStream& stream) noexcept
+        : stream_(stream) {}
+    Result<void> write_all(ByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.write_all(bytes, timeout);
+    }
+    Result<std::size_t> read_some(MutableByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.read_some(bytes, timeout);
+    }
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void close() noexcept override { stream_.close(); }
+
+private:
+    px4::userland::ipc::posix::SocketStream& stream_;
+};
 
 enum class Command : std::uint8_t {
     none,
@@ -314,27 +340,45 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         return 2;
     }
     instance.assign(normalized.bytes.data(), normalized.length);
-    std::string runtime_directory = arguments.runtime_directory;
-    if (runtime_directory.empty()) {
-        const auto roots = px4::userland::ipc::posix::client_runtime_roots();
-        if (!roots) return exit_status(roots.error());
-        runtime_directory.assign(roots.value().paths[0].data());
-    }
-    const host_runtime::EndpointConfig endpoint{
-        runtime_directory, profile.product_slug, instance,
+    const auto access = arguments.group ?
+        px4::userland::ipc::posix::EndpointAccess::shared_group :
+        px4::userland::ipc::posix::EndpointAccess::private_user;
+    const px4::userland::ipc::posix::EndpointConfig default_endpoint{
+        nullptr, instance.c_str(), "control.sock", access, profile.product_slug};
+    const host_runtime::EndpointConfig explicit_endpoint{
+        arguments.runtime_directory, profile.product_slug, instance,
         arguments.group ? host_runtime::EndpointAccess::shared_group :
                           host_runtime::EndpointAccess::private_user};
-    auto transport = host_runtime::connect_control(endpoint, Timeout{5000U});
-    if (!transport) {
+    px4::userland::ipc::posix::SocketStream default_stream;
+    SocketStreamTransport default_transport(default_stream);
+    std::unique_ptr<wire::TimedClientTransport> owned_transport;
+    wire::TimedClientTransport* transport = nullptr;
+    const auto connect_control = [&]() {
+        if (arguments.runtime_directory.empty()) {
+            auto connected = px4::userland::ipc::posix::SocketStream::connect(
+                default_endpoint, Timeout{5000U});
+            if (!connected) return connected.error();
+            default_stream = std::move(connected.value());
+            transport = &default_transport;
+            return Error::OK;
+        }
+        auto connected = host_runtime::connect_control(explicit_endpoint, Timeout{5000U});
+        if (!connected) {
+            return connected.error();
+        }
+        owned_transport = std::move(connected.value());
+        transport = owned_transport.get();
+        return Error::OK;
+    };
+    if (const auto error = connect_control(); error != Error::OK) {
         std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                     static_cast<unsigned int>(transport.error()));
-        return exit_status(transport.error());
+                     static_cast<unsigned int>(error));
+        return exit_status(error);
     }
     const std::uint64_t required_features =
         arguments.command == Command::card_status && profile.card_supported
             ? wire::kFeatureCardService : 0U;
-    const auto snapshot = wire::fetch_status(
-        *transport.value(), Timeout{5000U}, required_features);
+    const auto snapshot = wire::fetch_status(*transport, Timeout{5000U}, required_features);
     if (!snapshot) {
         std::fprintf(stderr, "%s: status failed (%u, remote=%u)\n", profile.tool_name,
             static_cast<unsigned int>(snapshot.error),
@@ -378,7 +422,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         session.reader_id = snapshot.snapshot.list.readers.value.items[0U].id;
         session.next_request_id = 4U;
         const auto card = wire::card_status(
-            *transport.value(), session, Timeout{5000U});
+            *transport, session, Timeout{5000U});
         if (!card) {
             std::fprintf(stderr, "%s: card-status failed (%u, remote=%u)\n",
                          profile.tool_name, static_cast<unsigned int>(card.error),
@@ -402,12 +446,12 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         }
         const std::uint16_t reader_id =
             snapshot.snapshot.list.readers.value.items[0U].id;
-        transport.value()->close();
-        auto card_transport = host_runtime::connect_control(endpoint, Timeout{5000U});
-        if (!card_transport) {
+        transport->close();
+        owned_transport.reset();
+        if (const auto error = connect_control(); error != Error::OK) {
             std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                         static_cast<unsigned int>(card_transport.error()));
-            return exit_status(card_transport.error(), true);
+                         static_cast<unsigned int>(error));
+            return exit_status(error, true);
         }
         wire::CardClientOptions options{};
         options.reader_id = reader_id;
@@ -416,7 +460,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         options.expected_instance = ByteView{
             reinterpret_cast<const std::uint8_t*>(instance.data()), instance.size()};
         const auto opened = wire::begin_card(
-            *card_transport.value(), options, Timeout{5000U});
+            *transport, options, Timeout{5000U});
         if (!opened) {
             std::fprintf(stderr, "%s: card connect failed (%u, remote=%u)\n",
                          profile.tool_name, static_cast<unsigned int>(opened.error),
@@ -428,7 +472,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         if (session.epoch != snapshot.snapshot.status.context.epoch ||
             session.reader_id != reader_id) {
             const auto released = wire::card_disconnect(
-                *card_transport.value(), session, wire::Disposition::leave,
+                *transport, session, wire::Disposition::leave,
                 Timeout{5000U});
             if (!released)
                 std::fprintf(stderr, "%s: stale card handle release failed (%u)\n",
@@ -443,7 +487,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
                           opened.connection.atr.value.length);
         } else if (arguments.command == Command::card_reset) {
             const auto reset = wire::card_reset(
-                *card_transport.value(), session, Timeout{5000U});
+                *transport, session, Timeout{5000U});
             if (!reset) {
                 operation_error = reset.error;
             } else if (!reset.response.atr.present) {
@@ -454,7 +498,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
             }
         } else {
             const auto transmitted = wire::card_transmit(
-                *card_transport.value(), session, wire::CardProtocol::t1,
+                *transport, session, wire::CardProtocol::t1,
                 ByteView{arguments.apdu.data(), arguments.apdu_length},
                 Timeout{5000U});
             if (!transmitted) {
@@ -469,7 +513,7 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         }
         if (session.card_handle != 0U) {
             const auto disconnected = wire::card_disconnect(
-                *card_transport.value(), session, wire::Disposition::leave,
+                *transport, session, wire::Disposition::leave,
                 Timeout{5000U});
             if (!disconnected && operation_error == Error::OK)
                 operation_error = disconnected.error;

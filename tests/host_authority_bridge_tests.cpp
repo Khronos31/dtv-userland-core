@@ -790,11 +790,10 @@ bool test_response_sent_retains_rejected_hello_disconnect()
     w::Snapshot snapshot;
     const auto reply = bridge.accept(slot.value(), frame(w::kOpcodeHello, 1U,
         {payload.data(), size.value()}), context, snapshot, 0U);
-    const auto client = bridge.client_id(slot.value());
     if (!size || reply.action != w::InboundAction::respond ||
         !reply.close_after_reply ||
         bridge.response_sent(slot.value(), true) != Error::RESOURCE_LIMIT ||
-        !bridge.retained_disconnect_for_test(slot.value(), client) ||
+        !bridge.retained_disconnect_for_test(slot.value(), bridge.client_id(slot.value())) ||
         bridge.session_connected_for_test(slot.value())) {
         std::cerr << "N5 rejected HELLO DISCONNECT value was not retained\n";
         return false;
