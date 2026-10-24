@@ -424,6 +424,8 @@ struct FakeService final {
     bool refuse_lnb_power = false;
     unsigned int replace_serial_at_list = 0U;
     std::string replacement_serial;
+    unsigned int replace_usb_path_at_list = 0U;
+    std::string replacement_usb_path;
     std::mutex stop_mutex;
     std::condition_variable stop_changed;
 
@@ -495,6 +497,12 @@ struct FakeService final {
                 list.enclosure.value.identity.serial.value.length = 0U;
                 set_text(list.enclosure.value.identity.serial.value,
                          replacement_serial.c_str());
+            }
+            if (replace_usb_path_at_list != 0U &&
+                current_list >= replace_usb_path_at_list) {
+                list.functions.items[0U].location.usb_path.present = true;
+                set_text(list.functions.items[0U].location.usb_path.value,
+                         replacement_usb_path.c_str());
             }
             return send_record(peer, request.opcode, request.request_id, list,
                                &wire::encode_list_response);
@@ -851,6 +859,21 @@ dtv::userland::host_ctl::Profile fake_serial_ctl_profile()
     return profile;
 }
 
+void configure_paired_usb(FakeService& service)
+{
+    service.list.topology.expected_function_count.value = 2U;
+    service.list.functions.count = 2U;
+    service.list.functions.items[0U].location.usb_path.present = true;
+    set_text(service.list.functions.items[0U].location.usb_path.value, "1-2.1");
+    service.list.functions.items[1U] = service.list.functions.items[0U];
+    service.list.functions.items[1U].id = 1U;
+    set_text(service.list.functions.items[1U].location.usb_path.value, "1-2.2");
+    service.list.receivers.value.items[0U].capabilities.controls = wire::kControlBitLnb;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.count = 2U;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.items[0U] = 0U;
+    service.list.receivers.value.items[0U].capabilities.lnb.values.items[1U] = 15U;
+}
+
 bool test_host_ctl_device_instance_discovery()
 {
     RuntimeTree empty_root;
@@ -938,6 +961,103 @@ bool test_host_ctl_device_reconnect_identity()
     server.join();
     return status == 3 && server.good.load() && service.status_count.load() == 3U &&
            service.lnb_power_count.load() == 0U;
+}
+
+bool test_host_ctl_single_usb_selector_and_operation_assertion()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("paired-usb")) return false;
+    Listener control;
+    if (!control.bind(root.root, "paired-usb", "control.sock")) return false;
+    FakeService service("paired-usb", "test-product");
+    configure_paired_usb(service);
+    FakeControlServer server(control, service, 3U);
+    server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "usb:1-2.1", "lnb-on"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    server.join();
+    return status == 0 && server.good.load() && service.lnb_power_count.load() == 1U &&
+           service.saw_lnb_on.load();
+}
+
+bool test_host_ctl_single_usb_operation_assertion_rejects_changed_function()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("paired-usb")) return false;
+    Listener control;
+    if (!control.bind(root.root, "paired-usb", "control.sock")) return false;
+    FakeService service("paired-usb", "test-product");
+    configure_paired_usb(service);
+    service.replace_usb_path_at_list = 3U;
+    service.replacement_usb_path = "1-4.1";
+    FakeControlServer server(control, service, 3U);
+    server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "usb:1-2.1", "lnb-on"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    server.join();
+    return status == 3 && server.good.load() && service.lnb_power_count.load() == 0U;
+}
+
+bool test_host_ctl_multi_usb_selector_requires_complete_topology()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("paired-usb")) return false;
+    Listener control;
+    if (!control.bind(root.root, "paired-usb", "control.sock")) return false;
+    FakeService service("paired-usb", "test-product");
+    configure_paired_usb(service);
+    FakeControlServer server(control, service, 2U);
+    server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "usb:1-2.1,1-2.2", "list"};
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    server.join();
+    return status == 0 && server.good.load();
+}
+
+bool test_host_ctl_single_usb_rejects_invalid_topology()
+{
+    for (unsigned int scenario = 0U; scenario < 4U; ++scenario) {
+        RuntimeTree root;
+        if (!root.create() || !root.create_instance("paired-usb")) return false;
+        Listener control;
+        if (!control.bind(root.root, "paired-usb", "control.sock")) return false;
+        FakeService service("paired-usb", "test-product");
+        configure_paired_usb(service);
+        if (scenario == 0U) service.list.topology.state = wire::TopologyState::partial;
+        if (scenario == 1U)
+            service.list.topology.expected_function_count.value = 1U;
+        if (scenario == 2U)
+            service.list.functions.items[1U].location.usb_path.present = false;
+        if (scenario == 3U)
+            set_text(service.list.functions.items[1U].location.usb_path.value, "1-2.1");
+        FakeControlServer server(control, service, 1U);
+        server.start();
+
+        px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+        if (!add_root(root.root, roots)) return false;
+        const auto profile = fake_serial_ctl_profile();
+        const char* arguments[] = {"fake-ctl", "--device", "usb:1-2.1", "list"};
+        const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+            4, arguments, profile, roots);
+        server.join();
+        if (status != 3 || !server.good.load()) return false;
+    }
+    return true;
 }
 
 bool test_host_ctl_device_security_refusal_stops_search()
@@ -1384,6 +1504,11 @@ int main()
     const bool ctl_discovery = test_host_ctl_device_instance_discovery();
     const bool ctl_ambiguous = test_host_ctl_device_instance_ambiguity();
     const bool ctl_reconnect_identity = test_host_ctl_device_reconnect_identity();
+    const bool ctl_single_usb = test_host_ctl_single_usb_selector_and_operation_assertion();
+    const bool ctl_single_usb_reconnect =
+        test_host_ctl_single_usb_operation_assertion_rejects_changed_function();
+    const bool ctl_multi_usb = test_host_ctl_multi_usb_selector_requires_complete_topology();
+    const bool ctl_invalid_usb = test_host_ctl_single_usb_rejects_invalid_topology();
     const bool ctl_security = test_host_ctl_device_security_refusal_stops_search();
     const bool lnb_unsupported = test_host_ctl_lnb_unsupported_by_device();
     const bool lnb_refused = test_host_ctl_lnb_remote_refusal();
@@ -1406,6 +1531,11 @@ int main()
     if (ctl_discovery) std::puts("fake_server_host_ctl_device_instance_discovery=PASS");
     if (ctl_ambiguous) std::puts("fake_server_host_ctl_device_ambiguity=PASS");
     if (ctl_reconnect_identity) std::puts("fake_server_host_ctl_reconnect_identity=PASS");
+    if (ctl_single_usb) std::puts("fake_server_host_ctl_single_usb_selector=PASS");
+    if (ctl_single_usb_reconnect)
+        std::puts("fake_server_host_ctl_single_usb_operation_assertion=PASS");
+    if (ctl_multi_usb) std::puts("fake_server_host_ctl_multi_usb_selector=PASS");
+    if (ctl_invalid_usb) std::puts("fake_server_host_ctl_invalid_usb_topology=PASS");
     if (ctl_security) std::puts("fake_server_host_ctl_security_refusal=PASS");
     if (lnb_unsupported) std::puts("fake_server_host_ctl_lnb_unsupported=PASS");
     if (lnb_refused) std::puts("fake_server_host_ctl_lnb_remote_refusal=PASS");
@@ -1418,7 +1548,8 @@ int main()
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
     return ctl && lnb_ctl && ctl_discovery && ctl_ambiguous &&
-           ctl_reconnect_identity && ctl_security && lnb_unsupported && lnb_refused &&
+           ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
+           ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
            ts && eof && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }
