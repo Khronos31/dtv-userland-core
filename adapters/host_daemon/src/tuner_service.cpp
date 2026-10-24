@@ -991,7 +991,16 @@ Result<TunerStreamCounters> TunerService::authority_stream_stats_v1(
     if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
         return Result<TunerStreamCounters>::failure(Error::INVALID_ARGUMENT);
     const auto counters = engine_.stream_stats_v1(ticket);
-    if (!counters) return Result<TunerStreamCounters>::failure(counters.error());
+    if (!counters) {
+        if (counters.error() != Error::NOT_FOUND)
+            return Result<TunerStreamCounters>::failure(counters.error());
+        const auto attachment = engine_.stream_attachment_v1(ticket);
+        if (!attachment)
+            return Result<TunerStreamCounters>::failure(attachment.error());
+        const auto final = stream_control_.final_snapshot(attachment.value());
+        if (!final) return Result<TunerStreamCounters>::failure(final.error());
+        return Result<TunerStreamCounters>::success(to_legacy(final.value().counters));
+    }
     return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
 }
 

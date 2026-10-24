@@ -232,8 +232,9 @@ public:
     Result<TunerStreamCounters> stats(
         const TunerAttachment& attachment) const noexcept override
     {
-        return same(attachment) ? Result<TunerStreamCounters>::success(counters)
-                                : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+        return attached && same(attachment)
+            ? Result<TunerStreamCounters>::success(counters)
+            : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
     }
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
