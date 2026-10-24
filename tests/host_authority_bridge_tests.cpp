@@ -206,6 +206,7 @@ public:
     }
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         identity = attachment;
         attached = true;
         packets_remaining = 2U;
@@ -218,6 +219,7 @@ public:
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!attached) {
             final.counters = counters;
             final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
@@ -232,6 +234,7 @@ public:
     Result<TunerStreamCounters> stats(
         const TunerAttachment& attachment) const noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         return attached && same(attachment)
             ? Result<TunerStreamCounters>::success(counters)
             : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
@@ -239,6 +242,7 @@ public:
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!attached && missing_final_when_unattached_)
             return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
         return !attached || same(attachment)
@@ -247,6 +251,7 @@ public:
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (attached && !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         final_released = true;
         return Result<void>::success();
@@ -255,6 +260,7 @@ public:
                                         MutableByteView output,
                                         Timeout) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!same(attachment)) return Result<TunerStreamReadResult>::failure(Error::NOT_FOUND);
         if (packets_remaining != 0U && output.data != nullptr && output.size >= 188U) {
             for (std::size_t i = 0U; i < 188U; ++i) output.data[i] = static_cast<std::uint8_t>(i);
@@ -267,6 +273,7 @@ public:
     }
     bool final_released = false;
 private:
+    mutable std::mutex mutex;
     bool same(const TunerAttachment& other) const noexcept
     {
         return identity.owner_client_id == other.owner_client_id &&
