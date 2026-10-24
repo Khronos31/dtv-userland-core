@@ -185,6 +185,9 @@ private:
                              static_cast<unsigned>(error));
                 return false;
             }
+            if (status.readers.present && status.readers.value.count != 0U)
+                status.readers.value.items[0U].card.reason =
+                    static_cast<std::uint8_t>(wire::UnknownReason::not_sampled);
             const auto size = wire::encode_status_frame(request.request_id, status, list_,
                 output);
             if (!size) {
