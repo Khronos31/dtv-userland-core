@@ -380,19 +380,28 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
     if (!connect || !status || !transmit || !disconnect) return false;
     SCARDHANDLE card = 0U;
     DWORD protocol = 0U;
-    if (connect(context, name.c_str(), SCARD_SHARE_SHARED, SCARD_PROTOCOL_T1,
-                &card, &protocol) != SCARD_S_SUCCESS || protocol != SCARD_PROTOCOL_T1)
+    const LONG connect_result = connect(context, name.c_str(), SCARD_SHARE_SHARED,
+        SCARD_PROTOCOL_T1, &card, &protocol);
+    if (connect_result != SCARD_S_SUCCESS || protocol != SCARD_PROTOCOL_T1) {
+        std::fprintf(stderr, "mocked API connect failed: 0x%08lx\\n",
+                     static_cast<unsigned long>(connect_result));
         return false;
+    }
     std::array<wchar_t, 128U> actual_name{};
     DWORD name_length = static_cast<DWORD>(actual_name.size());
     std::array<std::uint8_t, 33U> atr{};
     DWORD atr_length = static_cast<DWORD>(atr.size());
     DWORD state = 0U;
     DWORD active_protocol = 0U;
-    if (status(card, actual_name.data(), &name_length, &state, &active_protocol,
-               atr.data(), &atr_length) != SCARD_S_SUCCESS || atr_length != 2U ||
-        atr[0U] != 0x3bU || atr[1U] != 0x00U || active_protocol != SCARD_PROTOCOL_T1)
+    const LONG status_result = status(card, actual_name.data(), &name_length, &state,
+        &active_protocol, atr.data(), &atr_length);
+    if (status_result != SCARD_S_SUCCESS || atr_length != 2U || atr[0U] != 0x3bU ||
+        atr[1U] != 0x00U || active_protocol != SCARD_PROTOCOL_T1) {
+        std::fprintf(stderr, "mocked API status failed: 0x%08lx atr=%lu\\n",
+                     static_cast<unsigned long>(status_result),
+                     static_cast<unsigned long>(atr_length));
         return false;
+    }
     const std::array<std::uint8_t, 5U> command{0x00U, 0x84U, 0x00U, 0x00U, 0x00U};
     std::array<std::uint8_t, 8U> response{};
     DWORD response_length = static_cast<DWORD>(response.size());
@@ -404,6 +413,10 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
     const bool transmit_ok = transmitted == SCARD_S_SUCCESS && response_length == 2U &&
                              response[0U] == 0x90U && response[1U] == 0x00U;
     const LONG disconnected = disconnect(card, SCARD_LEAVE_CARD);
+    if (!transmit_ok || disconnected != SCARD_S_SUCCESS)
+        std::fprintf(stderr, "mocked API transmit/disconnect: 0x%08lx/0x%08lx\\n",
+            static_cast<unsigned long>(transmitted),
+            static_cast<unsigned long>(disconnected));
     return transmit_ok && disconnected == SCARD_S_SUCCESS;
 }
 
