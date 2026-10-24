@@ -67,8 +67,15 @@ bool help_text_matches_contract(const dtv::userland::host_ctl::Profile& profile)
     }
     std::fclose(output);
     return status == 0 && text.find(
-        "--runtime-dir is required; --instance is required unless --device is supplied") !=
+        "--runtime-dir overrides the standard runtime root; --instance is required unless --device is supplied") !=
         std::string::npos;
+}
+
+bool runtime_dir_is_optional(const dtv::userland::host_ctl::Profile& profile)
+{
+    const char* arguments[] = {
+        "sianoctl", "--instance", "core-default-root-not-running", "status"};
+    return dtv::userland::host_ctl::run_control_cli(4, arguments, profile) != 2;
 }
 
 }  // namespace
@@ -77,7 +84,7 @@ int main()
 {
     const dtv::userland::host_ctl::Profile profile{
         "sianoctl", "siano-userland", "test", dtv::userland::identity::Product::siano};
-    if (!help_text_matches_contract(profile)) return 1;
+    if (!help_text_matches_contract(profile) || !runtime_dir_is_optional(profile)) return 1;
     const char* version[] = {"sianoctl", "--version"};
     if (dtv::userland::host_ctl::run_control_cli(2, version, profile) != 0) return 1;
     const char* unsupported[] = {"sianoctl", "card-status"};

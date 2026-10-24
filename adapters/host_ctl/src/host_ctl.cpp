@@ -1,19 +1,46 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "host_ctl.h"
 
+#include <px4/posix_ipc.h>
 #include <dtv/userland/control_client.h>
 #include <dtv/userland/host_runtime/control_socket.h>
 #include <dtv/userland/json.h>
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cstring>
+#include <memory>
 #include <string>
 #include <string_view>
 #include <vector>
 
 namespace dtv::userland::host_ctl {
 namespace {
+
+class SocketStreamTransport final : public wire::TimedClientTransport {
+public:
+    explicit SocketStreamTransport(px4::userland::ipc::posix::SocketStream& stream) noexcept
+        : stream_(stream) {}
+    Result<void> write_all(ByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.write_all(bytes, timeout);
+    }
+    Result<std::size_t> read_some(MutableByteView bytes, Timeout timeout) noexcept override
+    {
+        return stream_.read_some(bytes, timeout);
+    }
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return static_cast<std::uint64_t>(
+            std::chrono::duration_cast<std::chrono::milliseconds>(
+                std::chrono::steady_clock::now().time_since_epoch()).count());
+    }
+    void close() noexcept override { stream_.close(); }
+
+private:
+    px4::userland::ipc::posix::SocketStream& stream_;
+};
 
 enum class Command : std::uint8_t { none, list, status };
 
@@ -154,9 +181,9 @@ int exit_status(Error error) noexcept
 
 void usage(FILE* output, const Profile& profile) noexcept
 {
-    std::fprintf(output, "usage: %s --runtime-dir PATH [--instance TOKEN] "
+    std::fprintf(output, "usage: %s [--runtime-dir PATH] [--instance TOKEN] "
         "[--device usb:BUS-PORT[,BUS-PORT...]] [--group] list|status\n"
-        "  --runtime-dir is required; --instance is required unless --device is supplied\n"
+        "  --runtime-dir overrides the standard runtime root; --instance is required unless --device is supplied\n"
         "       %s --help | --version\n", profile.tool_name, profile.tool_name);
 }
 
@@ -221,24 +248,47 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         instance.assign(automatic.value().bytes.data(), automatic.value().length);
     }
     identity::InstanceText normalized{};
-    if (instance.empty() || arguments.runtime_directory.empty() ||
-        !normalized_instance(instance, normalized, profile)) {
-        std::fprintf(stderr, "%s: --runtime-dir and --instance are required and must be valid\n",
+    if (instance.empty() || !normalized_instance(instance, normalized, profile)) {
+        std::fprintf(stderr, "%s: --instance is required and must be valid\n",
                      profile.tool_name);
         return 2;
     }
     instance.assign(normalized.bytes.data(), normalized.length);
-    const host_runtime::EndpointConfig endpoint{
-        arguments.runtime_directory, profile.product_slug, instance,
-        arguments.group ? host_runtime::EndpointAccess::shared_group :
-                          host_runtime::EndpointAccess::private_user};
-    auto transport = host_runtime::connect_control(endpoint, Timeout{5000U});
-    if (!transport) {
-        std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                     static_cast<unsigned int>(transport.error()));
-        return exit_status(transport.error());
+    const auto access = arguments.group ?
+        px4::userland::ipc::posix::EndpointAccess::shared_group :
+        px4::userland::ipc::posix::EndpointAccess::private_user;
+    px4::userland::ipc::posix::SocketStream default_stream;
+    SocketStreamTransport default_transport(default_stream);
+    std::unique_ptr<wire::TimedClientTransport> owned_transport;
+    wire::TimedClientTransport* transport = nullptr;
+    if (arguments.runtime_directory.empty()) {
+        const px4::userland::ipc::posix::EndpointConfig endpoint{
+            nullptr, instance.c_str(), "control.sock", access,
+            profile.product_slug};
+        auto connected = px4::userland::ipc::posix::SocketStream::connect(
+            endpoint, Timeout{5000U});
+        if (!connected) {
+            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
+                         static_cast<unsigned int>(connected.error()));
+            return exit_status(connected.error());
+        }
+        default_stream = std::move(connected.value());
+        transport = &default_transport;
+    } else {
+        const host_runtime::EndpointConfig endpoint{
+            arguments.runtime_directory, profile.product_slug, instance,
+            arguments.group ? host_runtime::EndpointAccess::shared_group :
+                              host_runtime::EndpointAccess::private_user};
+        auto connected = host_runtime::connect_control(endpoint, Timeout{5000U});
+        if (!connected) {
+            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
+                         static_cast<unsigned int>(connected.error()));
+            return exit_status(connected.error());
+        }
+        owned_transport = std::move(connected.value());
+        transport = owned_transport.get();
     }
-    const auto snapshot = wire::fetch_status(*transport.value(), Timeout{5000U});
+    const auto snapshot = wire::fetch_status(*transport, Timeout{5000U});
     if (!snapshot) {
         std::fprintf(stderr, "%s: status failed (%u, remote=%u)\n", profile.tool_name,
             static_cast<unsigned int>(snapshot.error),
