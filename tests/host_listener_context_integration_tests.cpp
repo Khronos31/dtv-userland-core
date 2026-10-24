@@ -7,6 +7,9 @@
 
 #if defined(_WIN32)
 #include "windows/windows_security.h"
+#else
+#include "px4/posix_ipc.h"
+#include <unistd.h>
 #endif
 
 #include <array>
@@ -353,7 +356,8 @@ bool write_record(w::TimedClientTransport& transport, std::uint16_t opcode,
 }
 
 bool lifecycle(bool fail_capture_start = false,
-               bool missing_final_when_unattached = false)
+               bool missing_final_when_unattached = false,
+               bool default_runtime_root = false)
 {
 #if defined(_WIN32)
     const char* runtime_parent = std::getenv("LOCALAPPDATA");
@@ -394,11 +398,49 @@ bool lifecycle(bool fail_capture_start = false,
         return false;
     }
 #endif
+#if !defined(_WIN32)
+    class EnvironmentValue final {
+    public:
+        explicit EnvironmentValue(const char* name) : name_(name)
+        {
+            const char* value = std::getenv(name);
+            had_value_ = value != nullptr;
+            if (had_value_) value_ = value;
+        }
+        ~EnvironmentValue()
+        {
+            if (had_value_) (void)::setenv(name_.c_str(), value_.c_str(), 1);
+            else (void)::unsetenv(name_.c_str());
+        }
+        bool set(const char* value) const { return ::setenv(name_.c_str(), value, 1) == 0; }
+    private:
+        std::string name_;
+        std::string value_;
+        bool had_value_ = false;
+    } saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
+    const std::string runtime_path = default_runtime_root
+        ? path + "/dtv-userland-" +
+            std::to_string(static_cast<unsigned long>(::geteuid()))
+        : path;
+    if (default_runtime_root) {
+        const std::string missing_xdg = path + "/missing-xdg";
+        if (!saved_xdg.set(missing_xdg.c_str()) || !saved_tmp.set(path.c_str())) {
+            std::filesystem::remove_all(path, fs_error);
+            return false;
+        }
+    }
+#else
+    if (default_runtime_root) {
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+    const std::string runtime_path = path;
+#endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start,
                                                missing_final_when_unattached));
     ContextConfig config;
-    config.runtime_directory = path;
+    if (!default_runtime_root) config.runtime_directory = runtime_path;
     config.product = "listener-test";
     config.instance = "one";
     config.server.epoch = make_list().epoch;
@@ -447,14 +489,28 @@ bool lifecycle(bool fail_capture_start = false,
         }
     });
     const host_runtime::EndpointConfig control_endpoint{
-        path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
+        runtime_path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
         -1, "control.sock"};
+    bool default_client_ok = true;
+#if !defined(_WIN32)
+    if (default_runtime_root) {
+        const px4::userland::ipc::posix::EndpointConfig default_endpoint{
+            nullptr, "one", "control.sock",
+            px4::userland::ipc::posix::EndpointAccess::private_user,
+            "listener-test"};
+        auto default_stream = px4::userland::ipc::posix::SocketStream::connect(
+            default_endpoint, Timeout{5000U});
+        default_client_ok = static_cast<bool>(default_stream);
+        if (default_stream) default_stream.value().close();
+    }
+#endif
     auto control = host_runtime::connect_control(control_endpoint, Timeout{5000U});
     std::unique_ptr<wire::TimedClientTransport> data_transport;
     bool passed = false;
-    const char* stage = "control connect";
+    const char* stage = default_client_ok ? "control connect" :
+        "default runtime root client connect";
     do {
-        if (!control) break;
+        if (!default_client_ok || !control) break;
         stage = "CARD status/connect/reset/APDU/disconnect";
         auto card_control = host_runtime::connect_control(control_endpoint, Timeout{5000U});
         if (!card_control) break;
@@ -576,7 +632,7 @@ bool lifecycle(bool fail_capture_start = false,
         }
         stage = "data connect";
         const host_runtime::EndpointConfig data_endpoint{
-            path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
+            runtime_path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
             -1, "stream.sock"};
         auto data = host_runtime::connect_endpoint(data_endpoint, Timeout{5000U});
         if (!data) break;
@@ -756,5 +812,10 @@ bool lifecycle(bool fail_capture_start = false,
 
 int main()
 {
+#if defined(_WIN32)
     return lifecycle() && lifecycle(true, false) && lifecycle(true, true) ? 0 : 1;
+#else
+    return lifecycle() && lifecycle(true, false) && lifecycle(true, true) &&
+        lifecycle(false, false, true) ? 0 : 1;
+#endif
 }

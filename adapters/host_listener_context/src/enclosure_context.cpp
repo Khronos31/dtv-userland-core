@@ -4,6 +4,9 @@
 #include "detail/listener_io.h"
 #include "dtv/userland/host_daemon/card_service.h"
 #include "dtv/userland/host_daemon/host_authority_bridge.h"
+#if !defined(_WIN32)
+#include "px4/posix_ipc.h"
+#endif
 
 #include <algorithm>
 #include <array>
@@ -941,8 +944,18 @@ Result<std::unique_ptr<EnclosureContext>> EnclosureContext::assemble(
     std::unique_ptr<host_runtime::TunerNonceSource> nonce_source,
     const ContextConfig& config) noexcept
 {
+    ContextConfig effective_config = config;
+#if !defined(_WIN32)
+    if (effective_config.runtime_directory.empty()) {
+        const auto runtime_root = px4::userland::ipc::posix::select_publish_runtime_root(
+            effective_config.product.c_str(), effective_config.instance.c_str());
+        if (!runtime_root)
+            return Result<std::unique_ptr<EnclosureContext>>::failure(runtime_root.error());
+        effective_config.runtime_directory = runtime_root.value();
+    }
+#endif
     std::unique_ptr<Impl> impl(new (std::nothrow) Impl(
-        std::move(family), std::move(nonce_source), config));
+        std::move(family), std::move(nonce_source), effective_config));
     if (!impl) return Result<std::unique_ptr<EnclosureContext>>::failure(
         Error::RESOURCE_LIMIT);
     const auto initialized = impl->initialize();
