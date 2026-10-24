@@ -405,10 +405,9 @@ bool exercise_reader(HMODULE module, SCARDCONTEXT context, const std::wstring& n
     const std::array<std::uint8_t, 5U> command{0x00U, 0x84U, 0x00U, 0x00U, 0x00U};
     std::array<std::uint8_t, 8U> response{};
     DWORD response_length = static_cast<DWORD>(response.size());
-    SCARD_IO_REQUEST receive_pci{};
     const SCARD_IO_REQUEST send_pci{SCARD_PROTOCOL_T1, sizeof(SCARD_IO_REQUEST)};
     const LONG transmitted = transmit(card, &send_pci,
-        command.data(), static_cast<DWORD>(command.size()), &receive_pci,
+        command.data(), static_cast<DWORD>(command.size()), nullptr,
         response.data(), &response_length);
     const bool transmit_ok = transmitted == SCARD_S_SUCCESS && response_length == 2U &&
                              response[0U] == 0x90U && response[1U] == 0x00U;
