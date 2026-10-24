@@ -380,10 +380,10 @@ bool lifecycle(bool fail_capture_start = false,
         return false;
     }
 #if defined(_WIN32)
-    const std::wstring runtime_path = std::filesystem::path(path).wstring();
+    const std::wstring runtime_path_wide = std::filesystem::path(path).wstring();
     if (!px4::userland::windows_security::set_current_user_owner_and_dacl(
-            runtime_path.c_str()) ||
-        !px4::userland::windows_security::verify_runtime_parent(runtime_path.c_str())) {
+            runtime_path_wide.c_str()) ||
+        !px4::userland::windows_security::verify_runtime_parent(runtime_path_wide.c_str())) {
         std::fprintf(stderr, "runtime directory DACL setup/readback failed\n");
         std::filesystem::remove_all(path, fs_error);
         return false;
