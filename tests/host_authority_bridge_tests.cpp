@@ -206,18 +206,21 @@ public:
     }
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         identity = attachment;
         attached = true;
         packets_remaining = 2U;
         counters = TunerStreamCounters{};
         counters.packets = 2U;
         counters.bytes = 2U * 188U;
+        counters.queue_drops = 3U;
         final = TunerStreamFinalSnapshot{};
         final_released = false;
         return Result<void>::success();
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!attached) {
             final.counters = counters;
             final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
@@ -232,21 +235,23 @@ public:
     Result<TunerStreamCounters> stats(
         const TunerAttachment& attachment) const noexcept override
     {
-        return same(attachment) ? Result<TunerStreamCounters>::success(counters)
-                                : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+        std::lock_guard<std::mutex> lock(mutex);
+        return attached && same(attachment)
+            ? Result<TunerStreamCounters>::success(counters)
+            : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
     }
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
     {
-        if (!attached && missing_final_when_unattached_)
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!same(attachment) || (!attached && missing_final_when_unattached_))
             return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
-        return !attached || same(attachment)
-            ? Result<TunerStreamFinalSnapshot>::success(final)
-            : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        return Result<TunerStreamFinalSnapshot>::success(final);
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
-        if (attached && !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
+        std::lock_guard<std::mutex> lock(mutex);
+        if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         final_released = true;
         return Result<void>::success();
     }
@@ -254,6 +259,7 @@ public:
                                         MutableByteView output,
                                         Timeout) noexcept override
     {
+        std::lock_guard<std::mutex> lock(mutex);
         if (!same(attachment)) return Result<TunerStreamReadResult>::failure(Error::NOT_FOUND);
         if (packets_remaining != 0U && output.data != nullptr && output.size >= 188U) {
             for (std::size_t i = 0U; i < 188U; ++i) output.data[i] = static_cast<std::uint8_t>(i);
@@ -265,12 +271,19 @@ public:
             attached ? TunerStreamTerminal::none : TunerStreamTerminal::stopped});
     }
     bool final_released = false;
+    bool is_attached() const noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        return attached;
+    }
 private:
+    mutable std::mutex mutex;
     bool same(const TunerAttachment& other) const noexcept
     {
         return identity.owner_client_id == other.owner_client_id &&
             identity.lease_id == other.lease_id &&
             identity.attachment_id == other.attachment_id &&
+            identity.receiver == other.receiver && identity.system == other.system &&
             identity.nonce == other.nonce;
     }
     TunerAttachment identity{};
@@ -1256,6 +1269,11 @@ bool test_authority_stream_prepare_commit_stop()
         return false;
     }
     const auto cleanup_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (stream.is_attached() && std::chrono::steady_clock::now() < cleanup_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (stream.is_attached()) return false;
     HostAuthorityStreamEndResult stream_end{};
     bool drained_packet_seen = false;
     while (!stream_end.ready && std::chrono::steady_clock::now() < cleanup_until) {
@@ -1263,7 +1281,8 @@ bool test_authority_stream_prepare_commit_stop()
         const auto draining = bridge.read_data(data.value(),
             {packet.data(), packet.size()}, Timeout{0U});
         if (draining.error == Error::OK && draining.data.packets.size != 0U) {
-            if (draining.data.sequence != 1U) return false;
+            if (draining.data.sequence != 1U ||
+                draining.data.cumulative_queue_dropped_packets != 3U) return false;
             drained_packet_seen = true;
         }
         stream_end = bridge.take_data_stream_end(data.value());

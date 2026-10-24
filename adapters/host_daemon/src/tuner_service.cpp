@@ -980,9 +980,22 @@ Result<TunerStreamReadResult> TunerService::authority_read_stream_v1(
     if (!attachment) return Result<TunerStreamReadResult>::failure(attachment.error());
     const auto result = stream_control_.read(attachment.value(), output, timeout);
     if (!result) return Result<TunerStreamReadResult>::failure(result.error());
+    std::uint64_t queue_drops = 0U;
+    if (result.value().bytes != 0U) {
+        const auto counters = stream_control_.stats(attachment.value());
+        if (counters) {
+            queue_drops = counters.value().queue_drops;
+        } else {
+            if (counters.error() != Error::NOT_FOUND)
+                return Result<TunerStreamReadResult>::failure(counters.error());
+            const auto final = stream_control_.final_snapshot(attachment.value());
+            if (!final) return Result<TunerStreamReadResult>::failure(final.error());
+            queue_drops = final.value().counters.queue_drops;
+        }
+    }
     return Result<TunerStreamReadResult>::success(TunerStreamReadResult{
         result.value().bytes, result.value().eof, result.value().timed_out,
-        static_cast<TunerStreamTerminal>(result.value().terminal)});
+        static_cast<TunerStreamTerminal>(result.value().terminal), queue_drops});
 }
 
 Result<TunerStreamCounters> TunerService::authority_stream_stats_v1(
@@ -990,9 +1003,16 @@ Result<TunerStreamCounters> TunerService::authority_stream_stats_v1(
 {
     if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
         return Result<TunerStreamCounters>::failure(Error::INVALID_ARGUMENT);
-    const auto counters = engine_.stream_stats_v1(ticket);
-    if (!counters) return Result<TunerStreamCounters>::failure(counters.error());
-    return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
+    const auto attachment = engine_.stream_attachment_v1(ticket);
+    if (!attachment) return Result<TunerStreamCounters>::failure(attachment.error());
+    const auto counters = stream_control_.stats(attachment.value());
+    if (counters)
+        return Result<TunerStreamCounters>::success(to_legacy(counters.value()));
+    if (counters.error() != Error::NOT_FOUND)
+        return Result<TunerStreamCounters>::failure(counters.error());
+    const auto final = stream_control_.final_snapshot(attachment.value());
+    if (!final) return Result<TunerStreamCounters>::failure(final.error());
+    return Result<TunerStreamCounters>::success(to_legacy(final.value().counters));
 }
 
 Result<TunerStreamFinalSnapshot> TunerService::authority_final_snapshot_v1(

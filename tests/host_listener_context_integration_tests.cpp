@@ -155,8 +155,9 @@ public:
     Result<TunerStreamCounters> stats(const TunerAttachment& attachment) const noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        return same(attachment) ? Result<TunerStreamCounters>::success(counters_)
-                                : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
+        return attached_ && same(attachment)
+            ? Result<TunerStreamCounters>::success(counters_)
+            : Result<TunerStreamCounters>::failure(Error::NOT_FOUND);
     }
     Result<TunerStreamFinalSnapshot> final_snapshot(
         const TunerAttachment& attachment) const noexcept override
@@ -195,6 +196,7 @@ private:
         return identity_.owner_client_id == other.owner_client_id &&
             identity_.lease_id == other.lease_id &&
             identity_.attachment_id == other.attachment_id &&
+            identity_.receiver == other.receiver && identity_.system == other.system &&
             identity_.nonce == other.nonce;
     }
     mutable std::mutex mutex_;
