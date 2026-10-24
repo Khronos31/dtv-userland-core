@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "host_ctl.h"
 
+#include <px4/posix_ipc.h>
 #include <dtv/userland/control_client.h>
 #include <dtv/userland/host_runtime/control_socket.h>
 #include <dtv/userland/json.h>
@@ -154,9 +155,9 @@ int exit_status(Error error) noexcept
 
 void usage(FILE* output, const Profile& profile) noexcept
 {
-    std::fprintf(output, "usage: %s --runtime-dir PATH [--instance TOKEN] "
+    std::fprintf(output, "usage: %s [--runtime-dir PATH] [--instance TOKEN] "
         "[--device usb:BUS-PORT[,BUS-PORT...]] [--group] list|status\n"
-        "  --runtime-dir is required; --instance is required unless --device is supplied\n"
+        "  --runtime-dir overrides the standard runtime root; --instance is required unless --device is supplied\n"
         "       %s --help | --version\n", profile.tool_name, profile.tool_name);
 }
 
@@ -221,15 +222,20 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         instance.assign(automatic.value().bytes.data(), automatic.value().length);
     }
     identity::InstanceText normalized{};
-    if (instance.empty() || arguments.runtime_directory.empty() ||
-        !normalized_instance(instance, normalized, profile)) {
-        std::fprintf(stderr, "%s: --runtime-dir and --instance are required and must be valid\n",
+    if (instance.empty() || !normalized_instance(instance, normalized, profile)) {
+        std::fprintf(stderr, "%s: --instance is required and must be valid\n",
                      profile.tool_name);
         return 2;
     }
     instance.assign(normalized.bytes.data(), normalized.length);
+    std::string runtime_directory = arguments.runtime_directory;
+    if (runtime_directory.empty()) {
+        const auto roots = px4::userland::ipc::posix::client_runtime_roots();
+        if (!roots) return exit_status(roots.error());
+        runtime_directory.assign(roots.value().paths[0].data());
+    }
     const host_runtime::EndpointConfig endpoint{
-        arguments.runtime_directory, profile.product_slug, instance,
+        runtime_directory, profile.product_slug, instance,
         arguments.group ? host_runtime::EndpointAccess::shared_group :
                           host_runtime::EndpointAccess::private_user};
     auto transport = host_runtime::connect_control(endpoint, Timeout{5000U});
