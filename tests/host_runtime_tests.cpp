@@ -13,8 +13,11 @@
 #include "px4/windows_tuner_nonce.h"
 #include "windows/windows_security.h"
 #else
+#include "px4/posix_ipc.h"
 #include "px4/posix_tuner_nonce.h"
 #include <csignal>
+#include <cstdlib>
+#include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -417,6 +420,200 @@ bool make_directory(const std::string& path)
     return ::mkdir(path.c_str(), 0700) == 0 && ::chmod(path.c_str(), 0700) == 0;
 }
 
+class EnvironmentValue final {
+public:
+    explicit EnvironmentValue(const char* name) : name_(name)
+    {
+        const char* value = std::getenv(name);
+        had_value_ = value != nullptr;
+        if (had_value_) value_ = value;
+    }
+    ~EnvironmentValue()
+    {
+        if (had_value_) (void)::setenv(name_.c_str(), value_.c_str(), 1);
+        else (void)::unsetenv(name_.c_str());
+    }
+    bool set(const char* value) const { return ::setenv(name_.c_str(), value, 1) == 0; }
+private:
+    std::string name_;
+    std::string value_;
+    bool had_value_ = false;
+};
+
+bool default_runtime_roots_test()
+{
+    std::array<char, 64U> temporary{};
+    const char pattern[] = "/tmp/dtv-runtime-roots-XXXXXX";
+    std::memcpy(temporary.data(), pattern, sizeof(pattern));
+    char* base_value = ::mkdtemp(temporary.data());
+    if (base_value == nullptr) return false;
+    const std::string base(base_value);
+    const std::string unsafe_xdg = base + "/unsafe-xdg";
+    const std::string temporary_parent = base + "/tmp";
+    bool ok = make_directory(unsafe_xdg) && make_directory(temporary_parent) &&
+        ::chmod(unsafe_xdg.c_str(), 0777) == 0;
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
+    EnvironmentValue saved_tmp("TMPDIR");
+    ok = ok && saved_xdg.set(unsafe_xdg.c_str()) &&
+        saved_tmp.set(temporary_parent.c_str());
+
+    const auto roots = px4::userland::ipc::posix::client_runtime_roots();
+    const std::string selected_path = temporary_parent + "/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
+    struct stat unsafe_info_before{};
+    const bool unsafe_stat_before = ::lstat(unsafe_xdg.c_str(), &unsafe_info_before) == 0;
+    const auto selected = px4::userland::ipc::posix::select_publish_runtime_root(
+        "siano-userland", "test");
+    struct stat unsafe_info{};
+    struct stat selected_info{};
+    ok = ok && unsafe_stat_before && roots && roots.value().count == 3U &&
+        std::strcmp(roots.value().paths[0].data(), unsafe_xdg.c_str()) == 0 &&
+        std::strcmp(roots.value().paths[1].data(), selected_path.c_str()) == 0 &&
+        selected && selected.value() == selected_path &&
+        ::lstat(unsafe_xdg.c_str(), &unsafe_info) == 0 &&
+        (unsafe_info.st_mode & 0777) == 0777 &&
+        unsafe_info.st_dev == unsafe_info_before.st_dev &&
+        unsafe_info.st_ino == unsafe_info_before.st_ino &&
+        unsafe_info.st_uid == unsafe_info_before.st_uid &&
+        unsafe_info.st_mode == unsafe_info_before.st_mode &&
+        ::lstat(selected_path.c_str(), &selected_info) == 0 &&
+        selected_info.st_uid == ::geteuid() && (selected_info.st_mode & 0077) == 0;
+
+    const bool removed_selected = ::rmdir(selected_path.c_str()) == 0;
+    const bool duplicate_xdg_set = saved_xdg.set(selected_path.c_str());
+    const auto duplicate_roots =
+        px4::userland::ipc::posix::client_runtime_roots();
+    const auto duplicate_selected = duplicate_xdg_set
+        ? px4::userland::ipc::posix::select_publish_runtime_root(
+            "siano-userland", "test")
+        : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    ok = ok && removed_selected && duplicate_xdg_set && duplicate_roots &&
+        duplicate_roots.value().count == 2U &&
+        std::strcmp(duplicate_roots.value().paths[0U].data(), selected_path.c_str()) == 0 &&
+        duplicate_selected &&
+        duplicate_selected.value() == selected_path &&
+        saved_xdg.set(unsafe_xdg.c_str());
+
+    const std::string long_xdg = base + "/" + std::string(90U, 'x');
+    ok = ok && make_directory(long_xdg) && saved_xdg.set(long_xdg.c_str());
+    dtv::userland::host_runtime::EndpointConfig long_endpoint{
+        long_xdg, "siano-userland", "test"};
+    const auto long_endpoint_path =
+        dtv::userland::host_runtime::control_endpoint_path(long_endpoint);
+    const auto long_path_fallback = ok
+        ? px4::userland::ipc::posix::select_publish_runtime_root(
+            "siano-userland", "test")
+        : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    ok = ok && !long_endpoint_path &&
+        long_endpoint_path.error() == px4::userland::Error::INVALID_ARGUMENT &&
+        long_path_fallback && long_path_fallback.value() == selected_path &&
+        saved_xdg.set(unsafe_xdg.c_str());
+
+    const std::string product = selected_path + "/siano-userland";
+    const std::string version = product + "/v1";
+    const std::string instance = version + "/test";
+    ok = ok && make_directory(product) && make_directory(version) &&
+        make_directory(instance);
+    dtv::userland::host_runtime::EndpointConfig server_config{
+        selected_path, "siano-userland", "test"};
+    const auto path = dtv::userland::host_runtime::control_endpoint_path(server_config);
+    int server = -1;
+    if (ok && path && path.value().size() < sizeof(sockaddr_un{}.sun_path)) {
+        server = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, path.value().c_str(), path.value().size() + 1U);
+        ok = server >= 0 &&
+            ::bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
+            ::chmod(path.value().c_str(), 0600) == 0 && ::listen(server, 4) == 0;
+    } else {
+        ok = false;
+    }
+
+    const auto connect_default = []() {
+        return px4::userland::ipc::posix::SocketStream::connect(
+            {nullptr, "test", "control.sock",
+             px4::userland::ipc::posix::EndpointAccess::private_user,
+             "siano-userland"}, px4::userland::Timeout{1000U});
+    };
+    auto refused_unsafe = connect_default();
+    pollfd unsafe_pending{server, POLLIN, 0};
+    ok = ok && !refused_unsafe && refused_unsafe.error() ==
+        px4::userland::Error::UNSUPPORTED && ::poll(&unsafe_pending, 1U, 0) == 0;
+    for (unsigned attempt = 0U; attempt < 2U && ok; ++attempt) {
+        if (attempt == 0U) {
+            ok = saved_xdg.set(long_xdg.c_str());
+        } else {
+            const std::string missing_xdg = base + "/missing-xdg";
+            ok = saved_xdg.set(missing_xdg.c_str());
+        }
+        auto stream = connect_default();
+        const int peer = stream ? ::accept(server, nullptr, nullptr) : -1;
+        ok = ok && stream && stream.value().valid() && peer >= 0;
+        if (peer >= 0) (void)::close(peer);
+        if (stream) stream.value().close();
+    }
+    if (ok) {
+        const std::string missing_xdg = base + "/missing-xdg";
+        px4::userland::ipc::posix::EndpointConfig explicit_endpoint{
+            missing_xdg.c_str(), "test", "control.sock",
+            px4::userland::ipc::posix::EndpointAccess::private_user,
+            "siano-userland"};
+        const auto explicit_stream = px4::userland::ipc::posix::SocketStream::connect(
+            explicit_endpoint, px4::userland::Timeout{1000U});
+        pollfd pending{server, POLLIN, 0};
+        ok = !explicit_stream && explicit_stream.error() ==
+            px4::userland::Error::NOT_READY &&
+            ::poll(&pending, 1U, 0) == 0;
+    }
+    const std::string missing_xdg = base + "/missing-xdg";
+    const std::string temporary_link = base + "/tmp-link";
+    const std::string os_root = "/tmp/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
+    struct stat os_root_before{};
+    const bool os_root_existed = ::lstat(os_root.c_str(), &os_root_before) == 0;
+    const bool os_root_was_safe = os_root_existed &&
+        S_ISDIR(os_root_before.st_mode) && os_root_before.st_uid == ::geteuid() &&
+        (os_root_before.st_mode & 0077) == 0;
+    const bool symlink_created = ::symlink(temporary_parent.c_str(),
+                                            temporary_link.c_str()) == 0;
+    ok = ok && symlink_created && saved_xdg.set(missing_xdg.c_str()) &&
+        saved_tmp.set(temporary_link.c_str());
+    const auto os_fallback = ok
+        ? px4::userland::ipc::posix::select_publish_runtime_root(
+            "siano-userland", "test")
+        : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    struct stat os_root_after{};
+    if (os_root_existed && !os_root_was_safe) {
+        ok = ok && !os_fallback && os_fallback.error() ==
+            px4::userland::Error::UNSUPPORTED &&
+            ::lstat(os_root.c_str(), &os_root_after) == 0;
+    } else {
+        ok = ok && os_fallback && os_fallback.value() == os_root &&
+            ::lstat(os_root.c_str(), &os_root_after) == 0 &&
+            os_root_after.st_uid == ::geteuid() && (os_root_after.st_mode & 0077) == 0;
+    }
+    if (os_root_existed && os_root_after.st_ino != 0)
+        ok = ok && os_root_before.st_dev == os_root_after.st_dev &&
+            os_root_before.st_ino == os_root_after.st_ino &&
+            os_root_before.st_mode == os_root_after.st_mode &&
+            os_root_before.st_uid == os_root_after.st_uid;
+    if (server >= 0) (void)::close(server);
+    if (path) (void)::unlink(path.value().c_str());
+    (void)::rmdir(instance.c_str());
+    (void)::rmdir(version.c_str());
+    (void)::rmdir(product.c_str());
+    (void)::rmdir(selected_path.c_str());
+    (void)::rmdir(temporary_parent.c_str());
+    (void)::rmdir(long_xdg.c_str());
+    (void)::rmdir(unsafe_xdg.c_str());
+    (void)::unlink(temporary_link.c_str());
+    (void)::rmdir(base.c_str());
+    if (!os_root_existed) (void)::rmdir(os_root.c_str());
+    if (ok) std::puts("posix_default_runtime_root_order_security_and_client_match=PASS");
+    return ok;
+}
+
 bool socket_transport_test()
 {
     std::array<char, 64U> temporary{};
@@ -524,6 +721,12 @@ int main()
         std::fputs("control socket security/transport fixture failed\n", stderr);
         return 1;
     }
+#if !defined(_WIN32)
+    if (!default_runtime_roots_test()) {
+        std::fputs("POSIX default runtime-root fixture failed\n", stderr);
+        return 1;
+    }
+#endif
     px4::userland::px4d::notify_cleanup_complete();
 #if defined(_WIN32)
     if (!px4::userland::px4d::cleanup_complete()) return 1;

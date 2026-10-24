@@ -798,7 +798,8 @@ bool test_host_ctl_real_server()
     return list_status == 0 && status_status == 0 && server.good.load();
 }
 
-bool run_ts_lifecycle(bool close_before_stream_end)
+bool run_ts_lifecycle(bool close_before_stream_end,
+                      bool overlong_first_candidate = false)
 {
     RuntimeTree missing_root;
     RuntimeTree stale_root;
@@ -806,6 +807,17 @@ bool run_ts_lifecycle(bool close_before_stream_end)
     if (!missing_root.create() || !stale_root.create() ||
         !stale_root.create_instance("stale") || !live_root.create() ||
         !live_root.create_instance("live-01")) return false;
+#if !defined(_WIN32)
+    if (overlong_first_candidate) {
+        const std::string original_root = missing_root.root;
+        missing_root.root = original_root + "/" + std::string(80U, 'x');
+        if (!make_directory(missing_root.root)) return false;
+        missing_root.directories.push_back(missing_root.root);
+        if (!missing_root.create_instance("path-too-long")) return false;
+    }
+#else
+    if (overlong_first_candidate) return false;
+#endif
     Listener control;
     Listener data;
     if (!control.bind(live_root.root, "live-01", "control.sock") ||
@@ -1018,6 +1030,11 @@ int main()
     const bool ctl = test_host_ctl_real_server();
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
+#if !defined(_WIN32)
+    const bool overlong = run_ts_lifecycle(false, true);
+#else
+    const bool overlong = true;
+#endif
     const bool oom = test_host_ts_frame_allocation_failure_releases_lease();
     const bool unsupported = test_unsupported_candidate_then_live_instance();
     const bool not_ready = test_not_ready_candidate_then_live_instance();
@@ -1028,10 +1045,11 @@ int main()
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
+    if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
     if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
     if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && ts && eof && oom && unsupported && not_ready && security ? 0 : 1;
+    return ctl && ts && eof && overlong && oom && unsupported && not_ready && security ? 0 : 1;
 }
