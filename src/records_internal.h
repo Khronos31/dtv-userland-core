@@ -8,6 +8,7 @@ namespace dtv::userland::wire {
 
 Error decode_status_response_into(ByteView input, StatusResponse& value) noexcept;
 Error decode_list_response_into(ByteView input, ListResponse& value) noexcept;
+Error decode_tune_request_into(ByteView input, TuneRequest& value) noexcept;
 
 }  // namespace dtv::userland::wire
 

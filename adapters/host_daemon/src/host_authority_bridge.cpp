@@ -651,8 +651,31 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
     return true;
 }
 
+bool HostAuthorityBridge::queue_job(const dtv::userland::detail::AuthorityCleanup& job,
+                                    std::size_t index) noexcept
+{
+    AuthorityJob value{};
+    job.copy_to(value);
+    return queue_job(value, index);
+}
+
 void HostAuthorityBridge::retain_cleanup(const AuthorityJob& job,
                                          std::size_t index) noexcept
+{
+    Slot& slot = slots_[index];
+    slot.cleanup = job;
+    slot.cleanup_pending = true;
+    slot.cleanup_accepted = false;
+    slot.cleanup_inflight = false;
+    slot.card_cleanup_done = false;
+    slot.card_cleanup_inflight = false;
+    if (slot.session && slot.session->client_id() != 0U)
+        (void)authority_owner_.authority().cleanup_submitted(job, false);
+}
+
+void HostAuthorityBridge::retain_cleanup(
+    const dtv::userland::detail::AuthorityCleanup& job,
+    std::size_t index) noexcept
 {
     Slot& slot = slots_[index];
     slot.cleanup = job;
@@ -704,7 +727,7 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
             return;
         }
         slot.card_cleanup_done = true;
-        const AuthorityJob cleanup = slot.cleanup;
+        const dtv::userland::detail::AuthorityCleanup cleanup = slot.cleanup;
         if (!queue_job(cleanup, index)) {
             slot.cleanup = cleanup;
             slot.cleanup_pending = true;

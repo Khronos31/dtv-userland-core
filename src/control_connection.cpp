@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <dtv/userland/control_connection.h>
 
+#include "records_internal.h"
+
 namespace dtv::userland::wire {
 namespace {
 
@@ -265,11 +267,9 @@ Inbound ControlConnection::accept(const Frame& frame, ControlRequest& request,
         break;
     }
     case kOpcodeTune: {
-        const auto value = decode_tune_request(frame.payload);
-        decoded = value.error();
-        if (value) {
+        decoded = decode_tune_request_into(frame.payload, request.tune);
+        if (decoded == Error::OK) {
             request.kind = ControlRequestKind::tune;
-            request.tune = value.value();
             epoch = &request.tune.epoch;
         }
         break;
