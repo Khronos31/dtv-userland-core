@@ -413,6 +413,15 @@ HostAuthorityDataReadResult HostAuthorityBridge::read_data(
                                                                timeout);
     if (!read) {
         result.error = read.error();
+        if (!first_read_error_valid_) {
+            first_read_error_ = result;
+            first_read_client_id_ = data.ticket.client_id;
+            first_read_lease_id_ = data.lease_id;
+            first_read_stream_id_ = data.ticket.stream_id;
+            first_read_data_slot_ = connection.slot;
+            first_read_data_state_ = static_cast<std::uint8_t>(data.state);
+            first_read_error_valid_ = true;
+        }
         return result;
     }
     result.eof = read.value().eof;
@@ -424,6 +433,15 @@ HostAuthorityDataReadResult HostAuthorityBridge::read_data(
         read.value().bytes > output.size ||
         (read.value().bytes % dtv::userland::wire::kTsPacketSize) != 0U) {
         result.error = Error::PROTOCOL_ERROR;
+        if (!first_read_error_valid_) {
+            first_read_error_ = result;
+            first_read_client_id_ = data.ticket.client_id;
+            first_read_lease_id_ = data.lease_id;
+            first_read_stream_id_ = data.ticket.stream_id;
+            first_read_data_slot_ = connection.slot;
+            first_read_data_state_ = static_cast<std::uint8_t>(data.state);
+            first_read_error_valid_ = true;
+        }
         return result;
     }
     result.data.stream_id = data.ticket.stream_id;
@@ -1267,6 +1285,15 @@ void HostAuthorityBridge::enter_fatal(std::uint32_t source_line) noexcept
         fatal_diagnostic_.source_line = source_line;
         fatal_diagnostic_.worker_error = workers_.error();
         fatal_diagnostic_.completion_valid = last_completion_valid_;
+        fatal_diagnostic_.first_read_error_valid = first_read_error_valid_;
+        if (first_read_error_valid_) {
+            fatal_diagnostic_.first_read_error = first_read_error_.error;
+            fatal_diagnostic_.read_client_id = first_read_client_id_;
+            fatal_diagnostic_.read_lease_id = first_read_lease_id_;
+            fatal_diagnostic_.read_stream_id = first_read_stream_id_;
+            fatal_diagnostic_.read_data_slot = first_read_data_slot_;
+            fatal_diagnostic_.read_data_state = first_read_data_state_;
+        }
         if (last_completion_valid_) {
             fatal_diagnostic_.completion_operation = last_completion_.operation;
             fatal_diagnostic_.completion_error = last_completion_.error;
@@ -1289,9 +1316,16 @@ void HostAuthorityBridge::enter_fatal(std::uint32_t source_line) noexcept
         }
         fatal_diagnostic_.valid = true;
         std::fprintf(stderr,
-            "CORE_HOST_FATAL site=host_authority_bridge.cpp:%u worker_error=%u completion_valid=%u completion_lane=%u completion_operation=%u completion_error=%u client=%llu lease=%llu stream=%llu owner_slot=%u owner_state=%u data_slot=%u data_state=%u\n",
+            "CORE_HOST_FATAL site=host_authority_bridge.cpp:%u worker_error=%u first_read_error_valid=%u first_read_error=%u read_client=%llu read_lease=%llu read_stream=%llu read_data_slot=%u read_data_state=%u completion_valid=%u completion_lane=%u completion_operation=%u completion_error=%u client=%llu lease=%llu stream=%llu owner_slot=%u owner_state=%u data_slot=%u data_state=%u\n",
             static_cast<unsigned>(fatal_diagnostic_.source_line),
             static_cast<unsigned>(fatal_diagnostic_.worker_error),
+            fatal_diagnostic_.first_read_error_valid ? 1U : 0U,
+            static_cast<unsigned>(fatal_diagnostic_.first_read_error),
+            static_cast<unsigned long long>(fatal_diagnostic_.read_client_id),
+            static_cast<unsigned long long>(fatal_diagnostic_.read_lease_id),
+            static_cast<unsigned long long>(fatal_diagnostic_.read_stream_id),
+            static_cast<unsigned>(fatal_diagnostic_.read_data_slot),
+            static_cast<unsigned>(fatal_diagnostic_.read_data_state),
             fatal_diagnostic_.completion_valid ? 1U : 0U,
             static_cast<unsigned>(fatal_diagnostic_.completion_lane),
             static_cast<unsigned>(fatal_diagnostic_.completion_operation),

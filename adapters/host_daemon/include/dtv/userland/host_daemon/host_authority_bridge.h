@@ -61,15 +61,22 @@ struct HostAuthorityFatalDiagnostic final {
     Error worker_error = Error::OK;
     ControlWorkerOperation completion_operation = ControlWorkerOperation::tuner_acquire;
     Error completion_error = Error::OK;
+    Error first_read_error = Error::OK;
     std::uint64_t client_id = 0U;
     std::uint64_t lease_id = 0U;
     std::uint64_t stream_id = 0U;
+    std::uint64_t read_client_id = 0U;
+    std::uint64_t read_lease_id = 0U;
+    std::uint64_t read_stream_id = 0U;
     std::uint8_t data_slot = 0xffU;
     std::uint8_t data_state = 0U;
     std::uint8_t owner_slot = 0xffU;
     std::uint8_t owner_state = 0U;
     std::uint8_t completion_lane = 0xffU;
+    std::uint8_t read_data_slot = 0xffU;
+    std::uint8_t read_data_state = 0U;
     bool completion_valid = false;
+    bool first_read_error_valid = false;
     bool valid = false;
 };
 
@@ -312,6 +319,13 @@ private:
     ControlWorkerCompletion last_completion_{};
     bool last_completion_valid_ = false;
     std::uint8_t last_completion_lane_ = 0xffU;
+    HostAuthorityDataReadResult first_read_error_{};
+    std::uint64_t first_read_client_id_ = 0U;
+    std::uint64_t first_read_lease_id_ = 0U;
+    std::uint64_t first_read_stream_id_ = 0U;
+    std::uint8_t first_read_data_slot_ = 0xffU;
+    std::uint8_t first_read_data_state_ = 0U;
+    bool first_read_error_valid_ = false;
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
     bool force_next_terminal_unquiesced_ = false;
     bool force_terminal_unquiesced_ = false;
