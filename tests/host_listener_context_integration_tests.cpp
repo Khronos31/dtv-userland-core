@@ -7,6 +7,9 @@
 
 #if defined(_WIN32)
 #include "windows/windows_security.h"
+#else
+#include "px4/posix_ipc.h"
+#include <unistd.h>
 #endif
 
 #include <array>
@@ -211,21 +214,37 @@ class CardBackend final : public CardServiceBackend {
 public:
     Result<void> set_power(bool) noexcept override { return Result<void>::success(); }
     Result<void> initialize_uart() noexcept override { return Result<void>::success(); }
-    Result<bool> detect_card() noexcept override { return Result<bool>::success(false); }
+    Result<bool> detect_card() noexcept override { return Result<bool>::success(true); }
 };
 
 class CardSession final : public CardProtocolSession {
 public:
-    Result<void> initialize() noexcept override { return Result<void>::success(); }
-    Result<std::size_t> transmit(ByteView, MutableByteView) noexcept override
+    Result<void> initialize() noexcept override
     {
-        return Result<std::size_t>::success(0U);
+        initialized_ = true;
+        atr_.bytes[0U] = 0x3bU;
+        atr_.bytes[1U] = 0x00U;
+        atr_.length = 2U;
+        return Result<void>::success();
     }
-    bool initialized() const noexcept override { return false; }
+    Result<std::size_t> transmit(ByteView, MutableByteView response) noexcept override
+    {
+        if (response.data == nullptr || response.size < 2U)
+            return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
+        response.data[0U] = 0x90U;
+        response.data[1U] = 0x00U;
+        return Result<std::size_t>::success(2U);
+    }
+    bool initialized() const noexcept override { return initialized_; }
     const CardAtrBytes& atr() const noexcept override { return atr_; }
-    void invalidate() noexcept override {}
+    void invalidate() noexcept override
+    {
+        initialized_ = false;
+        atr_ = CardAtrBytes{};
+    }
 private:
     CardAtrBytes atr_{};
+    bool initialized_ = false;
 };
 
 class Family final : public host_runtime::EnclosureFamily {
@@ -294,6 +313,8 @@ w::ListResponse make_list()
     other_receiver.binding.value.function_id = 1U;
     other_receiver.binding.value.local_id = 1U;
     list.readers.present = true;
+    list.readers.value.count = 1U;
+    list.readers.value.items[0U].id = 0U;
     return list;
 }
 
@@ -321,8 +342,22 @@ bool read_frame(w::TimedClientTransport& transport, w::Frame& frame) noexcept
     return true;
 }
 
+template <typename Request>
+bool write_record(w::TimedClientTransport& transport, std::uint16_t opcode,
+                  std::uint32_t request_id, const Request& request,
+                  Result<std::size_t> (*encode)(const Request&, MutableByteView) noexcept)
+{
+    std::array<std::uint8_t, w::kHeaderSize + w::kMaxControlPayload> bytes{};
+    const auto size = w::encode_record_frame(w::Kind::request, opcode, request_id,
+                                             request, encode,
+                                             {bytes.data(), bytes.size()});
+    if (!size) return false;
+    return transport.write_all({bytes.data(), size.value()}, Timeout{5000U}).has_value();
+}
+
 bool lifecycle(bool fail_capture_start = false,
-               bool missing_final_when_unattached = false)
+               bool missing_final_when_unattached = false,
+               bool default_runtime_root = false)
 {
 #if defined(_WIN32)
     const char* runtime_parent = std::getenv("LOCALAPPDATA");
@@ -363,15 +398,54 @@ bool lifecycle(bool fail_capture_start = false,
         return false;
     }
 #endif
+#if !defined(_WIN32)
+    class EnvironmentValue final {
+    public:
+        explicit EnvironmentValue(const char* name) : name_(name)
+        {
+            const char* value = std::getenv(name);
+            had_value_ = value != nullptr;
+            if (had_value_) value_ = value;
+        }
+        ~EnvironmentValue()
+        {
+            if (had_value_) (void)::setenv(name_.c_str(), value_.c_str(), 1);
+            else (void)::unsetenv(name_.c_str());
+        }
+        bool set(const char* value) const { return ::setenv(name_.c_str(), value, 1) == 0; }
+    private:
+        std::string name_;
+        std::string value_;
+        bool had_value_ = false;
+    } saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
+    const std::string runtime_path = default_runtime_root
+        ? path + "/dtv-userland-" +
+            std::to_string(static_cast<unsigned long>(::geteuid()))
+        : path;
+    if (default_runtime_root) {
+        const std::string missing_xdg = path + "/missing-xdg";
+        if (!saved_xdg.set(missing_xdg.c_str()) || !saved_tmp.set(path.c_str())) {
+            std::filesystem::remove_all(path, fs_error);
+            return false;
+        }
+    }
+#else
+    if (default_runtime_root) {
+        std::filesystem::remove_all(path, fs_error);
+        return false;
+    }
+    const std::string runtime_path = path;
+#endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start,
                                                missing_final_when_unattached));
     ContextConfig config;
-    config.runtime_directory = path;
+    if (!default_runtime_root) config.runtime_directory = runtime_path;
     config.product = "listener-test";
     config.instance = "one";
     config.server.epoch = make_list().epoch;
     config.server.producer = make_list().producer;
+    config.server.features = w::kFeatureCardService;
     config.canonical_list = make_list();
     config.context.epoch = config.server.epoch;
     config.stream_engine_epoch = 0x5349414e4fULL;
@@ -415,14 +489,134 @@ bool lifecycle(bool fail_capture_start = false,
         }
     });
     const host_runtime::EndpointConfig control_endpoint{
-        path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
+        runtime_path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
         -1, "control.sock"};
+    bool default_client_ok = true;
+#if !defined(_WIN32)
+    if (default_runtime_root) {
+        const px4::userland::ipc::posix::EndpointConfig default_endpoint{
+            nullptr, "one", "control.sock",
+            px4::userland::ipc::posix::EndpointAccess::private_user,
+            "listener-test"};
+        auto default_stream = px4::userland::ipc::posix::SocketStream::connect(
+            default_endpoint, Timeout{5000U});
+        default_client_ok = static_cast<bool>(default_stream);
+        if (default_stream) default_stream.value().close();
+    }
+#endif
     auto control = host_runtime::connect_control(control_endpoint, Timeout{5000U});
     std::unique_ptr<wire::TimedClientTransport> data_transport;
     bool passed = false;
-    const char* stage = "control connect";
+    const char* stage = default_client_ok ? "control connect" :
+        "default runtime root client connect";
     do {
-        if (!control) break;
+        if (!default_client_ok || !control) break;
+        stage = "CARD status/connect/reset/APDU/disconnect";
+        auto card_control = host_runtime::connect_control(control_endpoint, Timeout{5000U});
+        if (!card_control) break;
+        w::CardClientOptions card_options;
+        card_options.reader_id = 0U;
+        const auto card = w::begin_card(*card_control.value(), card_options,
+                                        Timeout{5000U});
+        if (!card) {
+            std::fprintf(stderr, "card connect error=%u remote=%u\n",
+                static_cast<unsigned>(card.error), card.remote_error_code);
+            break;
+        }
+        auto card_session = card.session;
+        stage = "CARD HANDLE_STATUS";
+        w::CardHandleStatusRequest handle_status{};
+        handle_status.key.epoch = card_session.epoch;
+        handle_status.key.reader_id = card_session.reader_id;
+        handle_status.key.bound_generation = card_session.bound_generation;
+        handle_status.key.card_handle = card_session.card_handle;
+        w::Frame card_frame;
+        if (!write_record(*card_control.value(), w::kOpcodeCardHandleStatus, 6U,
+                          handle_status, &w::encode_card_handle_status_request) ||
+            !read_frame(*card_control.value(), card_frame) ||
+            card_frame.header.opcode != w::kOpcodeCardHandleStatus ||
+            !w::decode_card_session_result(card_frame.payload)) break;
+        w::BeginTransactionRequest begin_transaction{};
+        stage = "CARD BEGIN_TRANSACTION";
+        begin_transaction.key = handle_status.key;
+        if (!write_record(*card_control.value(), w::kOpcodeBeginTransaction, 7U,
+                          begin_transaction, &w::encode_begin_transaction_request) ||
+            !read_frame(*card_control.value(), card_frame) ||
+            card_frame.header.opcode != w::kOpcodeBeginTransaction ||
+            !w::decode_begin_transaction_response(card_frame.payload)) break;
+        w::EndTransactionRequest end_transaction{};
+        stage = "CARD END_TRANSACTION";
+        end_transaction.key = handle_status.key;
+        if (!write_record(*card_control.value(), w::kOpcodeEndTransaction, 8U,
+                          end_transaction, &w::encode_end_transaction_request) ||
+            !read_frame(*card_control.value(), card_frame) ||
+            card_frame.header.opcode != w::kOpcodeEndTransaction ||
+            card_frame.payload.size != 0U) break;
+        w::CardReconnectRequest reconnect{};
+        stage = "CARD RECONNECT";
+        reconnect.key = handle_status.key;
+        reconnect.preferred_protocols = 1U;
+        if (!write_record(*card_control.value(), w::kOpcodeCardReconnect, 9U,
+                          reconnect, &w::encode_card_reconnect_request) ||
+            !read_frame(*card_control.value(), card_frame) ||
+            card_frame.header.opcode != w::kOpcodeCardReconnect ||
+            !w::decode_card_session_result(card_frame.payload)) break;
+        card_session.next_request_id = 10U;
+        stage = "CARD RESET";
+        const auto card_reset = w::card_reset(*card_control.value(), card_session,
+                                               Timeout{5000U});
+        if (!card_reset) {
+            std::fprintf(stderr, "card reset error=%u remote=%u\n",
+                static_cast<unsigned>(card_reset.error), card_reset.remote_error_code);
+            break;
+        }
+        const std::array<std::uint8_t, 4U> apdu{{0x00U, 0x84U, 0x00U, 0x00U}};
+        const auto card_response = w::card_transmit(*card_control.value(), card_session,
+            w::CardProtocol::t1, ByteView{apdu.data(), apdu.size()}, Timeout{5000U});
+        if (!card_response || card_response.response.response.length != 2U ||
+            card_response.response.response.bytes[0U] != 0x90U ||
+            card_response.response.response.bytes[1U] != 0x00U) {
+            std::fprintf(stderr, "card APDU error=%u remote=%u\n",
+                static_cast<unsigned>(card_response.error), card_response.remote_error_code);
+            break;
+        }
+        const auto card_disconnect = w::card_disconnect(*card_control.value(), card_session,
+            w::Disposition::leave, Timeout{5000U});
+        if (!card_disconnect || !card_disconnect.response.consumed ||
+            !card_disconnect.response.quiesced) {
+            std::fprintf(stderr, "card disconnect error=%u remote=%u\n",
+                static_cast<unsigned>(card_disconnect.error), card_disconnect.remote_error_code);
+            break;
+        }
+        card_options.share = w::Share::exclusive;
+        auto abandoned_control = host_runtime::connect_control(
+            control_endpoint, Timeout{5000U});
+        if (!abandoned_control) break;
+        const auto abandoned_card = w::begin_card(*abandoned_control.value(), card_options,
+                                                   Timeout{5000U});
+        if (!abandoned_card) break;
+        abandoned_control.value()->close();
+        bool recovered = false;
+        for (unsigned attempt = 0U; attempt < 100U && !recovered; ++attempt) {
+            auto recovery_control = host_runtime::connect_control(
+                control_endpoint, Timeout{5000U});
+            if (!recovery_control) break;
+            const auto recovery_card = w::begin_card(*recovery_control.value(), card_options,
+                                                      Timeout{5000U});
+            if (recovery_card) {
+                auto recovery_session = recovery_card.session;
+                const auto released = w::card_disconnect(*recovery_control.value(),
+                    recovery_session, w::Disposition::leave, Timeout{5000U});
+                recovered = released && released.response.consumed &&
+                            released.response.quiesced;
+                break;
+            }
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        }
+        if (!recovered) {
+            std::fprintf(stderr, "card owner was not released after control disconnect\n");
+            break;
+        }
         stage = "HELLO/LIST/STATUS/ACQUIRE/TUNE/START";
         w::RecordingOptions options;
         options.receiver_id = 2U;
@@ -438,7 +632,7 @@ bool lifecycle(bool fail_capture_start = false,
         }
         stage = "data connect";
         const host_runtime::EndpointConfig data_endpoint{
-            path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
+            runtime_path, "listener-test", "one", host_runtime::EndpointAccess::private_user,
             -1, "stream.sock"};
         auto data = host_runtime::connect_endpoint(data_endpoint, Timeout{5000U});
         if (!data) break;
@@ -618,5 +812,10 @@ bool lifecycle(bool fail_capture_start = false,
 
 int main()
 {
+#if defined(_WIN32)
     return lifecycle() && lifecycle(true, false) && lifecycle(true, true) ? 0 : 1;
+#else
+    return lifecycle() && lifecycle(true, false) && lifecycle(true, true) &&
+        lifecycle(false, false, true) ? 0 : 1;
+#endif
 }

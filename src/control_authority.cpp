@@ -16,6 +16,47 @@ bool receiver_exists(const wire::ListResponse& list, std::uint64_t id) noexcept
     return false;
 }
 
+bool reader_exists(const wire::ListResponse& list, std::uint16_t id) noexcept
+{
+    return list.readers.present && list.readers.value.count == 1U &&
+           list.readers.value.items[0U].id == id;
+}
+
+std::uint16_t card_reader_id(const wire::ControlRequest& request) noexcept
+{
+    switch (request.kind) {
+    case wire::ControlRequestKind::card_status: return request.card_status.key.reader_id;
+    case wire::ControlRequestKind::card_connect: return request.card_connect.key.reader_id;
+    case wire::ControlRequestKind::card_reconnect: return request.card_reconnect.key.reader_id;
+    case wire::ControlRequestKind::card_disconnect: return request.card_disconnect.key.reader_id;
+    case wire::ControlRequestKind::card_reset: return request.card_reset.key.reader_id;
+    case wire::ControlRequestKind::card_transmit: return request.card_transmit.key.reader_id;
+    case wire::ControlRequestKind::begin_transaction:
+        return request.begin_transaction.key.reader_id;
+    case wire::ControlRequestKind::end_transaction:
+        return request.end_transaction.key.reader_id;
+    case wire::ControlRequestKind::card_handle_status:
+        return request.card_handle_status.key.reader_id;
+    default: return UINT16_MAX;
+    }
+}
+
+const char* card_operation_name(wire::ControlRequestKind kind) noexcept
+{
+    switch (kind) {
+    case wire::ControlRequestKind::card_status: return "card_status";
+    case wire::ControlRequestKind::card_connect: return "card_connect";
+    case wire::ControlRequestKind::card_reconnect: return "card_reconnect";
+    case wire::ControlRequestKind::card_disconnect: return "card_disconnect";
+    case wire::ControlRequestKind::card_reset: return "card_reset";
+    case wire::ControlRequestKind::card_transmit: return "card_transmit";
+    case wire::ControlRequestKind::begin_transaction: return "begin_transaction";
+    case wire::ControlRequestKind::end_transaction: return "end_transaction";
+    case wire::ControlRequestKind::card_handle_status: return "card_handle_status";
+    default: return "card";
+    }
+}
+
 bool same_producer(const wire::Producer& left, const wire::Producer& right) noexcept
 {
     std::array<std::uint8_t, 128> left_bytes{};
@@ -355,6 +396,46 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         queued.queued = true;
         return queued;
     }
+    case wire::ControlRequestKind::card_status:
+    case wire::ControlRequestKind::card_connect:
+    case wire::ControlRequestKind::card_reconnect:
+    case wire::ControlRequestKind::card_disconnect:
+    case wire::ControlRequestKind::card_reset:
+    case wire::ControlRequestKind::card_transmit:
+    case wire::ControlRequestKind::begin_transaction:
+    case wire::ControlRequestKind::end_transaction:
+    case wire::ControlRequestKind::card_handle_status: {
+        if ((session.connection_.features() & wire::kFeatureCardService) == 0U)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::UNSUPPORTED, card_operation_name(request.kind));
+        if (!reader_exists(canonical_, card_reader_id(request)))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::UNSUPPORTED, card_operation_name(request.kind));
+        if (session.pending_)
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::BUSY, card_operation_name(request.kind));
+        AuthorityJob job;
+        job.kind = AuthorityJobKind::card;
+        job.key = SessionKey{session.client_id_, request.request_id};
+        job.client_id = session.client_id_;
+        job.card_kind = request.kind;
+        job.card_request = request;
+        if (!executor.submit(job))
+            return error_reply(session, request.opcode, request.request_id,
+                               Error::RESOURCE_LIMIT, card_operation_name(request.kind));
+        session.pending_ = true;
+        session.pending_request_id_ = request.request_id;
+        session.pending_kind_ = AuthorityJobKind::card;
+        session.pending_card_kind_ = request.kind;
+        session.pending_card_opcode_ = request.opcode;
+        AuthorityReply queued;
+        queued.action = wire::InboundAction::dispatch;
+        queued.queued = true;
+        return queued;
+    }
+    case wire::ControlRequestKind::lnb_power:
+        return error_reply(session, request.opcode, request.request_id,
+                           Error::UNSUPPORTED, "lnb_power");
     case wire::ControlRequestKind::start_stream: {
         if (session.pending_)
             return error_reply(session, request.opcode, request.request_id,
@@ -660,6 +741,69 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
         return {};
     }
     session->pending_ = false;
+    if (completion.kind == AuthorityJobKind::card) {
+        const wire::ControlRequestKind kind = session->pending_card_kind_;
+        if (completion.card_kind != kind)
+            return error_reply(*session, session->pending_card_opcode_,
+                               static_cast<std::uint32_t>(key.request_id),
+                               Error::INTERNAL, "card");
+        if (kind != wire::ControlRequestKind::card_disconnect && result != Error::OK)
+            return error_reply(*session, session->pending_card_opcode_,
+                               static_cast<std::uint32_t>(key.request_id), result,
+                               card_operation_name(kind));
+        const MutableByteView output{session->response_.data(), session->response_.size()};
+        Result<std::size_t> size = Result<std::size_t>::failure(Error::INTERNAL);
+        switch (kind) {
+        case wire::ControlRequestKind::card_status:
+            size = wire::encode_record_frame(wire::Kind::response,
+                wire::kOpcodeCardStatus, static_cast<std::uint32_t>(key.request_id),
+                completion.card_status, &wire::encode_card_status_response, output);
+            break;
+        case wire::ControlRequestKind::card_connect:
+        case wire::ControlRequestKind::card_reconnect:
+        case wire::ControlRequestKind::card_reset:
+        case wire::ControlRequestKind::card_handle_status:
+            size = wire::encode_record_frame(wire::Kind::response,
+                session->pending_card_opcode_,
+                static_cast<std::uint32_t>(key.request_id), completion.card_session,
+                &wire::encode_card_session_result, output);
+            break;
+        case wire::ControlRequestKind::card_disconnect:
+            size = wire::encode_record_frame(wire::Kind::response,
+                wire::kOpcodeCardDisconnect, static_cast<std::uint32_t>(key.request_id),
+                completion.card_disconnect, &wire::encode_card_disconnect_response, output);
+            break;
+        case wire::ControlRequestKind::card_transmit:
+            size = wire::encode_record_frame(wire::Kind::response,
+                wire::kOpcodeCardTransmit, static_cast<std::uint32_t>(key.request_id),
+                completion.card_transmit, &wire::encode_card_transmit_response, output);
+            break;
+        case wire::ControlRequestKind::begin_transaction:
+            size = wire::encode_record_frame(wire::Kind::response,
+                wire::kOpcodeBeginTransaction, static_cast<std::uint32_t>(key.request_id),
+                completion.card_transaction, &wire::encode_begin_transaction_response, output);
+            break;
+        case wire::ControlRequestKind::end_transaction: {
+            wire::Header header;
+            header.kind = wire::Kind::response;
+            header.opcode = wire::kOpcodeEndTransaction;
+            header.request_id = static_cast<std::uint32_t>(key.request_id);
+            const auto encoded = wire::encode_header(header, output);
+            if (encoded) size = Result<std::size_t>::success(wire::kHeaderSize);
+            else size = Result<std::size_t>::failure(encoded.error());
+            break;
+        }
+        default:
+            return error_reply(*session, session->pending_card_opcode_,
+                               static_cast<std::uint32_t>(key.request_id),
+                               Error::INTERNAL, "card");
+        }
+        if (!size)
+            return error_reply(*session, session->pending_card_opcode_,
+                               static_cast<std::uint32_t>(key.request_id), size.error(),
+                               card_operation_name(kind));
+        return reply(*session, size.value());
+    }
     if (session->pending_kind_ == AuthorityJobKind::tune) {
         if (result != Error::OK)
             return error_reply(*session, wire::kOpcodeTune,
@@ -798,6 +942,9 @@ AuthorityCompletion ControlAuthority::execute_job_value(ReceiverEngine& engine,
         completion.error = result ? Error::OK : result.error();
         return completion;
     }
+    case AuthorityJobKind::card:
+        completion.error = Error::INVALID_ARGUMENT;
+        return completion;
     }
     completion.error = Error::INVALID_ARGUMENT;
     return completion;

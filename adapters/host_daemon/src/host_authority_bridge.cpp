@@ -594,8 +594,25 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
         retain_cleanup(job, index);
         return true;
     }
+    if (job.kind == AuthorityJobKind::disconnect && !slot.card_cleanup_done) {
+        ControlWorkerTask task{};
+        task.operation = ControlWorkerOperation::card_authority_cleanup;
+        task.kind = ControlWorkerTaskKind::authority_cleanup;
+        task.authority_job = job;
+        task.client_id = job.client_id;
+        task.request_id = static_cast<std::uint32_t>(job.key.request_id);
+        if (!workers_.submit(workers_.reader_lane(), task)) return false;
+        slot.cleanup = job;
+        slot.cleanup_accepted = true;
+        slot.cleanup_pending = false;
+        slot.cleanup_inflight = true;
+        slot.card_cleanup_inflight = true;
+        return true;
+    }
     ControlWorkerTask task{};
-    task.operation = ControlWorkerOperation::tuner_authority_job;
+    task.operation = job.kind == AuthorityJobKind::card
+        ? ControlWorkerOperation::card_authority_job
+        : ControlWorkerOperation::tuner_authority_job;
     task.kind = job.kind == AuthorityJobKind::disconnect
         ? ControlWorkerTaskKind::authority_cleanup
         : ControlWorkerTaskKind::authority_request;
@@ -606,8 +623,9 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
     task.receiver = job_receiver(job);
     task.lease_id = job.kind == AuthorityJobKind::tune
         ? job.tune.lease_id : job.lease_id;
-    const auto lane = workers_.authority_lane(
-        task.receiver, job.kind == AuthorityJobKind::disconnect);
+    const auto lane = job.kind == AuthorityJobKind::card
+        ? Result<ControlWorkerLane>::success(workers_.reader_lane())
+        : workers_.authority_lane(task.receiver, job.kind == AuthorityJobKind::disconnect);
     if (!lane || !workers_.submit(lane.value(), task)) return false;
 
     if (job.kind == AuthorityJobKind::disconnect) {
@@ -637,6 +655,8 @@ void HostAuthorityBridge::retain_cleanup(const AuthorityJob& job,
     slot.cleanup_pending = true;
     slot.cleanup_accepted = false;
     slot.cleanup_inflight = false;
+    slot.card_cleanup_done = false;
+    slot.card_cleanup_inflight = false;
     if (slot.session && slot.session->client_id() != 0U)
         (void)authority_owner_.authority().cleanup_submitted(job, false);
 }
@@ -654,6 +674,40 @@ std::size_t HostAuthorityBridge::find_slot(std::uint64_t id) const noexcept
 void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                                   std::size_t lane) noexcept
 {
+    if (completion.operation == ControlWorkerOperation::card_authority_cleanup) {
+        const std::size_t index = find_slot(completion.authority_key.client_id);
+        if (index == kHostAuthoritySessionCapacity) {
+            enter_fatal();
+            return;
+        }
+        Slot& slot = slots_[index];
+        if (!slot.card_cleanup_inflight || !slot.cleanup_inflight ||
+            slot.cleanup.kind != AuthorityJobKind::disconnect ||
+            slot.cleanup.key.client_id != completion.authority_key.client_id ||
+            slot.cleanup.key.request_id != completion.authority_key.request_id ||
+            completion.authority_completion.key.client_id != completion.authority_key.client_id ||
+            completion.authority_completion.key.request_id != completion.authority_key.request_id ||
+            completion.authority_completion.kind != AuthorityJobKind::disconnect) {
+            slot.state = SlotState::fatal_unresolved;
+            enter_fatal();
+            return;
+        }
+        slot.card_cleanup_inflight = false;
+        slot.cleanup_inflight = false;
+        if (completion.error != Error::OK) {
+            slot.state = SlotState::fatal_unresolved;
+            enter_fatal();
+            return;
+        }
+        slot.card_cleanup_done = true;
+        const AuthorityJob cleanup = slot.cleanup;
+        if (!queue_job(cleanup, index)) {
+            slot.cleanup = cleanup;
+            slot.cleanup_pending = true;
+            slot.cleanup_accepted = false;
+        }
+        return;
+    }
     if (completion.authority_stream) {
         if (completion.data_slot >= data_slots_.size()) {
             enter_fatal();
@@ -821,7 +875,8 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
         enter_fatal();
         return;
     }
-    if (completion.operation != ControlWorkerOperation::tuner_authority_job) {
+    if (completion.operation != ControlWorkerOperation::tuner_authority_job &&
+        completion.operation != ControlWorkerOperation::card_authority_job) {
         if (legacy_completion_sink_ != nullptr) {
             legacy_completion_sink_(legacy_completion_context_, completion);
         } else if (lane < deferred_legacy_.size()) {
@@ -953,6 +1008,8 @@ void HostAuthorityBridge::finish_slot(std::size_t index) noexcept
     slot.cleanup_pending = false;
     slot.cleanup_accepted = false;
     slot.cleanup_inflight = false;
+    slot.card_cleanup_done = false;
+    slot.card_cleanup_inflight = false;
     slot.deferred_session = false;
     slot.close_pending = false;
     slot.response_ready = false;

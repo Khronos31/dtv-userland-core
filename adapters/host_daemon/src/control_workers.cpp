@@ -38,6 +38,16 @@ bool operation_lane_valid(ControlWorkerLane lane, const ControlWorkerTask& task,
                           const ControlExecutionLayout& execution) noexcept
 {
     switch (task.operation) {
+    case ControlWorkerOperation::card_authority_cleanup:
+        return task.kind == ControlWorkerTaskKind::authority_cleanup &&
+               task.authority_job.kind ==
+                   dtv::userland::detail::AuthorityJobKind::disconnect &&
+               lane == execution.reader_lane;
+    case ControlWorkerOperation::card_authority_job:
+        return task.kind == ControlWorkerTaskKind::authority_request &&
+               task.authority_job.kind ==
+                   dtv::userland::detail::AuthorityJobKind::card &&
+               lane == execution.reader_lane;
     case ControlWorkerOperation::tuner_authority_job:
         if (task.kind == ControlWorkerTaskKind::authority_cleanup) {
             return task.authority_job.kind ==
@@ -733,7 +743,8 @@ struct ControlWorkerLanes::Impl final {
                  task.operation == ControlWorkerOperation::tuner_prepare_attach_v1)) {
                 return Result<void>::failure(Error::BUSY);
             }
-            if (task.operation == ControlWorkerOperation::tuner_authority_job &&
+            if ((task.operation == ControlWorkerOperation::tuner_authority_job ||
+                 task.operation == ControlWorkerOperation::card_authority_cleanup) &&
                 task.kind == ControlWorkerTaskKind::authority_cleanup &&
                 owner.reject_next_authority_cleanup_submit.exchange(false)) {
                 return Result<void>::failure(Error::BUSY);
@@ -937,7 +948,9 @@ struct ControlWorkerLanes::Impl final {
         completion.data_slot = task.data_slot;
         completion.data_generation = task.data_generation;
         completion.authority_stream = task.authority_stream;
-        if (task.operation == ControlWorkerOperation::tuner_authority_job) {
+        if (task.operation == ControlWorkerOperation::tuner_authority_job ||
+            task.operation == ControlWorkerOperation::card_authority_job ||
+            task.operation == ControlWorkerOperation::card_authority_cleanup) {
             completion.authority_key = task.authority_job.key;
             completion.authority_job_kind = task.authority_job.kind;
             completion.client_id = task.authority_job.key.client_id;
@@ -962,6 +975,21 @@ struct ControlWorkerLanes::Impl final {
             operation_error = completion.authority_completion.error;
             completion.lease_id = completion.authority_completion.lease_id;
             completion.receiver = completion.authority_completion.receiver;
+            break;
+        }
+        case ControlWorkerOperation::card_authority_job: {
+            completion.authority_completion = ControlWorkerLanes::execute_card_authority_job(
+                card_service, task.authority_job);
+            operation_error = completion.authority_completion.error;
+            break;
+        }
+        case ControlWorkerOperation::card_authority_cleanup: {
+            completion.authority_completion.key = task.authority_job.key;
+            completion.authority_completion.kind = task.authority_job.kind;
+            const auto result = card_service.release_connection(
+                task.authority_job.client_id);
+            operation_error = result ? Error::OK : result.error();
+            completion.authority_completion.error = operation_error;
             break;
         }
         case ControlWorkerOperation::tuner_acquire: {
@@ -1410,10 +1438,29 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     if (!operation_lane_valid(lane, task, impl_->execution)) {
         return Result<void>::failure(Error::INVALID_ARGUMENT);
     }
-    if (task.operation == ControlWorkerOperation::tuner_authority_job) {
+    if (task.operation == ControlWorkerOperation::tuner_authority_job ||
+        task.operation == ControlWorkerOperation::card_authority_job ||
+        task.operation == ControlWorkerOperation::card_authority_cleanup) {
         const auto& job = task.authority_job;
         if (job.deferred) return Result<void>::failure(Error::INVALID_ARGUMENT);
-        if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
+        if (task.operation == ControlWorkerOperation::card_authority_cleanup) {
+            if (job.kind != dtv::userland::detail::AuthorityJobKind::disconnect ||
+                task.kind != ControlWorkerTaskKind::authority_cleanup ||
+                task.client_id != job.client_id || task.receiver != 0U ||
+                task.lease_id != 0U || job.key.client_id != job.client_id ||
+                job.key.request_id > std::numeric_limits<std::uint32_t>::max() ||
+                task.request_id != static_cast<std::uint32_t>(job.key.request_id))
+                return Result<void>::failure(Error::INVALID_ARGUMENT);
+        } else if (task.operation == ControlWorkerOperation::card_authority_job) {
+            if (job.kind != dtv::userland::detail::AuthorityJobKind::card ||
+                task.kind != ControlWorkerTaskKind::authority_request ||
+                task.client_id != job.client_id || task.receiver != 0U ||
+                task.lease_id != 0U || job.key.client_id != job.client_id ||
+                job.key.client_id < dtv::userland::detail::kAuthorityClientIdFirst ||
+                job.key.request_id > std::numeric_limits<std::uint32_t>::max() ||
+                task.request_id != static_cast<std::uint32_t>(job.key.request_id))
+                return Result<void>::failure(Error::INVALID_ARGUMENT);
+        } else if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
             job.kind != dtv::userland::detail::AuthorityJobKind::acquire &&
             job.kind != dtv::userland::detail::AuthorityJobKind::release &&
             job.kind != dtv::userland::detail::AuthorityJobKind::rollback_release &&
@@ -1458,6 +1505,192 @@ dtv::userland::detail::AuthorityCompletion ControlWorkerLanes::execute_authority
         tuner_service.engine_, job);
 }
 
+dtv::userland::detail::AuthorityCompletion ControlWorkerLanes::execute_card_authority_job(
+    CardService& card_service,
+    const dtv::userland::detail::AuthorityJob& job) noexcept
+{
+    using namespace dtv::userland;
+    using namespace dtv::userland::wire;
+    using px4::userland::ipc::Disposition;
+    using px4::userland::ipc::ShareMode;
+    dtv::userland::detail::AuthorityCompletion completion;
+    completion.key = job.key;
+    completion.kind = job.kind;
+    completion.card_kind = job.card_kind;
+    const ControlRequest& request = job.card_request;
+    const auto reader_key = [&]() noexcept {
+        switch (job.card_kind) {
+        case ControlRequestKind::card_status: return request.card_status.key;
+        case ControlRequestKind::card_connect: return ReaderKey{request.card_connect.key.epoch,
+                                                                 request.card_connect.key.reader_id};
+        case ControlRequestKind::card_reconnect: return ReaderKey{request.card_reconnect.key.epoch,
+                                                                   request.card_reconnect.key.reader_id};
+        case ControlRequestKind::card_disconnect: return ReaderKey{request.card_disconnect.key.epoch,
+                                                                    request.card_disconnect.key.reader_id};
+        case ControlRequestKind::card_reset: return ReaderKey{request.card_reset.key.epoch,
+                                                               request.card_reset.key.reader_id};
+        case ControlRequestKind::card_transmit: return ReaderKey{request.card_transmit.key.epoch,
+                                                                  request.card_transmit.key.reader_id};
+        case ControlRequestKind::begin_transaction: return ReaderKey{request.begin_transaction.key.epoch,
+                                                                       request.begin_transaction.key.reader_id};
+        case ControlRequestKind::end_transaction: return ReaderKey{request.end_transaction.key.epoch,
+                                                                     request.end_transaction.key.reader_id};
+        case ControlRequestKind::card_handle_status: return ReaderKey{request.card_handle_status.key.epoch,
+                                                                        request.card_handle_status.key.reader_id};
+        default: return ReaderKey{};
+        }
+    };
+    const ReaderKey key = reader_key();
+    const auto copy_atr = [](const px4::userland::CardAtrBytes& source,
+                             Optional<BBytes<kMaxAtrBytes>>& target) noexcept {
+        target.present = source.length != 0U && source.length <= kMaxAtrBytes;
+        if (!target.present) return;
+        target.value.length = static_cast<std::uint32_t>(source.length);
+        for (std::size_t i = 0U; i < source.length; ++i)
+            target.value.bytes[i] = source.bytes[i];
+    };
+    const auto fill_session = [&](const CardServiceStatus& status, std::uint64_t handle,
+                                  std::uint64_t bound_generation) noexcept {
+        completion.card_session.epoch = key.epoch;
+        completion.card_session.reader_id = key.reader_id;
+        completion.card_session.card_handle = handle;
+        completion.card_session.bound_generation = bound_generation;
+        completion.card_session.current_generation = status.reader_generation;
+        completion.card_session.present = status.present;
+        completion.card_session.initialized = status.initialized;
+        completion.card_session.usable = status.initialized;
+        if (status.initialized) {
+            completion.card_session.protocol.present = true;
+            completion.card_session.protocol.value = CardProtocol::t1;
+            copy_atr(status.atr, completion.card_session.atr);
+        }
+    };
+    const auto current_generation = card_service.reader_generation();
+    const auto handle_key_matches = [current_generation](const CardHandleKey& value) noexcept {
+        return value.bound_generation != 0U && value.bound_generation == current_generation;
+    };
+    Error error = Error::OK;
+    switch (job.card_kind) {
+    case ControlRequestKind::card_status: {
+        const auto result = card_service.status();
+        if (!result) { error = result.error(); break; }
+        const auto& status = result.value();
+        completion.card_status.key = key;
+        completion.card_status.current_generation = status.reader_generation;
+        completion.card_status.present = status.present;
+        completion.card_status.initialized = status.initialized;
+        if (status.initialized) {
+            completion.card_status.protocol.present = true;
+            completion.card_status.protocol.value = CardProtocol::t1;
+            copy_atr(status.atr, completion.card_status.atr);
+        }
+        break;
+    }
+    case ControlRequestKind::card_connect: {
+        const auto mode = request.card_connect.share == Share::exclusive
+            ? ShareMode::exclusive : ShareMode::shared;
+        const auto result = card_service.connect(job.client_id, mode, true);
+        if (!result) { error = result.error(); break; }
+        const auto status = card_service.status();
+        if (!status) {
+            error = status.error();
+            (void)card_service.release_connection(job.client_id);
+            break;
+        }
+        fill_session(status.value(), result.value().handle, status.value().reader_generation);
+        if (result.value().atr.length != 0U)
+            copy_atr(result.value().atr, completion.card_session.atr);
+        break;
+    }
+    case ControlRequestKind::card_reconnect: {
+        const auto& value = request.card_reconnect;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.reconnect(job.client_id, value.key.card_handle,
+            value.share == Share::exclusive ? ShareMode::exclusive : ShareMode::shared,
+            value.disposition == wire::Disposition::reset ? Disposition::reset : Disposition::leave);
+        if (!result) { error = result.error(); break; }
+        const auto status = card_service.handle_status(job.client_id, value.key.card_handle);
+        if (!status) { error = status.error(); break; }
+        fill_session(status.value(), value.key.card_handle, value.key.bound_generation);
+        if (result.value().length != 0U)
+            copy_atr(result.value(), completion.card_session.atr);
+        break;
+    }
+    case ControlRequestKind::card_disconnect: {
+        const auto& value = request.card_disconnect;
+        completion.card_disconnect.key = key;
+        completion.card_disconnect.card_handle = value.key.card_handle;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.disconnect(job.client_id, value.key.card_handle,
+            value.disposition == wire::Disposition::reset ? Disposition::reset : Disposition::leave);
+        if (!result) { error = result.error(); break; }
+        completion.card_disconnect.consumed = true;
+        completion.card_disconnect.quiesced = true;
+        break;
+    }
+    case ControlRequestKind::card_reset: {
+        const auto& value = request.card_reset;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.reset(job.client_id, value.key.card_handle);
+        if (!result) { error = result.error(); break; }
+        const auto status = card_service.handle_status(job.client_id, value.key.card_handle);
+        if (!status) { error = status.error(); break; }
+        fill_session(status.value(), value.key.card_handle, value.key.bound_generation);
+        copy_atr(result.value(), completion.card_session.atr);
+        break;
+    }
+    case ControlRequestKind::card_transmit: {
+        const auto& value = request.card_transmit;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        completion.card_transmit.key = value.key;
+        const auto result = card_service.transmit(job.client_id, value.key.card_handle,
+            ByteView{value.command.bytes.data(), value.command.length},
+            MutableByteView{completion.card_transmit.response.bytes.data(),
+                            completion.card_transmit.response.bytes.size()});
+        if (!result) { error = result.error(); break; }
+        completion.card_transmit.response.length = static_cast<std::uint32_t>(result.value());
+        break;
+    }
+    case ControlRequestKind::begin_transaction: {
+        const auto& value = request.begin_transaction;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.begin_transaction(job.client_id, value.key.card_handle);
+        if (!result) { error = result.error(); break; }
+        completion.card_transaction.key = value.key;
+        break;
+    }
+    case ControlRequestKind::end_transaction: {
+        const auto& value = request.end_transaction;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.end_transaction(job.client_id, value.key.card_handle,
+            value.disposition == wire::Disposition::reset ? Disposition::reset : Disposition::leave);
+        if (!result) error = result.error();
+        break;
+    }
+    case ControlRequestKind::card_handle_status: {
+        const auto& value = request.card_handle_status;
+        if (!handle_key_matches(value.key)) { error = Error::NOT_FOUND; break; }
+        const auto result = card_service.handle_status(job.client_id, value.key.card_handle);
+        if (!result) { error = result.error(); break; }
+        fill_session(result.value(), value.key.card_handle, value.key.bound_generation);
+        break;
+    }
+    default:
+        error = Error::UNSUPPORTED;
+        break;
+    }
+    if (job.card_kind == ControlRequestKind::card_disconnect && error != Error::OK) {
+        completion.card_disconnect.error.present = true;
+        completion.card_disconnect.error.value.code = static_cast<std::uint32_t>(error);
+        constexpr char operation[] = "card_disconnect";
+        completion.card_disconnect.error.value.operation.length = sizeof(operation) - 1U;
+        for (std::size_t i = 0U; i < sizeof(operation) - 1U; ++i)
+            completion.card_disconnect.error.value.operation.bytes[i] = operation[i];
+    }
+    completion.error = error;
+    return completion;
+}
+
 bool ControlWorkerLanes::try_pop(ControlWorkerLane lane,
                                  ControlWorkerCompletion& completion) noexcept
 {
@@ -1480,6 +1713,11 @@ Result<ControlWorkerLane> ControlWorkerLanes::authority_lane(
         return Result<ControlWorkerLane>::failure(Error::INVALID_ARGUMENT);
     return Result<ControlWorkerLane>::success(
         impl_->execution.receiver_lane[receiver]);
+}
+
+ControlWorkerLane ControlWorkerLanes::reader_lane() const noexcept
+{
+    return impl_ ? impl_->execution.reader_lane : ControlWorkerLane::card;
 }
 
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
