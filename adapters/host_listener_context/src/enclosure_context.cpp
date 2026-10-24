@@ -200,9 +200,14 @@ struct EnclosureContext::Impl final {
 
     Error perform_cleanup() noexcept
     {
+        Error first_error = Error::OK;
+        const auto retain_error = [&first_error](Error error) noexcept {
+            if (first_error == Error::OK && error != Error::OK)
+                first_error = error;
+        };
+        bool owner_quiesced = true;
         if (published) {
-            const Error unpublish = io->unpublish_pair(listeners);
-            if (unpublish != Error::OK) return unpublish;
+            retain_error(io->unpublish_pair(listeners));
             published = false;
         }
         if (io) {
@@ -228,7 +233,10 @@ struct EnclosureContext::Impl final {
                 slot.frame_buffer.reset();
             }
         }
-        (void)bridge->begin_shutdown();
+        const Error shutdown_started = bridge->begin_shutdown();
+        retain_error(shutdown_started);
+        if (shutdown_started != Error::OK && !bridge->stopped())
+            owner_quiesced = false;
         std::array<detail::ReadyEvent, detail::kListenerIoEventCapacity> events{};
         while (!bridge->stopped()) {
             std::size_t count = 0U;
@@ -237,24 +245,36 @@ struct EnclosureContext::Impl final {
             const Error advanced = bridge->poll();
             if (advanced != Error::OK && !bridge->stopped()) sleep_briefly();
         }
-        if (bridge->shutdown_result() != Error::OK) return bridge->shutdown_result();
+        const Error bridge_shutdown = bridge->shutdown_result();
+        retain_error(bridge_shutdown);
+        if (bridge_shutdown != Error::OK) owner_quiesced = false;
         const auto joined = workers->join();
-        if (!joined) return joined.error();
+        if (!joined) {
+            retain_error(joined.error());
+            owner_quiesced = false;
+        }
         if (namespace_reserved) {
-            const Error released = io->release_namespace();
-            if (released != Error::OK) return released;
+            retain_error(io->release_namespace());
             namespace_reserved = false;
         }
-        bridge.reset();
-        workers.reset();
-        tuner.reset();
-        card.reset();
-        io.reset();
-        const auto shutdown = family->shutdown();
-        if (!shutdown) return shutdown.error();
-        nonce_source.reset();
-        family.reset();
-        return Error::OK;
+        if (owner_quiesced) {
+            const auto shutdown = family->shutdown();
+            if (!shutdown) {
+                retain_error(shutdown.error());
+                owner_quiesced = false;
+            }
+        }
+        if (owner_quiesced) {
+            bridge.reset();
+            workers.reset();
+            tuner.reset();
+            card.reset();
+            io.reset();
+            nonce_source.reset();
+            family.reset();
+        }
+        cleanup_quiesced.store(owner_quiesced, std::memory_order_release);
+        return first_error;
     }
 
     Result<void> on_control_frame(std::size_t index,
@@ -885,6 +905,7 @@ struct EnclosureContext::Impl final {
     pthread_t cleanup_thread{};
     std::atomic<bool> cleanup_complete{false};
     std::atomic<Error> cleanup_error{Error::OK};
+    std::atomic<bool> cleanup_quiesced{false};
     bool mutex_ready = false;
     bool condition_ready = false;
     bool thread_started = false;
@@ -907,7 +928,7 @@ EnclosureContext::~EnclosureContext() noexcept
     if (!impl_) return;
     impl_->request_close();
     while (!impl_->cleanup_complete.load(std::memory_order_acquire)) sleep_briefly();
-    if (impl_->cleanup_error.load(std::memory_order_acquire) != Error::OK) {
+    if (!impl_->cleanup_quiesced.load(std::memory_order_acquire)) {
         impl_->join_cleanup();
         (void)impl_.release();
         return;
