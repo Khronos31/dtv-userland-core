@@ -56,6 +56,30 @@ struct HostAuthorityDataCounts final {
     std::size_t retired = 0U;
 };
 
+struct HostAuthorityFatalDiagnostic final {
+    std::uint32_t source_line = 0U;
+    Error worker_error = Error::OK;
+    ControlWorkerOperation completion_operation = ControlWorkerOperation::tuner_acquire;
+    Error completion_error = Error::OK;
+    Error first_read_error = Error::OK;
+    std::uint64_t client_id = 0U;
+    std::uint64_t lease_id = 0U;
+    std::uint64_t stream_id = 0U;
+    std::uint64_t read_client_id = 0U;
+    std::uint64_t read_lease_id = 0U;
+    std::uint64_t read_stream_id = 0U;
+    std::uint8_t data_slot = 0xffU;
+    std::uint8_t data_state = 0U;
+    std::uint8_t owner_slot = 0xffU;
+    std::uint8_t owner_state = 0U;
+    std::uint8_t completion_lane = 0xffU;
+    std::uint8_t read_data_slot = 0xffU;
+    std::uint8_t read_data_state = 0U;
+    bool completion_valid = false;
+    bool first_read_error_valid = false;
+    bool valid = false;
+};
+
 // Poll-thread owner for the bounded, socketless Authority bridge. The caller
 // owns frame parsing and writes reply.frame; response_sent() must receive true
 // only after every byte of that frame was written.
@@ -132,6 +156,10 @@ public:
     Error shutdown_result() const noexcept;
     HostAuthorityBridgeCounts counts() const noexcept;
     std::uint64_t client_id(std::uint8_t slot) const noexcept;
+    HostAuthorityFatalDiagnostic fatal_diagnostic() const noexcept
+    {
+        return fatal_diagnostic_;
+    }
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
     bool fatal_unresolved_for_test(std::uint8_t slot) const noexcept
     {
@@ -270,7 +298,7 @@ private:
     bool remember_stream(std::size_t slot, std::uint64_t lease_id,
                          std::uint64_t stream_id) noexcept;
     void stop_ingresses() noexcept;
-    void enter_fatal() noexcept;
+    void enter_fatal(std::uint32_t source_line) noexcept;
     void advance() noexcept;
     void consume(const ControlWorkerCompletion& completion,
                  std::size_t lane) noexcept;
@@ -287,6 +315,17 @@ private:
     bool fatal_ = false;
     bool stop_requested_ = false;
     bool stopped_ = false;
+    HostAuthorityFatalDiagnostic fatal_diagnostic_{};
+    ControlWorkerCompletion last_completion_{};
+    bool last_completion_valid_ = false;
+    std::uint8_t last_completion_lane_ = 0xffU;
+    HostAuthorityDataReadResult first_read_error_{};
+    std::uint64_t first_read_client_id_ = 0U;
+    std::uint64_t first_read_lease_id_ = 0U;
+    std::uint64_t first_read_stream_id_ = 0U;
+    std::uint8_t first_read_data_slot_ = 0xffU;
+    std::uint8_t first_read_data_state_ = 0U;
+    bool first_read_error_valid_ = false;
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
     bool force_next_terminal_unquiesced_ = false;
     bool force_terminal_unquiesced_ = false;
