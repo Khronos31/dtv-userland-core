@@ -173,6 +173,7 @@ public:
         jobs[count++] = job;
         return true;
     }
+    w::Optional<bool> lnb_power_state() noexcept override { return lnb_state; }
     AuthorityJob pop()
     {
         AuthorityJob job = jobs[0U];
@@ -183,6 +184,7 @@ public:
     std::array<AuthorityJob, 16> jobs{};
     std::size_t count = 0U;
     bool reject = false;
+    w::Optional<bool> lnb_state{};
 };
 
 Error send_full(ControlAuthority& authority, ControlServiceSession& session,
@@ -965,6 +967,125 @@ bool test_card_dispatch_rejects_unadvertised_reader()
     return true;
 }
 
+bool test_lnb_power_dispatch_and_status()
+{
+    const ReceiverId ids[] = {2U};
+    auto list = make_list(ids, 1U);
+    auto& capabilities = list.receivers.value.items[0U].capabilities;
+    capabilities.controls |= w::kControlBitLnb;
+    capabilities.lnb.values.count = 2U;
+    capabilities.lnb.values.items[0U] = 0U;
+    capabilities.lnb.values.items[1U] = 15U;
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    ReceiverEngine engine(backend, ids, 1U, tokens, clock);
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession session(authority);
+    Executor executor;
+    CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
+
+    w::LnbPowerRequest request{list.epoch, true};
+    std::array<std::uint8_t, 64U> payload{};
+    const auto encoded = w::encode_lnb_power_request(
+        request, {payload.data(), payload.size()});
+    CHECK(encoded);
+    w::Context context;
+    context.epoch = list.epoch;
+    w::Snapshot snapshot;
+    auto reply = authority.accept(session,
+        frame(w::kOpcodeLnbPower, 2U, {payload.data(), encoded.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.queued && executor.count == 1U);
+    const AuthorityJob job = executor.pop();
+    CHECK(job.kind == AuthorityJobKind::lnb_power && job.client_id == session.client_id() &&
+          job.lnb_enabled);
+    AuthorityCompletion completion;
+    completion.key = job.key;
+    completion.kind = job.kind;
+    completion.lnb_enabled = job.lnb_enabled;
+    reply = authority.complete(completion);
+    CHECK(reply.action == w::InboundAction::respond);
+    const auto response = w::decode_lnb_power_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(response && response.value().epoch == list.epoch && response.value().enabled);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    executor.lnb_state = w::Optional<bool>{true, true};
+    w::StatusRequest status_request{list.epoch, w::Scope{}};
+    std::array<std::uint8_t, 64U> status_payload{};
+    const auto status_size = w::encode_status_request(
+        status_request, {status_payload.data(), status_payload.size()});
+    CHECK(status_size);
+    reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 3U, {status_payload.data(), status_size.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.action == w::InboundAction::respond);
+    const auto status = w::decode_status_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(status && status.value().lnb_15v_enabled.present &&
+          status.value().lnb_15v_enabled.value);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    executor.lnb_state.present = false;
+    reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 4U, {status_payload.data(), status_size.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.action == w::InboundAction::respond);
+    const auto unknown = w::decode_status_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(unknown && !unknown.value().lnb_15v_enabled.present);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    w::LnbPowerRequest off{list.epoch, false};
+    const auto off_size = w::encode_lnb_power_request(
+        off, {payload.data(), payload.size()});
+    CHECK(off_size);
+    reply = authority.accept(session,
+        frame(w::kOpcodeLnbPower, 5U, {payload.data(), off_size.value()}),
+        context, snapshot, 0U, executor);
+    CHECK(reply.queued && executor.count == 1U);
+    const AuthorityJob failed_job = executor.pop();
+    completion = AuthorityCompletion{};
+    completion.key = failed_job.key;
+    completion.kind = failed_job.kind;
+    completion.error = Error::USB_IO;
+    reply = authority.complete(completion);
+    CHECK(reply.action == w::InboundAction::respond);
+    const auto failure = w::decode_error_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(failure && failure.value().error.code == static_cast<std::uint32_t>(Error::USB_IO));
+    CHECK(send_full(authority, session, executor) == Error::OK);
+    CHECK(authority.close(session).kind == AuthorityJobKind::disconnect);
+
+    auto unsupported_list = make_list(ids, 1U);
+    w::ServerHello unsupported_server{unsupported_list.epoch,
+                                       unsupported_list.producer, 0U};
+    Backend unsupported_backend;
+    Tokens unsupported_tokens;
+    Clock unsupported_clock;
+    ReceiverEngine unsupported_engine(unsupported_backend, ids, 1U,
+                                      unsupported_tokens, unsupported_clock);
+    ControlAuthority unsupported_authority(unsupported_server, unsupported_list,
+                                           unsupported_engine);
+    ControlServiceSession unsupported_session(unsupported_authority);
+    Executor unsupported_executor;
+    CHECK(unsupported_authority.open(unsupported_session) == Error::OK &&
+          hello(unsupported_authority, unsupported_session, unsupported_executor));
+    reply = unsupported_authority.accept(unsupported_session,
+        frame(w::kOpcodeLnbPower, 2U, {payload.data(), encoded.value()}),
+        context, snapshot, 0U, unsupported_executor);
+    CHECK(reply.action == w::InboundAction::respond && unsupported_executor.count == 0U);
+    const auto unsupported = w::decode_error_response(
+        {reply.frame.data + w::kHeaderSize, reply.frame.size - w::kHeaderSize});
+    CHECK(unsupported && unsupported.value().error.code ==
+          static_cast<std::uint32_t>(Error::UNSUPPORTED));
+    CHECK(unsupported_authority.close(unsupported_session).kind ==
+          AuthorityJobKind::disconnect);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -978,6 +1099,7 @@ int main()
     if (!test_other_receiver_cleanup_while_tune_blocks()) return 1;
     if (!test_client_id_domain_and_authority_exhaustion()) return 1;
     if (!test_card_dispatch_rejects_unadvertised_reader()) return 1;
+    if (!test_lnb_power_dispatch_and_status()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }

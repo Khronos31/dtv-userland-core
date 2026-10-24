@@ -56,7 +56,21 @@ public:
         if (receiver < closed.size()) closed[receiver] = true;
         return Result<void>::success();
     }
+    Result<void> set_independent_lnb_power(bool enabled) noexcept override
+    {
+        ++lnb_calls;
+        if (lnb_error != Error::OK) return Result<void>::failure(lnb_error);
+        lnb_enabled = enabled;
+        lnb_known = true;
+        return Result<void>::success();
+    }
+    w::Optional<bool> independent_lnb_power_state() noexcept override
+    { return w::Optional<bool>{lnb_known, lnb_enabled}; }
     unsigned hz_calls = 0U;
+    unsigned lnb_calls = 0U;
+    bool lnb_enabled = false;
+    bool lnb_known = false;
+    Error lnb_error = Error::OK;
     std::array<bool, 8U> closed{};
 };
 
@@ -151,6 +165,10 @@ w::ListResponse make_list()
         receiver.binding.value.function_id = 1U;
         receiver.binding.value.local_id = receiver.id;
     }
+    list.receivers.value.items[0U].capabilities.controls |= w::kControlBitLnb;
+    list.receivers.value.items[0U].capabilities.lnb.values.count = 2U;
+    list.receivers.value.items[0U].capabilities.lnb.values.items[0U] = 0U;
+    list.receivers.value.items[0U].capabilities.lnb.values.items[1U] = 15U;
     list.readers.present = true;
     return list;
 }
@@ -287,10 +305,65 @@ int main()
     Executor executor;
     if (authority.open(session) != Error::OK || !hello(authority, session, executor))
         return fail("authority session setup failed");
+    std::array<std::uint8_t, 64U> lnb_payload{};
+    auto lnb_size = w::encode_lnb_power_request({server.epoch, true},
+        {lnb_payload.data(), lnb_payload.size()});
+    if (!lnb_size) return fail("Authority LNB request encoding failed");
+    w::Context context;
+    w::Snapshot snapshot;
+    auto lnb_reply = authority.accept(session,
+        request(w::kOpcodeLnbPower, 2U, {lnb_payload.data(), lnb_size.value()}),
+        context, snapshot, 0U, executor);
+    if (!lnb_reply.queued || !executor.has_job)
+        return fail("Authority LNB request was not dispatched");
+    const AuthorityJob lnb_job = executor.take();
+    const auto lnb_task = task_for(lnb_job, ControlWorkerTaskKind::authority_request);
+    const auto lnb_lane = workers.authority_lnb_lane();
+    if (!lnb_lane || workers.submit(lnb_lane.value(), lnb_task).error() != Error::OK)
+        return fail("Authority LNB job was not accepted on its shared power lane");
+    ControlWorkerCompletion lnb_completion{};
+    if (!wait_completion(workers, lnb_lane.value(), lnb_completion) ||
+        lnb_completion.error != Error::OK || backend.lnb_calls != 1U ||
+        !backend.lnb_enabled || lnb_completion.authority_completion.kind !=
+            AuthorityJobKind::lnb_power ||
+        !lnb_completion.authority_completion.lnb_enabled)
+        return fail("worker did not execute independent LNB power exactly once");
+    lnb_reply = authority.complete(lnb_completion.authority_completion);
+    if (lnb_reply.action != w::InboundAction::respond)
+        return fail("Authority LNB success response missing");
+    const auto lnb_response = w::decode_lnb_power_response(
+        {lnb_reply.frame.data + w::kHeaderSize, lnb_reply.frame.size - w::kHeaderSize});
+    AuthorityJob rejected_lnb;
+    if (!lnb_response || !lnb_response.value().enabled ||
+        authority.response_sent(session, true, executor, &rejected_lnb) != Error::OK)
+        return fail("Authority LNB success response was malformed");
+
+    backend.lnb_error = Error::USB_IO;
+    lnb_size = w::encode_lnb_power_request({server.epoch, false},
+        {lnb_payload.data(), lnb_payload.size()});
+    if (!lnb_size) return fail("Authority LNB failure request encoding failed");
+    lnb_reply = authority.accept(session,
+        request(w::kOpcodeLnbPower, 3U, {lnb_payload.data(), lnb_size.value()}),
+        context, snapshot, 0U, executor);
+    if (!lnb_reply.queued || !executor.has_job)
+        return fail("Authority LNB failure path was not dispatched");
+    const AuthorityJob failed_lnb_job = executor.take();
+    const auto failed_lnb_task = task_for(
+        failed_lnb_job, ControlWorkerTaskKind::authority_request);
+    if (workers.submit(lnb_lane.value(), failed_lnb_task).error() != Error::OK ||
+        !wait_completion(workers, lnb_lane.value(), lnb_completion) ||
+        lnb_completion.error != Error::USB_IO || backend.lnb_calls != 2U)
+        return fail("worker did not preserve backend LNB failure");
+    lnb_reply = authority.complete(lnb_completion.authority_completion);
+    if (lnb_reply.action != w::InboundAction::respond ||
+        !w::decode_error_response({lnb_reply.frame.data + w::kHeaderSize,
+                                   lnb_reply.frame.size - w::kHeaderSize}) ||
+        authority.response_sent(session, true, executor, &rejected_lnb) != Error::OK)
+        return fail("Authority LNB backend failure response was malformed");
     const std::uint64_t lease2 = acquire(authority, session, executor, workers,
-        ControlWorkerLane::tuner_dev1, 2U, 2U);
+        ControlWorkerLane::tuner_dev1, 4U, 2U);
     const std::uint64_t lease3 = acquire(authority, session, executor, workers,
-        ControlWorkerLane::tuner_dev2, 3U, 4U);
+        ControlWorkerLane::tuner_dev2, 5U, 4U);
     if (lease2 == 0U || lease3 == 0U)
         return fail("authority leases were not acquired");
 
@@ -302,11 +375,9 @@ int main()
     tune.timeout_ms = 1000U;
     const auto encoded = w::encode_tune_request(tune, {payload.data(), payload.size()});
     if (!encoded) return fail("authority tune encoding failed");
-    w::Context context;
-    w::Snapshot snapshot;
     context.state = w::ContextState::ready;
     const auto tune_reply = authority.accept(session,
-        request(w::kOpcodeTune, 4U, {payload.data(), encoded.value()}), context,
+        request(w::kOpcodeTune, 6U, {payload.data(), encoded.value()}), context,
         snapshot, 0U, executor);
     if (!tune_reply.queued || !executor.has_job || backend.hz_calls != 0U) {
         if (tune_reply.frame.size >= w::kHeaderSize) {
@@ -323,7 +394,7 @@ int main()
     }
     const AuthorityJob tune_job = executor.take();
     if (tune_job.key.client_id != session.client_id() ||
-        tune_job.key.request_id != 4U || tune_job.tune.receiver != 2U)
+        tune_job.key.request_id != 6U || tune_job.tune.receiver != 2U)
         return fail("authority tune job lost its origin values");
     const auto tune_task = task_for(tune_job, ControlWorkerTaskKind::authority_request);
     if (workers.submit(ControlWorkerLane::tuner_dev1, tune_task).error() != Error::OK)
@@ -331,7 +402,7 @@ int main()
     ControlWorkerCompletion completion{};
     if (!wait_completion(workers, ControlWorkerLane::tuner_dev1, completion) ||
         completion.error != Error::OK || completion.authority_key.client_id !=
-            tune_job.key.client_id || completion.authority_key.request_id != 4U ||
+            tune_job.key.client_id || completion.authority_key.request_id != 6U ||
         completion.authority_job_kind != AuthorityJobKind::tune ||
         completion.receiver != 2U || completion.lease_id != lease2 ||
         completion.authority_completion.key.client_id != tune_job.key.client_id ||
@@ -349,7 +420,7 @@ int main()
         {release_payload.data(), release_payload.size()});
     if (!release_size) return fail("Authority RELEASE encoding failed");
     const auto release_reply = authority.accept(session,
-        request(w::kOpcodeRelease, 5U,
+        request(w::kOpcodeRelease, 7U,
                 {release_payload.data(), release_size.value()}),
         context, snapshot, 0U, executor);
     if (!release_reply.queued || !executor.has_job) {
@@ -454,7 +525,7 @@ int main()
         !workers.submit(ControlWorkerLane::tuner_dev2, release_task))
         return fail("Authority RELEASE did not enforce receiver lane routing");
     if (!wait_completion(workers, ControlWorkerLane::tuner_dev2, completion) ||
-        completion.error != Error::OK || completion.authority_key.request_id != 5U ||
+        completion.error != Error::OK || completion.authority_key.request_id != 7U ||
         completion.authority_job_kind != AuthorityJobKind::release ||
         completion.receiver != 4U || completion.lease_id != lease3)
         return fail("Authority RELEASE completion lost routed values");

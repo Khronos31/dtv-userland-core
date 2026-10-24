@@ -58,6 +58,9 @@ bool operation_lane_valid(ControlWorkerLane lane, const ControlWorkerTask& task,
             task.authority_job.kind ==
                 dtv::userland::detail::AuthorityJobKind::disconnect)
             return false;
+        if (task.authority_job.kind ==
+            dtv::userland::detail::AuthorityJobKind::lnb_power)
+            return lane == execution.lnb_lane;
         if (task.receiver >= execution.receiver_count ||
             task.receiver >= execution.receiver_lane.size())
             return false;
@@ -970,8 +973,19 @@ struct ControlWorkerLanes::Impl final {
         Error operation_error = Error::OK;
         switch (task.operation) {
         case ControlWorkerOperation::tuner_authority_job: {
-            completion.authority_completion = ControlWorkerLanes::execute_authority_job(
-                tuner_service, task.authority_job);
+            if (task.authority_job.kind ==
+                dtv::userland::detail::AuthorityJobKind::lnb_power) {
+                completion.authority_completion.key = task.authority_job.key;
+                completion.authority_completion.kind = task.authority_job.kind;
+                completion.authority_completion.lnb_enabled =
+                    task.authority_job.lnb_enabled;
+                const auto result = tuner_service.set_independent_lnb_power(
+                    task.authority_job.lnb_enabled);
+                completion.authority_completion.error = result ? Error::OK : result.error();
+            } else {
+                completion.authority_completion = ControlWorkerLanes::execute_authority_job(
+                    tuner_service, task.authority_job);
+            }
             operation_error = completion.authority_completion.error;
             completion.lease_id = completion.authority_completion.lease_id;
             completion.receiver = completion.authority_completion.receiver;
@@ -1461,6 +1475,7 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
                 task.request_id != static_cast<std::uint32_t>(job.key.request_id))
                 return Result<void>::failure(Error::INVALID_ARGUMENT);
         } else if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::lnb_power &&
             job.kind != dtv::userland::detail::AuthorityJobKind::acquire &&
             job.kind != dtv::userland::detail::AuthorityJobKind::release &&
             job.kind != dtv::userland::detail::AuthorityJobKind::rollback_release &&
@@ -1718,6 +1733,12 @@ Result<ControlWorkerLane> ControlWorkerLanes::authority_lane(
 ControlWorkerLane ControlWorkerLanes::reader_lane() const noexcept
 {
     return impl_ ? impl_->execution.reader_lane : ControlWorkerLane::card;
+}
+
+Result<ControlWorkerLane> ControlWorkerLanes::authority_lnb_lane() const noexcept
+{
+    if (!impl_) return Result<ControlWorkerLane>::failure(Error::NOT_READY);
+    return Result<ControlWorkerLane>::success(impl_->execution.lnb_lane);
 }
 
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
