@@ -194,6 +194,65 @@ void test_hello_negotiation()
     CHECK(h.accept().action == w::InboundAction::close);
 }
 
+void test_ts_data_record_frame_payload_cap()
+{
+    static std::array<std::uint8_t, w::kTsPacketSize * 520U> measured_packets{};
+    static std::array<std::uint8_t, w::kMaxTsPacketBytes> max_packets{};
+    static std::array<std::uint8_t, w::kMaxTsPacketBytes + w::kTsPacketSize> too_many_packets{};
+    static std::array<std::uint8_t, w::kHeaderSize + w::kMaxTsDataPayload> frame_bytes{};
+    static std::array<std::uint8_t, w::kHeaderSize + w::kMaxControlPayload> short_frame_bytes{};
+
+    w::TsData data;
+    data.stream_id = 1U;
+    data.packets = ByteView{measured_packets.data(), measured_packets.size()};
+    auto encoded = w::encode_record_frame(
+        w::Kind::event, w::kOpcodeTsData, 0U, data, &w::encode_ts_data,
+        MutableByteView{frame_bytes.data(), frame_bytes.size()});
+    CHECK(encoded && encoded.value() == w::kHeaderSize + w::kTsDataPrefixSize +
+                                            measured_packets.size());
+    if (encoded) {
+        const auto frame = w::decode_frame(ByteView{frame_bytes.data(), encoded.value()});
+        CHECK(frame && frame.value().header.kind == w::Kind::event &&
+              frame.value().header.opcode == w::kOpcodeTsData &&
+              frame.value().payload.size == w::kTsDataPrefixSize + measured_packets.size());
+        if (frame) {
+            const auto decoded = w::decode_ts_data(frame.value().payload);
+            CHECK(decoded && decoded.value().stream_id == data.stream_id &&
+                  decoded.value().packets.size == measured_packets.size());
+        }
+    }
+
+    data.packets = ByteView{max_packets.data(), max_packets.size()};
+    encoded = w::encode_record_frame(
+        w::Kind::event, w::kOpcodeTsData, 0U, data, &w::encode_ts_data,
+        MutableByteView{frame_bytes.data(), frame_bytes.size()});
+    CHECK(encoded && encoded.value() == frame_bytes.size());
+    if (encoded) {
+        const auto frame = w::decode_frame(ByteView{frame_bytes.data(), encoded.value()});
+        CHECK(frame && frame.value().payload.size == w::kMaxTsDataPayload);
+        if (frame) {
+            const auto decoded = w::decode_ts_data(frame.value().payload);
+            CHECK(decoded && decoded.value().packets.size == w::kMaxTsPacketBytes);
+        }
+    }
+
+    data.packets = ByteView{too_many_packets.data(), too_many_packets.size()};
+    CHECK(w::encode_record_frame(
+              w::Kind::event, w::kOpcodeTsData, 0U, data, &w::encode_ts_data,
+              MutableByteView{frame_bytes.data(), frame_bytes.size()})
+              .error() == Error::INVALID_ARGUMENT);
+
+    data.packets = ByteView{measured_packets.data(), measured_packets.size()};
+    CHECK(w::encode_record_frame(
+              w::Kind::event, 0x80f0U, 0U, data, &w::encode_ts_data,
+              MutableByteView{frame_bytes.data(), frame_bytes.size()})
+              .error() == Error::RESOURCE_LIMIT);
+    CHECK(w::encode_record_frame(
+              w::Kind::event, w::kOpcodeTsData, 0U, data, &w::encode_ts_data,
+              MutableByteView{short_frame_bytes.data(), short_frame_bytes.size()})
+              .error() == Error::BUFFER_TOO_SMALL);
+}
+
 void test_hello_failures()
 {
     {
@@ -772,6 +831,7 @@ void test_status_shell()
 
 int main()
 {
+    test_ts_data_record_frame_payload_cap();
     test_hello_negotiation();
     test_hello_failures();
     test_error_record_symbols();

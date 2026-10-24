@@ -139,9 +139,9 @@ private:
     std::uint64_t features_ = 0U;
 };
 
-// Writes one reply frame: kind response (flags 1) or error_response (flags 3)
-// with the record payload.  A record whose encoding exceeds the control
-// payload cap is RESOURCE_LIMIT; a short output is BUFFER_TOO_SMALL.
+// Writes one record frame with the payload cap selected for its kind/opcode.
+// A record exceeding that cap is RESOURCE_LIMIT; a short output is
+// BUFFER_TOO_SMALL.
 template <typename Record>
 Result<std::size_t> encode_record_frame(Kind kind, std::uint16_t opcode,
                                         std::uint32_t request_id, const Record& value,
@@ -153,10 +153,11 @@ Result<std::size_t> encode_record_frame(Kind kind, std::uint16_t opcode,
         return Result<std::size_t>::failure(Error::BUFFER_TOO_SMALL);
     }
     const std::size_t room = output.size - kHeaderSize;
-    const std::size_t cap = room < kMaxControlPayload ? room : kMaxControlPayload;
+    const std::size_t payload_cap = payload_limit(kind, opcode);
+    const std::size_t cap = room < payload_cap ? room : payload_cap;
     const auto payload = encode(value, MutableByteView{output.data + kHeaderSize, cap});
     if (!payload) {
-        if (payload.error() == Error::BUFFER_TOO_SMALL && cap == kMaxControlPayload) {
+        if (payload.error() == Error::BUFFER_TOO_SMALL && cap == payload_cap) {
             return Result<std::size_t>::failure(Error::RESOURCE_LIMIT);
         }
         return Result<std::size_t>::failure(payload.error());
