@@ -30,11 +30,29 @@ using namespace dtv::userland::host_listener_context::detail;
 namespace dtv::userland::host_listener_context::detail {
 Error set_connection_send_buffer_for_test(ListenerIo& io, ConnectionToken connection,
                                           int bytes) noexcept;
+void fail_next_file_identity_tag_query_for_test(
+    void (*cleanup_hook)(const wchar_t*) noexcept) noexcept;
 }
 
 namespace {
 
 namespace windows_security = px4::userland::windows_security;
+
+bool foreign_replacement_created = false;
+
+void replace_failed_endpoint_with_foreign_file(const wchar_t* path) noexcept
+{
+    if (::DeleteFileW(path) == 0) return;
+    HANDLE file = ::CreateFileW(path, GENERIC_WRITE,
+        FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, nullptr,
+        CREATE_NEW, FILE_ATTRIBUTE_NORMAL, nullptr);
+    if (file == INVALID_HANDLE_VALUE) return;
+    const char marker[] = "foreign";
+    DWORD written = 0U;
+    foreign_replacement_created = ::WriteFile(file, marker, sizeof(marker), &written,
+        nullptr) != 0 && written == sizeof(marker);
+    (void)::CloseHandle(file);
+}
 
 bool check(bool value, const char* label) noexcept
 {
@@ -453,13 +471,70 @@ bool test_stale_foreign_and_shared_boundary() noexcept
     return check(shared_result == Error::UNSUPPORTED, "Windows rejects shared-group access");
 }
 
+bool test_identity_failure_rollback() noexcept
+{
+    std::wstring runtime;
+    std::string root;
+    if (!check(make_runtime(runtime, root), "identity failure runtime")) return false;
+    auto control = config(root, "control.sock");
+    auto data = config(root, "stream.sock");
+    auto io = create_listener_io();
+    if (!check(io->reserve_pair(control, data) == Error::OK, "reserve identity failure pair"))
+        return false;
+    std::string control_utf8;
+    std::wstring control_path;
+    if (!check(path_for(control, control_utf8, control_path), "identity failure control path"))
+        return false;
+
+    ListenerPair pair{};
+    fail_next_file_identity_tag_query_for_test(nullptr);
+    const Error failed = io->publish_pair(pair);
+    const DWORD failed_attributes = ::GetFileAttributesW(control_path.c_str());
+    const bool absent = failed_attributes == INVALID_FILE_ATTRIBUTES &&
+        (::GetLastError() == ERROR_FILE_NOT_FOUND || ::GetLastError() == ERROR_PATH_NOT_FOUND);
+    const Error retried = io->publish_pair(pair);
+    if (retried == Error::OK) (void)io->unpublish_pair(pair);
+    (void)io->release_namespace();
+    std::filesystem::remove_all(runtime);
+    if (!check(failed != Error::OK && absent && retried == Error::OK,
+               "identity query failure rolls back endpoint and allows retry")) return false;
+
+    if (!check(make_runtime(runtime, root), "identity substitution runtime")) return false;
+    control = config(root, "control.sock");
+    data = config(root, "stream.sock");
+    io = create_listener_io();
+    if (!check(io->reserve_pair(control, data) == Error::OK,
+               "reserve identity substitution pair")) return false;
+    if (!check(path_for(control, control_utf8, control_path),
+               "identity substitution control path")) return false;
+    foreign_replacement_created = false;
+    fail_next_file_identity_tag_query_for_test(replace_failed_endpoint_with_foreign_file);
+    const Error substituted = io->publish_pair(pair);
+    const DWORD replacement_attributes = ::GetFileAttributesW(control_path.c_str());
+    const bool replacement_preserved = foreign_replacement_created &&
+        replacement_attributes != INVALID_FILE_ATTRIBUTES &&
+        (replacement_attributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U;
+    const Error foreign_retry = io->publish_pair(pair);
+    const bool still_preserved = ::GetFileAttributesW(control_path.c_str()) !=
+        INVALID_FILE_ATTRIBUTES;
+    (void)::DeleteFileW(control_path.c_str());
+    const Error final_retry = io->publish_pair(pair);
+    if (final_retry == Error::OK) (void)io->unpublish_pair(pair);
+    (void)io->release_namespace();
+    std::filesystem::remove_all(runtime);
+    return check(substituted != Error::OK && replacement_preserved &&
+                 foreign_retry != Error::OK && still_preserved && final_retry == Error::OK,
+                 "identity substitution preserves foreign endpoint and permits later retry");
+}
+
 }  // namespace
 
 int main() noexcept
 {
     WSADATA data{};
     if (!check(::WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup")) return 1;
-    const bool passed = test_pair_io_and_dacl() && test_stale_foreign_and_shared_boundary();
+    const bool passed = test_pair_io_and_dacl() && test_stale_foreign_and_shared_boundary() &&
+        test_identity_failure_rollback();
     (void)::WSACleanup();
     return passed ? 0 : 1;
 }
