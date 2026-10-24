@@ -1180,6 +1180,7 @@ static Result<Px4TsRunResult> run_wire_profile(
                 const std::string candidate_instance(discovered.value().instances[candidate].data());
                 const char* product_slug = profile != nullptr ? profile->product_slug :
                                                                 "px4-userland";
+#if !defined(_WIN32)
                 const auto minimum_control_path = dtv::userland::host_runtime::
                     control_endpoint_path({"/", product_slug, candidate_instance});
                 const auto minimum_data_path = dtv::userland::host_runtime::
@@ -1197,6 +1198,7 @@ static Result<Px4TsRunResult> run_wire_profile(
                                    dtv::userland::host_runtime::EndpointAccess::private_user,
                                    -1, "stream.sock"});
                 if (!candidate_control_path || !candidate_data_path) continue;
+#endif
                 const EndpointConfig endpoint{root.c_str(), candidate_instance.c_str(),
                                               "control.sock", access,
                                               product_slug};
