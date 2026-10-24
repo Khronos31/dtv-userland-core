@@ -27,6 +27,20 @@ option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build platform client/runtime helpers" O
 option(DTV_USERLAND_BUILD_HOST_CTL "Build the host control CLI" OFF)
 option(DTV_USERLAND_BUILD_HOST_TS "Build the shared host TS client" OFF)
 option(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT "Build the host listener and enclosure Context" OFF)
+option(DTV_USERLAND_BUILD_WINDOWS_WINSCARD
+    "Build the optional GPL-2.0-only Windows WinSCard adapter" OFF)
+set(DTV_WINDOWS_WINSCARD_NAMESPACE_COMPONENT "" CACHE STRING
+    "Product runtime namespace component required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_VERSION_COMPONENT "" CACHE STRING
+    "Product runtime version component required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_PRODUCT_SLUG "" CACHE STRING
+    "Expected UDTV LIST producer.product required by the WinSCard adapter")
+set(DTV_WINDOWS_WINSCARD_READER_PREFIX "" CACHE STRING
+    "Reader display prefix shared by the WinSCard client and proxy")
+set(DTV_WINDOWS_WINSCARD_RUNTIME_ENV "" CACHE STRING
+    "Runtime-root override environment variable for the WinSCard proxy")
+set(DTV_WINDOWS_WINSCARD_HOST_INCLUDE_DIRS "" CACHE STRING
+    "Private product host facade include directories required by the WinSCard adapter")
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -386,6 +400,9 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
         target_compile_options(dtv_userland_host_runtime PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+endif()
+if(DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
+    include(adapters/windows_winscard/CMakeLists.txt)
 endif()
 if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
     install(TARGETS dtv_userland_host_listener_context
