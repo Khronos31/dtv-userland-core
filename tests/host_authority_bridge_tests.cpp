@@ -90,8 +90,9 @@ public:
             capture_condition.notify_all();
             capture_condition.wait(lock, [this] { return capture_released; });
         }
-        return fail_capture_start ? Result<void>::failure(Error::UNSUPPORTED)
-                                  : Result<void>::success();
+        return fail_capture_start && receiver == 2U
+            ? Result<void>::failure(Error::UNSUPPORTED)
+            : Result<void>::success();
     }
     Result<void> stop_capture(std::uint8_t, ipc::System) noexcept override
     {
@@ -422,8 +423,42 @@ bool acquire(HostAuthorityBridge& bridge, std::uint8_t slot, std::uint16_t recei
     return false;
 }
 
+bool acquire_rejected(HostAuthorityBridge& bridge, std::uint8_t slot,
+                      std::uint16_t receiver, Error expected,
+                      std::uint32_t request_id = 2U)
+{
+    std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
+    const auto size = w::encode_acquire_request({make_list().epoch, receiver},
+        {payload.data(), payload.size()});
+    if (!size) return false;
+    w::Context context;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    auto reply = bridge.accept(slot, frame(w::kOpcodeAcquire, request_id,
+        {payload.data(), size.value()}), context, snapshot, 0U);
+    const auto matches_error = [expected](const dtv::userland::detail::AuthorityReply& value) {
+        const auto header = w::decode_header({value.frame.data, w::kHeaderSize});
+        if (value.action != w::InboundAction::respond || !header ||
+            header.value().kind != w::Kind::error_response) return false;
+        const auto error = w::decode_error_response(
+            {value.frame.data + w::kHeaderSize, header.value().payload_length});
+        return error && error.value().error.code == static_cast<std::uint32_t>(expected);
+    };
+    if (reply.queued) {
+        const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (std::chrono::steady_clock::now() < until) {
+            (void)bridge.poll();
+            reply = bridge.take_response(slot);
+            if (reply.action == w::InboundAction::respond) break;
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    return matches_error(reply) && bridge.response_sent(slot, true) == Error::OK;
+}
+
 bool release(HostAuthorityBridge& bridge, std::uint8_t slot,
-             const w::Uuid& epoch, std::uint64_t lease)
+             const w::Uuid& epoch, std::uint64_t lease,
+             std::uint32_t request_id = 4U)
 {
     std::array<std::uint8_t, 64U> payload{};
     const auto size = w::encode_release_request({epoch, lease},
@@ -431,7 +466,7 @@ bool release(HostAuthorityBridge& bridge, std::uint8_t slot,
     if (!size) return false;
     w::Context context;
     w::Snapshot snapshot;
-    const auto reply = bridge.accept(slot, frame(w::kOpcodeRelease, 4U,
+    const auto reply = bridge.accept(slot, frame(w::kOpcodeRelease, request_id,
         {payload.data(), size.value()}), context, snapshot, 0U);
     if (!reply.queued) return false;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -609,7 +644,7 @@ bool test_cleanup_requires_quiesced_terminal()
     if (!fixture.start()) return false;
     const auto data = fixture.bridge->open_data_session();
     if (!data || !fixture.attach(data.value())) return false;
-    fixture.bridge->force_next_terminal_unquiesced_for_test();
+    fixture.bridge->force_terminal_unquiesced_for_test(true);
     const Error closed = fixture.bridge->close_data_session(data.value());
     if (closed != Error::OK && closed != Error::RESOURCE_LIMIT) return false;
     const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
@@ -622,7 +657,8 @@ bool test_cleanup_requires_quiesced_terminal()
     const bool passed = fixture.bridge->terminal_observed_for_test() &&
         fixture.bridge->forced_terminal_unquiesced_for_test() &&
         fixture.bridge->quiesced_guard_rejected_for_test() &&
-        fixture.bridge->counts().fatal_unresolved == 1U;
+        fixture.bridge->counts().fatal_unresolved == 1U &&
+        counts.fatal_unresolved == 1U;
     if (!passed) {
         std::cerr << "M1 unexpected state fatal=" << fixture.bridge->counts().fatal_unresolved
                   << " data=" << counts.fatal_unresolved << "/" << counts.free
@@ -1645,7 +1681,7 @@ bool failed_attach_cleanup_case(bool missing_final_when_unattached,
                   << static_cast<unsigned>(prepared) << "\n";
         return false;
     }
-    if (force_unquiesced) bridge.force_next_terminal_unquiesced_for_test();
+    if (force_unquiesced) bridge.force_terminal_unquiesced_for_test(true);
     HostAuthorityAttachResult result{};
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(5);
     while (!result.ready && std::chrono::steady_clock::now() < deadline) {
@@ -1673,6 +1709,7 @@ bool failed_attach_cleanup_case(bool missing_final_when_unattached,
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
         }
         const bool rejected = bridge.counts().fatal_unresolved != 0U &&
+            bridge.data_counts().fatal_unresolved == 1U &&
             bridge.forced_terminal_unquiesced_for_test() &&
             bridge.quiesced_guard_rejected_for_test();
         if (!rejected)
@@ -1742,9 +1779,82 @@ bool failed_attach_cleanup_case(bool missing_final_when_unattached,
     counts = bridge.data_counts();
     if (counts.free != kHostAuthoritySessionCapacity || counts.tombstone != 0U ||
         counts.fatal_unresolved != 0U) return false;
-    failed_stage = "fixture owner close";
-    bridge.close_session_for_test(control.value());
-    bridge.close_session_for_test(other_control.value());
+    failed_stage = "normal owner disconnect after quiesced failed ATTACH";
+    if (bridge.close_session(control.value()) != Error::OK) return false;
+    const auto owner_closed_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (bridge.client_id(control.value()) != 0U &&
+           bridge.counts().fatal_unresolved == 0U &&
+           std::chrono::steady_clock::now() < owner_closed_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto owner_status = tuner.engine_status();
+    if (!owner_status || bridge.client_id(control.value()) != 0U ||
+        bridge.counts().fatal_unresolved != 0U ||
+        !owner_status.value().leased[2U]) {
+        std::cerr << "failed ATTACH disconnect fatal="
+                  << bridge.counts().fatal_unresolved << " owner="
+                  << bridge.client_id(control.value()) << " leased="
+                  << (owner_status && owner_status.value().leased[2U]) << "\n";
+        return false;
+    }
+    failed_stage = "surviving control LIST";
+    const auto listed_after_close = bridge.accept(other_control.value(),
+        frame(w::kOpcodeList, 3U, {list_payload.data(), list_size.value()}),
+        context, snapshot, 103U);
+    const auto listed_after_close_header = w::decode_header(
+        {listed_after_close.frame.data, w::kHeaderSize});
+    if (listed_after_close.action != w::InboundAction::respond ||
+        !listed_after_close_header ||
+        listed_after_close_header.value().kind != w::Kind::response ||
+        listed_after_close_header.value().opcode != w::kOpcodeList ||
+        bridge.response_sent(other_control.value(), true) != Error::OK ||
+        bridge.counts().fatal_unresolved != 0U) return false;
+
+    failed_stage = "new client receiver quarantine";
+    const auto new_control = bridge.open_session();
+    if (!new_control || !hello(bridge, new_control.value()) ||
+        !acquire_rejected(bridge, new_control.value(), 2U, Error::BUSY)) return false;
+    std::uint64_t new_lease = 0U;
+    if (!acquire(bridge, new_control.value(), 3U, new_lease, 3U) ||
+        !tune(bridge, new_control.value(), list.epoch, new_lease, 4U)) return false;
+    const auto new_status = tuner.engine_status();
+    if (!new_status || !new_status.value().leased[2U] ||
+        !new_status.value().leased[3U] ||
+        bridge.counts().fatal_unresolved != 0U) return false;
+
+    failed_stage = "other receiver release";
+    if (!release(bridge, new_control.value(), list.epoch, new_lease, 5U) ||
+        bridge.counts().fatal_unresolved != 0U) return false;
+    const auto released_status = tuner.engine_status();
+    if (!released_status || !released_status.value().leased[2U] ||
+        released_status.value().leased[3U]) {
+        return false;
+    }
+
+    failed_stage = "remaining sessions close and shutdown";
+    if (bridge.close_session(new_control.value()) != Error::OK ||
+        bridge.close_session(other_control.value()) != Error::OK) return false;
+    const auto sessions_closed_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while ((bridge.client_id(new_control.value()) != 0U ||
+            bridge.client_id(other_control.value()) != 0U) &&
+           bridge.counts().fatal_unresolved == 0U &&
+           std::chrono::steady_clock::now() < sessions_closed_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (bridge.counts().fatal_unresolved != 0U ||
+        bridge.begin_shutdown() != Error::OK) return false;
+    const auto stopped_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < stopped_until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!bridge.stopped() || bridge.shutdown_result() != Error::OK ||
+        bridge.counts().fatal_unresolved != 0U) return false;
     cleanup.complete = static_cast<bool>(created.value()->stop_and_join());
     return cleanup.complete;
 }

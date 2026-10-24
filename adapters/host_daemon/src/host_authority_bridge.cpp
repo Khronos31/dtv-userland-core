@@ -710,7 +710,8 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
             terminal_observed_ = static_cast<bool>(terminal);
             terminal_quiesced_ = quiesced;
-            if (force_next_terminal_unquiesced_ && terminal) {
+            if ((force_next_terminal_unquiesced_ || force_terminal_unquiesced_) &&
+                terminal) {
                 quiesced = false;
                 force_next_terminal_unquiesced_ = false;
                 forced_terminal_unquiesced_ = true;
@@ -866,6 +867,12 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
             }
         }
         if (value.error != Error::OK) {
+            if (!fatal_ && slot.state == SlotState::tombstone &&
+                value.error == Error::NOT_READY &&
+                slot.quiesced_sticky_cleanup_error != Error::OK) {
+                finish_slot(index);
+                return;
+            }
             slot.state = SlotState::fatal_unresolved;
             enter_fatal();
             return;
@@ -949,6 +956,7 @@ void HostAuthorityBridge::finish_slot(std::size_t index) noexcept
     slot.deferred_session = false;
     slot.close_pending = false;
     slot.response_ready = false;
+    slot.quiesced_sticky_cleanup_error = Error::OK;
 }
 
 void HostAuthorityBridge::close_all() noexcept
@@ -1038,7 +1046,10 @@ void HostAuthorityBridge::close_owned_streams(std::size_t index) noexcept
 
         const auto stopped = tuner_service_.authority_stop_stream_v1(
             owner.client_id, stream.lease_id, stream.stream_id);
-        if (stopped && stopped.value().quiesced) {
+        if (stopped && stopped.value().quiesced &&
+            stopped.value().stream_id == stream.stream_id) {
+            if (stopped.value().cleanup_error != Error::OK)
+                owner.quiesced_sticky_cleanup_error = stopped.value().cleanup_error;
             stream = Slot::StreamOwner{};
             continue;
         }
@@ -1047,6 +1058,8 @@ void HostAuthorityBridge::close_owned_streams(std::size_t index) noexcept
                 owner.client_id, stream.lease_id);
             if (last && last.value().stream_id == stream.stream_id &&
                 last.value().quiesced) {
+                if (last.value().cleanup_error != Error::OK)
+                    owner.quiesced_sticky_cleanup_error = last.value().cleanup_error;
                 stream = Slot::StreamOwner{};
                 continue;
             }

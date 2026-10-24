@@ -60,7 +60,7 @@ public:
                                       ipc::System system) const noexcept override
     {
         TunerStrictProfile profile;
-        if (receiver == 2U && system == ipc::System::ISDB_T) {
+        if ((receiver == 2U || receiver == 3U) && system == ipc::System::ISDB_T) {
             profile.native_hz = true;
             profile.min_hz = 400000000U;
             profile.max_hz = 800000000U;
@@ -90,10 +90,11 @@ public:
     {
         return Result<void>::success();
     }
-    Result<void> start_capture(std::uint8_t, ipc::System) noexcept override
+    Result<void> start_capture(std::uint8_t receiver, ipc::System) noexcept override
     {
-        return fail_capture_start ? Result<void>::failure(Error::UNSUPPORTED)
-                                  : Result<void>::success();
+        return fail_capture_start && receiver == 2U
+            ? Result<void>::failure(Error::UNSUPPORTED)
+            : Result<void>::success();
     }
     Result<void> stop_capture(std::uint8_t, ipc::System) noexcept override
     {
@@ -125,11 +126,16 @@ public:
 
 class Stream final : public TunerStreamControl {
 public:
+    explicit Stream(bool missing_final_when_unattached = false) noexcept
+        : missing_final_when_unattached_(missing_final_when_unattached)
+    {
+    }
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex_);
         identity_ = attachment;
         attached_ = true;
+        ever_attached_ = true;
         packets_remaining_ = 1U;
         counters_ = TunerStreamCounters{};
         counters_.packets = 1U;
@@ -156,6 +162,8 @@ public:
         const TunerAttachment& attachment) const noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        if (!attached_ && missing_final_when_unattached_ && !ever_attached_)
+            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
         return same(attachment) ? Result<TunerStreamFinalSnapshot>::success(final_)
                                 : Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
     }
@@ -194,6 +202,8 @@ private:
     TunerStreamCounters counters_{};
     TunerStreamFinalSnapshot final_{};
     std::size_t packets_remaining_ = 0U;
+    bool missing_final_when_unattached_ = false;
+    bool ever_attached_ = false;
     bool attached_ = false;
 };
 
@@ -221,8 +231,10 @@ private:
 class Family final : public host_runtime::EnclosureFamily {
 public:
     explicit Family(std::shared_ptr<std::atomic<bool>> shutdown,
-                    bool fail_capture_start = false)
-        : shutdown_(std::move(shutdown))
+                    bool fail_capture_start = false,
+                    bool missing_final_when_unattached = false)
+        : shutdown_(std::move(shutdown)),
+          stream_(missing_final_when_unattached)
     {
         tuner_.fail_capture_start = fail_capture_start;
     }
@@ -268,13 +280,19 @@ w::ListResponse make_list()
     list.enclosure.value.id = 0U;
     list.enclosure.value.identity.serial_state = w::IdentitySerialState::absent;
     list.receivers.present = true;
-    list.receivers.value.count = 1U;
+    list.receivers.value.count = 2U;
     auto& receiver = list.receivers.value.items[0U];
     receiver.id = 2U;
     receiver.systems.mask = 1U;
     receiver.binding.present = true;
     receiver.binding.value.function_id = 1U;
     receiver.binding.value.local_id = 0U;
+    auto& other_receiver = list.receivers.value.items[1U];
+    other_receiver.id = 3U;
+    other_receiver.systems.mask = 1U;
+    other_receiver.binding.present = true;
+    other_receiver.binding.value.function_id = 1U;
+    other_receiver.binding.value.local_id = 1U;
     list.readers.present = true;
     return list;
 }
@@ -303,7 +321,8 @@ bool read_frame(w::TimedClientTransport& transport, w::Frame& frame) noexcept
     return true;
 }
 
-bool lifecycle(bool fail_capture_start = false)
+bool lifecycle(bool fail_capture_start = false,
+               bool missing_final_when_unattached = false)
 {
 #if defined(_WIN32)
     const char* runtime_parent = std::getenv("LOCALAPPDATA");
@@ -345,7 +364,8 @@ bool lifecycle(bool fail_capture_start = false)
     }
 #endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
-    std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start));
+    std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start,
+                                               missing_final_when_unattached));
     ContextConfig config;
     config.runtime_directory = path;
     config.product = "listener-test";
@@ -380,6 +400,10 @@ bool lifecycle(bool fail_capture_start = false)
     std::atomic<bool> serving{true};
     std::atomic<unsigned> poll_errors{0U};
     std::atomic<unsigned> last_poll_error{0U};
+    std::unique_ptr<w::TimedClientTransport> surviving_control;
+    std::unique_ptr<w::TimedClientTransport> same_receiver_control_transport;
+    std::unique_ptr<w::TimedClientTransport> other_receiver_control_transport;
+    std::unique_ptr<w::TimedClientTransport> other_data_transport;
     std::thread server([&] {
         while (serving.load(std::memory_order_acquire)) {
             const auto result = context->poll_once(Timeout{100U});
@@ -452,17 +476,93 @@ bool lifecycle(bool fail_capture_start = false)
                     static_cast<std::uint32_t>(Error::UNSUPPORTED)) break;
             data_transport->close();
             data_transport.reset();
-            stage = "failed ATTACH other connection isolation";
+            stage = "failed ATTACH owner disconnect";
             auto other_control = host_runtime::connect_control(
                 control_endpoint, Timeout{5000U});
             if (!other_control) break;
-            const auto status = w::fetch_status(*other_control.value(), Timeout{5000U});
+            control.value()->close();
+            control.value().reset();
+            surviving_control = std::move(other_control.value());
+            const auto status = w::fetch_status(*surviving_control, Timeout{5000U});
             if (!status) break;
+
+            stage = "failed receiver lease remains isolated";
+            auto same_receiver_control = host_runtime::connect_control(
+                control_endpoint, Timeout{5000U});
+            if (!same_receiver_control) break;
+            same_receiver_control_transport =
+                std::move(same_receiver_control.value());
+            w::RecordingOptions same_receiver_options;
+            same_receiver_options.receiver_id = 2U;
+            same_receiver_options.tune.epoch = config.server.epoch;
+            same_receiver_options.tune.system = w::System::isdb_t;
+            same_receiver_options.tune.frequency_hz = 473142857U;
+            same_receiver_options.tune.timeout_ms = 1000U;
+            const auto blocked = w::begin_recording(*same_receiver_control_transport,
+                same_receiver_options, Timeout{5000U});
+            if (blocked || blocked.error != Error::BUSY ||
+                blocked.remote_error_code != static_cast<std::uint32_t>(Error::BUSY))
+                break;
+
+            stage = "other receiver control connect";
+            auto other_receiver_control = host_runtime::connect_control(
+                control_endpoint, Timeout{5000U});
+            if (!other_receiver_control) break;
+            other_receiver_control_transport =
+                std::move(other_receiver_control.value());
+            stage = "other receiver begin recording";
+            w::RecordingOptions other_options = same_receiver_options;
+            other_options.receiver_id = 3U;
+            auto other_recording = w::begin_recording(
+                *other_receiver_control_transport, other_options, Timeout{10000U});
+            if (!other_recording) {
+                std::fprintf(stderr, "other receiver begin error=%u remote=%u\n",
+                    static_cast<unsigned>(other_recording.error),
+                    other_recording.remote_error_code);
+                break;
+            }
+            stage = "other receiver data connect";
             auto other_data = host_runtime::connect_endpoint(
                 data_endpoint, Timeout{5000U});
             if (!other_data) break;
-            other_data.value()->close();
-            other_control.value()->close();
+            other_data_transport = std::move(other_data.value());
+            stage = "other receiver attach write";
+            w::AttachRequest other_attach;
+            other_attach.epoch = other_recording.session.epoch;
+            other_attach.lease_id = other_recording.session.lease_id;
+            other_attach.stream_id = other_recording.session.stream_id;
+            other_attach.attach_token = other_recording.session.attach_token;
+            std::array<std::uint8_t, 64U> other_attach_payload{};
+            const auto other_attach_size = w::encode_attach_request(other_attach,
+                {other_attach_payload.data(), other_attach_payload.size()});
+            std::array<std::uint8_t, w::kHeaderSize + 64U> other_attach_frame{};
+            if (!other_attach_size || !w::encode_header({w::Kind::request,
+                    w::kOpcodeAttachStream, 1U,
+                    static_cast<std::uint32_t>(other_attach_size.value())},
+                    {other_attach_frame.data(), w::kHeaderSize})) break;
+            std::memcpy(other_attach_frame.data() + w::kHeaderSize,
+                        other_attach_payload.data(), other_attach_size.value());
+            if (!other_data_transport->write_all(
+                    {other_attach_frame.data(), w::kHeaderSize + other_attach_size.value()},
+                    Timeout{5000U})) break;
+            stage = "other receiver attach response";
+            w::Frame other_attach_response;
+            if (!read_frame(*other_data_transport, other_attach_response) ||
+                other_attach_response.header.kind != w::Kind::response ||
+                other_attach_response.header.opcode != w::kOpcodeAttachStream) break;
+            const auto other_attached = w::decode_attach_response(
+                other_attach_response.payload);
+            if (!other_attached ||
+                other_attached.value().stream_id != other_recording.session.stream_id) break;
+            stage = "other receiver TS_DATA";
+            w::Frame other_ts_frame;
+            if (!read_frame(*other_data_transport, other_ts_frame) ||
+                other_ts_frame.header.kind != w::Kind::event ||
+                other_ts_frame.header.opcode != w::kOpcodeTsDataEvent) break;
+            const auto other_ts = w::decode_ts_data(other_ts_frame.payload);
+            if (!other_ts || other_ts.value().stream_id !=
+                    other_recording.session.stream_id ||
+                other_ts.value().packets.size != 188U) break;
             passed = true;
             break;
         }
@@ -493,7 +593,7 @@ bool lifecycle(bool fail_capture_start = false)
         passed = true;
     } while (false);
     if (data_transport) data_transport->close();
-    if (control) control.value()->close();
+    if (control && control.value()) control.value()->close();
     serving.store(false, std::memory_order_release);
     const auto closed = context->close(Timeout{5000U});
     server.join();
@@ -504,9 +604,12 @@ bool lifecycle(bool fail_capture_start = false)
         poll_errors.load(std::memory_order_relaxed));
     if (!passed) std::fprintf(stderr, "last poll error=%u\n",
         last_poll_error.load(std::memory_order_relaxed));
-    if (fail_capture_start)
-        return passed && !closed && closed.error() == Error::INTERNAL &&
-            !shutdown->load(std::memory_order_acquire);
+    if (passed && (!closed || closed.value() != CloseState::quiesced ||
+        !shutdown->load(std::memory_order_acquire)))
+        std::fprintf(stderr, "close result=%u state=%u family=%u\n",
+            static_cast<unsigned>(closed.error()),
+            closed ? static_cast<unsigned>(closed.value()) : 255U,
+            static_cast<unsigned>(shutdown->load(std::memory_order_acquire)));
     return passed && closed && closed.value() == CloseState::quiesced &&
         shutdown->load(std::memory_order_acquire);
 }
@@ -515,5 +618,5 @@ bool lifecycle(bool fail_capture_start = false)
 
 int main()
 {
-    return lifecycle() && lifecycle(true) ? 0 : 1;
+    return lifecycle() && lifecycle(true, false) && lifecycle(true, true) ? 0 : 1;
 }

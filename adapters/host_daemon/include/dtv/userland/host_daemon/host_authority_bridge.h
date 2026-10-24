@@ -176,6 +176,10 @@ public:
     {
         force_next_terminal_unquiesced_ = true;
     }
+    void force_terminal_unquiesced_for_test(bool force) noexcept
+    {
+        force_terminal_unquiesced_ = force;
+    }
     bool terminal_observed_for_test() const noexcept { return terminal_observed_; }
     bool terminal_quiesced_for_test() const noexcept { return terminal_quiesced_; }
     bool forced_terminal_unquiesced_for_test() const noexcept
@@ -223,6 +227,7 @@ private:
         bool deferred_session = false;
         bool close_pending = false;
         bool response_ready = false;
+        Error quiesced_sticky_cleanup_error = Error::OK;
     };
     struct DataSlot final {
         std::uint64_t generation = 0U;
@@ -281,6 +286,7 @@ private:
     bool stopped_ = false;
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
     bool force_next_terminal_unquiesced_ = false;
+    bool force_terminal_unquiesced_ = false;
     bool terminal_observed_ = false;
     bool terminal_quiesced_ = false;
     bool forced_terminal_unquiesced_ = false;
