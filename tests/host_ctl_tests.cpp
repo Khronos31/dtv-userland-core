@@ -68,6 +68,7 @@ bool help_text_matches_contract(const dtv::userland::host_ctl::Profile& profile)
     std::fclose(output);
     return status == 0 && text.find(
         "--runtime-dir overrides the standard runtime root; --instance is required unless --device is supplied") !=
+        std::string::npos && text.find("lnb-on (unsupported), lnb-off (unsupported)") !=
         std::string::npos;
 }
 
@@ -89,6 +90,12 @@ int main()
     if (dtv::userland::host_ctl::run_control_cli(2, version, profile) != 0) return 1;
     const char* unsupported[] = {"sianoctl", "card-status"};
     if (dtv::userland::host_ctl::run_control_cli(2, unsupported, profile) != 3) return 1;
+    const char* unsupported_lnb_on[] = {"sianoctl", "lnb-on"};
+    if (dtv::userland::host_ctl::run_control_cli(2, unsupported_lnb_on, profile) != 3)
+        return 1;
+    const char* unsupported_lnb_off[] = {"sianoctl", "lnb-off"};
+    if (dtv::userland::host_ctl::run_control_cli(2, unsupported_lnb_off, profile) != 3)
+        return 1;
     const char* unsupported_atr[] = {"sianoctl", "card-atr"};
     if (dtv::userland::host_ctl::run_control_cli(2, unsupported_atr, profile) != 3) return 1;
     const char* unsupported_apdu[] = {"sianoctl", "card-apdu", "00:01"};

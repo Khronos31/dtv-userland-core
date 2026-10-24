@@ -412,9 +412,13 @@ struct FakeService final {
     std::atomic<bool> saw_status{false};
     std::atomic<bool> saw_stop{false};
     std::atomic<bool> saw_release{false};
+    std::atomic<bool> saw_lnb_on{false};
+    std::atomic<bool> saw_lnb_off{false};
+    std::atomic<unsigned int> lnb_power_count{0U};
     std::atomic<unsigned int> stop_count{0U};
     std::atomic<unsigned int> release_count{0U};
     bool unsupported_status = false;
+    bool refuse_lnb_power = false;
     std::mutex stop_mutex;
     std::condition_variable stop_changed;
 
@@ -542,6 +546,24 @@ struct FakeService final {
                                           response, &wire::encode_release_response);
             if (sent) saw_release.store(true);
             return sent;
+        }
+        if (request.kind == wire::ControlRequestKind::lnb_power) {
+            lnb_power_count.fetch_add(1U);
+            if (refuse_lnb_power) {
+                std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> output{};
+                const auto frame = wire::encode_error_frame(
+                    request.opcode, request.request_id, hello.epoch,
+                    static_cast<std::uint32_t>(Error::NOT_READY), "lnb_power",
+                    wire::Scope{}, MutableByteView{output.data(), output.size()});
+                return frame && send_all(peer, output.data(), frame.value());
+            }
+            wire::LnbPowerResponse response{};
+            response.epoch = hello.epoch;
+            response.enabled = request.lnb_power.enabled;
+            if (response.enabled) saw_lnb_on.store(true);
+            else saw_lnb_off.store(true);
+            return send_record(peer, request.opcode, request.request_id, response,
+                               &wire::encode_lnb_power_response);
         }
         return false;
     }
@@ -858,6 +880,114 @@ bool test_host_ctl_real_server()
            default_list_status == 0 && default_status_status == 0 && server.good.load();
 }
 
+bool test_host_ctl_lnb_commands()
+{
+    RuntimeTree tree;
+    RuntimeTree empty_root;
+    if (!tree.create() || !empty_root.create()) return false;
+#if !defined(_WIN32)
+    const std::string parent_root = tree.root;
+    tree.root = child_path(parent_root, ("dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()))).c_str());
+    if (!make_directory(tree.root)) return false;
+    tree.directories.push_back(tree.root);
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
+    if (!saved_xdg.set(empty_root.root.c_str()) || !saved_tmp.set(parent_root.c_str()))
+        return false;
+#endif
+    if (!tree.create_instance("lnb-live")) return false;
+    Listener control;
+    if (!control.bind(tree.root, "lnb-live", "control.sock")) return false;
+    FakeService service("lnb-live");
+    auto& capabilities = service.list.receivers.value.items[0U].capabilities;
+    capabilities.controls = wire::kControlBitLnb;
+    capabilities.lnb.values.count = 2U;
+    capabilities.lnb.values.items[0U] = 0U;
+    capabilities.lnb.values.items[1U] = 15U;
+#if !defined(_WIN32)
+    FakeControlServer server(control, service, 4U);
+#else
+    FakeControlServer server(control, service, 2U);
+#endif
+    server.start();
+
+    dtv::userland::host_ctl::Profile profile{};
+    profile.tool_name = "fake-ctl";
+    profile.product_slug = "test-product";
+    profile.product_version = "1.0.0-test";
+    profile.product = dtv::userland::identity::Product::px4;
+    profile.lnb_power_supported = true;
+    const char* on_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
+                             "--instance", "lnb-live", "lnb-on"};
+    const char* off_args[] = {"fake-ctl", "--instance", "lnb-live", "lnb-off"};
+    const int on_status = dtv::userland::host_ctl::run_control_cli(6, on_args, profile);
+#if !defined(_WIN32)
+    const int off_status = dtv::userland::host_ctl::run_control_cli(4, off_args, profile);
+#else
+    const int off_status = 0;
+#endif
+    server.join();
+#if !defined(_WIN32)
+    return on_status == 0 && off_status == 0 && server.good.load() &&
+           service.lnb_power_count.load() == 2U && service.saw_lnb_on.load() &&
+           service.saw_lnb_off.load();
+#else
+    return on_status == 0 && off_status == 0 && server.good.load() &&
+           service.lnb_power_count.load() == 1U && service.saw_lnb_on.load() &&
+           !service.saw_lnb_off.load();
+#endif
+}
+
+bool test_host_ctl_lnb_unsupported_by_device()
+{
+    RuntimeTree tree;
+    if (!tree.create() || !tree.create_instance("lnb-unsupported")) return false;
+    Listener control;
+    if (!control.bind(tree.root, "lnb-unsupported", "control.sock")) return false;
+    FakeService service("lnb-unsupported");
+    FakeControlServer server(control, service, 1U);
+    server.start();
+    dtv::userland::host_ctl::Profile profile{};
+    profile.tool_name = "fake-ctl";
+    profile.product_slug = "test-product";
+    profile.product_version = "1.0.0-test";
+    profile.product = dtv::userland::identity::Product::px4;
+    profile.lnb_power_supported = true;
+    const char* arguments[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
+                               "--instance", "lnb-unsupported", "lnb-on"};
+    const int status = dtv::userland::host_ctl::run_control_cli(6, arguments, profile);
+    server.join();
+    return status == 3 && server.good.load() && service.lnb_power_count.load() == 0U;
+}
+
+bool test_host_ctl_lnb_remote_refusal()
+{
+    RuntimeTree tree;
+    if (!tree.create() || !tree.create_instance("lnb-refused")) return false;
+    Listener control;
+    if (!control.bind(tree.root, "lnb-refused", "control.sock")) return false;
+    FakeService service("lnb-refused");
+    auto& capabilities = service.list.receivers.value.items[0U].capabilities;
+    capabilities.controls = wire::kControlBitLnb;
+    capabilities.lnb.values.count = 2U;
+    capabilities.lnb.values.items[0U] = 0U;
+    capabilities.lnb.values.items[1U] = 15U;
+    service.refuse_lnb_power = true;
+    FakeControlServer server(control, service, 2U);
+    server.start();
+    dtv::userland::host_ctl::Profile profile{};
+    profile.tool_name = "fake-ctl";
+    profile.product_slug = "test-product";
+    profile.product_version = "1.0.0-test";
+    profile.product = dtv::userland::identity::Product::px4;
+    profile.lnb_power_supported = true;
+    const char* arguments[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
+                               "--instance", "lnb-refused", "lnb-on"};
+    const int status = dtv::userland::host_ctl::run_control_cli(6, arguments, profile);
+    server.join();
+    return status == 3 && server.good.load() && service.lnb_power_count.load() == 1U;
+}
+
 bool run_ts_lifecycle(bool close_before_stream_end,
                       bool overlong_first_candidate = false)
 {
@@ -1088,6 +1218,9 @@ int main()
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
 #endif
     const bool ctl = test_host_ctl_real_server();
+    const bool lnb_ctl = test_host_ctl_lnb_commands();
+    const bool lnb_unsupported = test_host_ctl_lnb_unsupported_by_device();
+    const bool lnb_refused = test_host_ctl_lnb_remote_refusal();
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
 #if !defined(_WIN32)
@@ -1103,6 +1236,9 @@ int main()
     (void)::WSACleanup();
 #endif
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
+    if (lnb_ctl) std::puts("fake_server_host_ctl_lnb_on_off=PASS");
+    if (lnb_unsupported) std::puts("fake_server_host_ctl_lnb_unsupported=PASS");
+    if (lnb_refused) std::puts("fake_server_host_ctl_lnb_remote_refusal=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
@@ -1111,5 +1247,6 @@ int main()
     if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && ts && eof && overlong && oom && unsupported && not_ready && security ? 0 : 1;
+    return ctl && lnb_ctl && lnb_unsupported && lnb_refused && ts && eof && overlong &&
+           oom && unsupported && not_ready && security ? 0 : 1;
 }
