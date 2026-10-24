@@ -27,6 +27,8 @@ option(DTV_USERLAND_BUILD_HOST_RUNTIME "Build platform client/runtime helpers" O
 option(DTV_USERLAND_BUILD_HOST_CTL "Build the host control CLI" OFF)
 option(DTV_USERLAND_BUILD_HOST_TS "Build the shared host TS client" OFF)
 option(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT "Build the host listener and enclosure Context" OFF)
+option(DTV_USERLAND_BUILD_WINDOWS_WINSCARD
+    "Build the optional GPL-2.0-only Windows WinSCard adapter" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -386,6 +388,9 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
         target_compile_options(dtv_userland_host_runtime PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+endif()
+if(DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
+    include(adapters/windows_winscard/CMakeLists.txt)
 endif()
 if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
     install(TARGETS dtv_userland_host_listener_context
@@ -783,6 +788,19 @@ install(FILES
 install(FILES LICENSE DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core)
 
 if(DTV_USERLAND_BUILD_TESTING)
+    if(WIN32 AND DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
+        add_executable(windows_winscard_native_fixture_tests
+            tests/windows_winscard_native_fixture_tests.cpp)
+        target_include_directories(windows_winscard_native_fixture_tests PRIVATE
+            adapters/windows_winscard)
+        target_link_libraries(windows_winscard_native_fixture_tests PRIVATE
+            dtv_windows_winscard_client dtv::control dtv::host_runtime
+            ws2_32 bcrypt advapi32)
+        add_dependencies(windows_winscard_native_fixture_tests dtv_windows_winscard)
+        add_test(NAME windows_winscard_native_fixture_tests
+            COMMAND windows_winscard_native_fixture_tests $<TARGET_FILE:dtv_windows_winscard>)
+        set_tests_properties(windows_winscard_native_fixture_tests PROPERTIES TIMEOUT 60)
+    endif()
     if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
         add_library(dtv_userland_host_listener_context_test STATIC
             adapters/host_listener_context/src/enclosure_context.cpp

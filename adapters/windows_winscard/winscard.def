@@ -1,0 +1,15 @@
+LIBRARY "WinSCard"
+EXPORTS
+    SCardConnectA
+    SCardConnectW
+    SCardDisconnect
+    SCardEstablishContext
+    SCardListReadersA
+    SCardListReadersW
+    SCardReleaseContext
+    SCardTransmit
+    SCardIsValidContext
+    SCardFreeMemory
+    SCardStatusW
+    SCardGetStatusChangeW
+    g_rgSCardT1Pci DATA
