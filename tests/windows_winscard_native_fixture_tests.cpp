@@ -187,7 +187,11 @@ private:
             }
             const auto size = wire::encode_status_frame(request.request_id, status, list_,
                 output);
-            if (!size) return false;
+            if (!size) {
+                std::fprintf(stderr, "mock STATUS encode failed: %u\\n",
+                             static_cast<unsigned>(size.error()));
+                return false;
+            }
             reply_size = size.value();
             return true;
         }
