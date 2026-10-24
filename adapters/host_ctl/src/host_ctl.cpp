@@ -50,6 +50,8 @@ enum class Command : std::uint8_t {
     card_atr,
     card_reset,
     card_apdu,
+    lnb_on,
+    lnb_off,
 };
 
 struct Arguments final {
@@ -107,6 +109,8 @@ Command parse_command(std::string_view value) noexcept
     if (value == "card-atr") return Command::card_atr;
     if (value == "card-reset") return Command::card_reset;
     if (value == "card-apdu") return Command::card_apdu;
+    if (value == "lnb-on") return Command::lnb_on;
+    if (value == "lnb-off") return Command::lnb_off;
     return Command::none;
 }
 
@@ -114,6 +118,24 @@ bool is_card_command(Command command) noexcept
 {
     return command == Command::card_status || command == Command::card_atr ||
            command == Command::card_reset || command == Command::card_apdu;
+}
+
+bool supports_lnb_power(const wire::ListResponse& list) noexcept
+{
+    if (!list.receivers.present) return false;
+    for (std::size_t index = 0U; index < list.receivers.value.count; ++index) {
+        const wire::Capabilities& capabilities =
+            list.receivers.value.items[index].capabilities;
+        if ((capabilities.controls & wire::kControlBitLnb) == 0U) continue;
+        bool supports_off = false;
+        bool supports_on = false;
+        for (std::size_t value = 0U; value < capabilities.lnb.values.count; ++value) {
+            supports_off = supports_off || capabilities.lnb.values.items[value] == 0U;
+            supports_on = supports_on || capabilities.lnb.values.items[value] == 15U;
+        }
+        if (supports_off && supports_on) return true;
+    }
+    return false;
 }
 
 Arguments parse(int argc, const char* const* argv) noexcept
@@ -253,6 +275,10 @@ void usage(FILE* output, const Profile& profile) noexcept
     else
         std::fputs(", card-atr (unsupported), card-reset (unsupported), "
                    "card-apdu HEX (unsupported)", output);
+    if (profile.lnb_power_supported)
+        std::fputs(", lnb-on, lnb-off", output);
+    else
+        std::fputs(", lnb-on (unsupported), lnb-off (unsupported)", output);
     std::fputc('\n', output);
 }
 
@@ -315,6 +341,12 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         std::fprintf(stderr, "%s: CARD commands are unsupported by this product\n",
                      profile.tool_name);
         return exit_status(Error::UNSUPPORTED, true);
+    }
+    if ((arguments.command == Command::lnb_on || arguments.command == Command::lnb_off) &&
+        !profile.lnb_power_supported) {
+        std::fprintf(stderr, "%s: LNB power commands are unsupported by this product\n",
+                     profile.tool_name);
+        return exit_status(Error::UNSUPPORTED);
     }
 #if defined(_WIN32)
     if (arguments.group) {
@@ -404,6 +436,30 @@ int run_control_cli(int argc, const char* const* argv, const Profile& profile) n
         const auto expected = selector ? identity::resolve_selector(profile.product, selector.value())
                                        : Result<identity::ResolvedIdentity>::failure(Error::INVALID_ARGUMENT);
         if (!expected || !matches_device(snapshot.snapshot.list, expected.value(), profile)) return 3;
+    }
+    if (arguments.command == Command::lnb_on || arguments.command == Command::lnb_off) {
+        if (!supports_lnb_power(snapshot.snapshot.list)) {
+            std::fprintf(stderr, "%s: LNB power is unsupported by this device\n",
+                         profile.tool_name);
+            return exit_status(Error::UNSUPPORTED);
+        }
+        const bool enabled = arguments.command == Command::lnb_on;
+        transport->close();
+        owned_transport.reset();
+        if (const auto error = connect_control(); error != Error::OK) {
+            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
+                         static_cast<unsigned int>(error));
+            return exit_status(error);
+        }
+        const auto changed = wire::set_lnb_power(*transport, enabled, Timeout{5000U});
+        if (!changed) {
+            std::fprintf(stderr, "%s: LNB power failed (%u, remote=%u)\n",
+                         profile.tool_name, static_cast<unsigned int>(changed.error),
+                         static_cast<unsigned int>(changed.remote_error_code));
+            return exit_status(changed.error);
+        }
+        std::printf("lnb_15v_enabled=%s\n", changed.response.enabled ? "true" : "false");
+        return std::fflush(stdout) == 0 ? 0 : 70;
     }
     if (arguments.command == Command::card_status) {
         if (profile.internal_card_status_supported && !profile.card_supported) {
