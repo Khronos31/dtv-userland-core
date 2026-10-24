@@ -124,6 +124,10 @@ public:
         context_.state = wire::ContextState::ready;
         context_.instance.present = true;
         set_text(context_.instance.value, instance);
+        const auto list_error = wire::validate_list_response(list_);
+        if (list_error != dtv::userland::Error::OK)
+            std::fprintf(stderr, "mock LIST invalid: %u\\n",
+                         static_cast<unsigned>(list_error));
         server_socket_ = ::socket(AF_UNIX, SOCK_STREAM, 0);
         if (server_socket_ == INVALID_SOCKET) return;
         const std::string endpoint = (directory_ / L"control.sock").u8string();
@@ -174,9 +178,13 @@ private:
                                  &wire::encode_list_response, output, reply_size);
         if (request.kind == wire::ControlRequestKind::status) {
             wire::StatusResponse status{};
-            if (wire::build_status_shell(list_, context_, list_.snapshot,
-                                          request.status.scope, status) !=
-                dtv::userland::Error::OK) return false;
+            const auto error = wire::build_status_shell(list_, context_, list_.snapshot,
+                request.status.scope, status);
+            if (error != dtv::userland::Error::OK) {
+                std::fprintf(stderr, "mock STATUS invalid: %u\\n",
+                             static_cast<unsigned>(error));
+                return false;
+            }
             const auto size = wire::encode_status_frame(request.request_id, status, list_,
                 output);
             if (!size) return false;
