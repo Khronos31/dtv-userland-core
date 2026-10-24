@@ -132,7 +132,9 @@ public:
         if (endpoint.size() >= sizeof(address.sun_path)) return;
         std::memcpy(address.sun_path, endpoint.c_str(), endpoint.size() + 1U);
         if (::bind(server_socket_, reinterpret_cast<const SOCKADDR*>(&address),
-                   sizeof(address)) != 0 || ::listen(server_socket_, 8) != 0) return;
+                   sizeof(address)) != 0 || ::listen(server_socket_, 8) != 0 ||
+            !windows_security::set_current_user_owner_and_dacl(
+                (directory_ / L"control.sock").c_str())) return;
         valid_ = true;
         worker_ = std::thread([this]() noexcept { run(); });
     }
