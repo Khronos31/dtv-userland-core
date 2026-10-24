@@ -152,26 +152,40 @@ bool status_identity_matches(const StatusSnapshot& snapshot,
                std::memcmp(actual.serial.value.bytes.data(), expected.serial.bytes.data(),
                            expected.serial.length) == 0;
     }
-    if (expected.kind != identity::IdentityKind::usb_topology ||
+    if (!snapshot.list.enclosure.present ||
+        expected.kind != identity::IdentityKind::usb_topology ||
         expected.topology.count == 0U ||
         expected.topology.count > expected.topology.paths.size() ||
-        snapshot.list.functions.count != expected.topology.count) return false;
-    for (std::size_t index = 0U; index < expected.topology.count; ++index) {
-        bool found = false;
-        for (std::size_t candidate = 0U; candidate < snapshot.list.functions.count;
-             ++candidate) {
-            const auto& actual = snapshot.list.functions.items[candidate].location.usb_path;
+        snapshot.list.functions.count == 0U ||
+        snapshot.list.topology.state != TopologyState::complete ||
+        !snapshot.list.topology.expected_function_count.present ||
+        snapshot.list.topology.expected_function_count.value !=
+            snapshot.list.functions.count) return false;
+    std::size_t matched = 0U;
+    for (std::size_t candidate = 0U; candidate < snapshot.list.functions.count;
+         ++candidate) {
+        const auto& actual = snapshot.list.functions.items[candidate].location.usb_path;
+        if (!actual.present || actual.value.length == 0U ||
+            actual.value.length > actual.value.bytes.size()) return false;
+        for (std::size_t prior = 0U; prior < candidate; ++prior) {
+            const auto& prior_path =
+                snapshot.list.functions.items[prior].location.usb_path;
+            if (prior_path.present && prior_path.value.length == actual.value.length &&
+                std::memcmp(prior_path.value.bytes.data(), actual.value.bytes.data(),
+                            actual.value.length) == 0)
+                return false;
+        }
+        for (std::size_t index = 0U; index < expected.topology.count; ++index) {
             const auto& path = expected.topology.paths[index];
             if (path.length == 0U || path.length > path.bytes.size()) return false;
-            if (actual.present && actual.value.length == path.length &&
-                std::memcmp(actual.value.bytes.data(), path.bytes.data(), path.length) == 0) {
-                found = true;
-                break;
-            }
+            if (actual.value.length == path.length &&
+                std::memcmp(actual.value.bytes.data(), path.bytes.data(), path.length) == 0)
+                ++matched;
         }
-        if (!found) return false;
     }
-    return true;
+    if (expected.topology.count == 1U) return matched == 1U;
+    return expected.topology.count == snapshot.list.functions.count &&
+           matched == snapshot.list.functions.count;
 }
 
 Result<void> roundtrip(ClientTransport& transport, std::uint16_t opcode,

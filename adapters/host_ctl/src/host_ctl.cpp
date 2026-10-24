@@ -217,21 +217,39 @@ bool matches_device(const wire::ListResponse& list,
     if (!list.enclosure.present) return false;
     if (expected.kind == identity::IdentityKind::serial)
         return profile.matches_serial != nullptr && profile.matches_serial(list, expected);
-    for (std::size_t index = 0U; index < expected.topology.count; ++index) {
-        bool found = false;
-        for (std::size_t candidate = 0U; candidate < list.functions.count; ++candidate) {
-            const auto& path = list.functions.items[candidate].location.usb_path;
-            const auto& expected_path = expected.topology.paths[index];
-            if (path.present && path.value.length == expected_path.length &&
-                std::memcmp(path.value.bytes.data(), expected_path.bytes.data(),
-                            expected_path.length) == 0) {
-                found = true;
-                break;
-            }
+    if (expected.kind != identity::IdentityKind::usb_topology ||
+        expected.topology.count == 0U ||
+        expected.topology.count > expected.topology.paths.size() ||
+        list.functions.count == 0U ||
+        list.topology.state != wire::TopologyState::complete ||
+        !list.topology.expected_function_count.present ||
+        list.topology.expected_function_count.value != list.functions.count)
+        return false;
+    std::size_t matched = 0U;
+    for (std::size_t candidate = 0U; candidate < list.functions.count; ++candidate) {
+        const auto& path = list.functions.items[candidate].location.usb_path;
+        if (!path.present || path.value.length == 0U ||
+            path.value.length > path.value.bytes.size()) return false;
+        for (std::size_t prior = 0U; prior < candidate; ++prior) {
+            const auto& prior_path = list.functions.items[prior].location.usb_path;
+            if (prior_path.present && prior_path.value.length == path.value.length &&
+                std::memcmp(prior_path.value.bytes.data(), path.value.bytes.data(),
+                            path.value.length) == 0)
+                return false;
         }
-        if (!found) return false;
+        for (std::size_t index = 0U; index < expected.topology.count; ++index) {
+            const auto& expected_path = expected.topology.paths[index];
+            if (expected_path.length == 0U ||
+                expected_path.length > expected_path.bytes.size()) return false;
+            if (path.value.length == expected_path.length &&
+                std::memcmp(path.value.bytes.data(), expected_path.bytes.data(),
+                            expected_path.length) == 0)
+                ++matched;
+        }
     }
-    return list.functions.count == expected.topology.count;
+    if (expected.topology.count == 1U) return matched == 1U;
+    return expected.topology.count == list.functions.count &&
+           matched == list.functions.count;
 }
 
 bool matches_target(const wire::StatusSnapshot& snapshot, const Profile& profile,
