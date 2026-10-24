@@ -16,6 +16,7 @@
 #include <sys/stat.h>
 #include <sys/un.h>
 #include <unistd.h>
+#include <utility>
 
 namespace dtv::userland::host_listener_context::detail {
 namespace {
@@ -50,8 +51,8 @@ bool set_descriptor_flags(int descriptor) noexcept
 }
 
 struct PathIdentity final {
-    dev_t device = 0;
-    ino_t inode = 0;
+    decltype(std::declval<struct stat>().st_dev) device = 0;
+    decltype(std::declval<struct stat>().st_ino) inode = 0;
     uid_t owner = 0;
     bool valid = false;
 };
