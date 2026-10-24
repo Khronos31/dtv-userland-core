@@ -88,5 +88,15 @@ int main()
     const char* version[] = {"sianoctl", "--version"};
     if (dtv::userland::host_ctl::run_control_cli(2, version, profile) != 0) return 1;
     const char* unsupported[] = {"sianoctl", "card-status"};
-    return dtv::userland::host_ctl::run_control_cli(2, unsupported, profile) == 2 ? 0 : 1;
+    if (dtv::userland::host_ctl::run_control_cli(2, unsupported, profile) != 3) return 1;
+    const char* unsupported_atr[] = {"sianoctl", "card-atr"};
+    if (dtv::userland::host_ctl::run_control_cli(2, unsupported_atr, profile) != 3) return 1;
+    const char* unsupported_apdu[] = {"sianoctl", "card-apdu", "00:01"};
+    if (dtv::userland::host_ctl::run_control_cli(3, unsupported_apdu, profile) != 3)
+        return 1;
+    const char* invalid_apdu[] = {"sianoctl", "card-apdu", "0:01"};
+    if (dtv::userland::host_ctl::run_control_cli(3, invalid_apdu, profile) != 2)
+        return 1;
+    const char* repeat_apdu[] = {"sianoctl", "card-apdu", "00:01", "--repeat", "2"};
+    return dtv::userland::host_ctl::run_control_cli(5, repeat_apdu, profile) == 2 ? 0 : 1;
 }
