@@ -30,6 +30,20 @@
 #endif
 
 namespace dtv::userland::host_listener_context::detail {
+#ifdef DTV_LISTENER_CONTEXT_TESTING
+namespace {
+bool fail_next_identity_tag_query_for_test = false;
+void (*identity_failure_cleanup_hook_for_test)(const wchar_t*) noexcept = nullptr;
+}
+
+void fail_next_file_identity_tag_query_for_test(
+    void (*cleanup_hook)(const wchar_t*) noexcept) noexcept
+{
+    identity_failure_cleanup_hook_for_test = cleanup_hook;
+    fail_next_identity_tag_query_for_test = true;
+}
+#endif
+
 namespace {
 
 namespace windows_security = px4::userland::windows_security;
@@ -122,6 +136,8 @@ bool file_identity(const wchar_t* path, PathIdentity& output,
         (void)::CloseHandle(file);
         return false;
     }
+    output = PathIdentity{info.dwVolumeSerialNumber,
+        (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow, true};
     if ((require_file && (info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) != 0U) ||
         (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT) == 0U) {
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
@@ -132,6 +148,14 @@ bool file_identity(const wchar_t* path, PathIdentity& output,
         return false;
     }
     FILE_ATTRIBUTE_TAG_INFO tag_info{};
+#ifdef DTV_LISTENER_CONTEXT_TESTING
+    if (fail_next_identity_tag_query_for_test) {
+        fail_next_identity_tag_query_for_test = false;
+        ::SetLastError(ERROR_ACCESS_DENIED);
+        (void)::CloseHandle(file);
+        return false;
+    }
+#endif
     if (::GetFileInformationByHandleEx(file, FileAttributeTagInfo, &tag_info,
                                        sizeof(tag_info)) == 0) {
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
@@ -150,8 +174,6 @@ bool file_identity(const wchar_t* path, PathIdentity& output,
         return false;
     }
     (void)::CloseHandle(file);
-    output = PathIdentity{info.dwVolumeSerialNumber,
-        (static_cast<std::uint64_t>(info.nFileIndexHigh) << 32U) | info.nFileIndexLow, true};
     return true;
 }
 
@@ -782,6 +804,13 @@ private:
                 path.c_str(), static_cast<unsigned long>(::GetLastError()));
 #endif
             (void)::closesocket(listener);
+#ifdef DTV_LISTENER_CONTEXT_TESTING
+            if (identity_failure_cleanup_hook_for_test != nullptr) {
+                auto hook = identity_failure_cleanup_hook_for_test;
+                identity_failure_cleanup_hook_for_test = nullptr;
+                hook(path.c_str());
+            }
+#endif
             (void)delete_if_identity(path.c_str(), identity);
             identity = {}; ::WSASetLastError(error == 0 ? WSAEACCES : error);
             return INVALID_SOCKET;
