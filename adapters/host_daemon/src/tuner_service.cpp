@@ -5,12 +5,26 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdio>
 #include <limits>
 
 namespace px4::userland {
 namespace {
 
 namespace engine = dtv::userland::detail;
+
+void log_authority_read_failure(const char* stage, Error error,
+                                const engine::StreamAttachTicket& ticket) noexcept
+{
+    std::fprintf(stderr,
+        "CORE_TUNER_READ_FAILURE stage=%s error=%u client=%llu lease_instance=%llu stream=%llu slot=%u reservation=%llu\n",
+        stage, static_cast<unsigned>(error),
+        static_cast<unsigned long long>(ticket.client_id),
+        static_cast<unsigned long long>(ticket.lease_instance),
+        static_cast<unsigned long long>(ticket.stream_id),
+        static_cast<unsigned>(ticket.slot),
+        static_cast<unsigned long long>(ticket.reservation));
+}
 
 bool valid_legacy_client_id(std::uint64_t client_id) noexcept
 {
@@ -974,22 +988,35 @@ Result<TunerStreamReadResult> TunerService::authority_read_stream_v1(
     const TunerStreamTicket& ticket, MutableByteView output,
     Timeout timeout) noexcept
 {
-    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
+    if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U) {
+        log_authority_read_failure("client", Error::INVALID_ARGUMENT, ticket);
         return Result<TunerStreamReadResult>::failure(Error::INVALID_ARGUMENT);
+    }
     const auto attachment = engine_.stream_attachment_v1(ticket);
-    if (!attachment) return Result<TunerStreamReadResult>::failure(attachment.error());
+    if (!attachment) {
+        log_authority_read_failure("attachment", attachment.error(), ticket);
+        return Result<TunerStreamReadResult>::failure(attachment.error());
+    }
     const auto result = stream_control_.read(attachment.value(), output, timeout);
-    if (!result) return Result<TunerStreamReadResult>::failure(result.error());
+    if (!result) {
+        log_authority_read_failure("read", result.error(), ticket);
+        return Result<TunerStreamReadResult>::failure(result.error());
+    }
     std::uint64_t queue_drops = 0U;
     if (result.value().bytes != 0U) {
         const auto counters = stream_control_.stats(attachment.value());
         if (counters) {
             queue_drops = counters.value().queue_drops;
         } else {
-            if (counters.error() != Error::NOT_FOUND)
+            if (counters.error() != Error::NOT_FOUND) {
+                log_authority_read_failure("stats", counters.error(), ticket);
                 return Result<TunerStreamReadResult>::failure(counters.error());
+            }
             const auto final = stream_control_.final_snapshot(attachment.value());
-            if (!final) return Result<TunerStreamReadResult>::failure(final.error());
+            if (!final) {
+                log_authority_read_failure("final_snapshot", final.error(), ticket);
+                return Result<TunerStreamReadResult>::failure(final.error());
+            }
             queue_drops = final.value().counters.queue_drops;
         }
     }
