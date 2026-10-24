@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include <dtv/userland/records.h>
 
+#include "records_internal.h"
+
 #include <cstring>
 
 namespace dtv::userland::wire {
@@ -2417,6 +2419,40 @@ Error validate_status_response(const StatusResponse& value,
         if (!receiver.leased) {
             return Error::INVALID_ARGUMENT;
         }
+    }
+    return Error::OK;
+}
+
+Error decode_status_response_into(ByteView input, StatusResponse& value) noexcept
+{
+    if (!valid_view(input)) {
+        return Error::INVALID_ARGUMENT;
+    }
+    Decoder reader;
+    reader.in = input.data;
+    reader.size = input.size;
+    if (!codec(reader, value)) {
+        return reader.error;
+    }
+    if (reader.pos != input.size) {
+        return Error::PROTOCOL_ERROR;
+    }
+    return Error::OK;
+}
+
+Error decode_list_response_into(ByteView input, ListResponse& value) noexcept
+{
+    if (!valid_view(input)) {
+        return Error::INVALID_ARGUMENT;
+    }
+    Decoder reader;
+    reader.in = input.data;
+    reader.size = input.size;
+    if (!codec(reader, value)) {
+        return reader.error;
+    }
+    if (reader.pos != input.size) {
+        return Error::PROTOCOL_ERROR;
     }
     return Error::OK;
 }

@@ -3,6 +3,8 @@
 
 #include <dtv/userland/control_connection.h>
 
+#include "records_internal.h"
+
 #include <array>
 #include <cstring>
 #include <limits>
@@ -307,18 +309,20 @@ Result<std::size_t> encode_request(const Request& request, MutableByteView outpu
 
 namespace {
 
-StatusFetchResult fetch_status_with_required_features(ClientTransport& transport,
-                                                     std::uint64_t required_features) noexcept
+void fetch_status_with_required_features(ClientTransport& transport,
+                                         std::uint64_t required_features,
+                                         StatusFetchResult& result) noexcept
 {
-    StatusFetchResult result{};
+    result = StatusFetchResult{};
     const auto fail = [&transport, &result](Error error) noexcept {
         result.error = error;
+        result.snapshot = StatusSnapshot{};
         transport.close();
     };
     std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});
     if (!workspace) {
         fail(Error::RESOURCE_LIMIT);
-        return result;
+        return;
     }
     RawReply reply{};
 
@@ -331,7 +335,7 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
         hello_request, MutableByteView{hello_payload.data(), hello_payload.size()});
     if (!hello_size) {
         fail(hello_size.error());
-        return result;
+        return;
     }
     std::uint32_t remote_code = 0U;
     const auto hello_reply = roundtrip(
@@ -340,24 +344,24 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
     if (!hello_reply) {
         result.remote_error_code = remote_code;
         fail(hello_reply.error());
-        return result;
+        return;
     }
     const auto hello = decode_hello_response(
         ByteView{workspace->payload.data(), reply.length});
     if (!hello) {
         fail(hello.error());
-        return result;
+        return;
     }
     if (hello.value().major != kVersionMajor || hello.value().minor != kVersionMinor) {
         fail(Error::VERSION_MISMATCH);
-        return result;
+        return;
     }
     if (hello.value().features != required_features) {
         const Error error =
             (hello.value().features & required_features) == required_features
                 ? Error::PROTOCOL_ERROR : Error::UNSUPPORTED;
         fail(error);
-        return result;
+        return;
     }
 
     std::array<std::uint8_t, kRequestPayloadCapacity> request_payload{};
@@ -368,7 +372,7 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
         encode_list_request);
     if (!list_size) {
         fail(list_size.error());
-        return result;
+        return;
     }
     remote_code = 0U;
     const auto list_reply = roundtrip(
@@ -378,23 +382,23 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
     if (!list_reply) {
         result.remote_error_code = remote_code;
         fail(list_reply.error());
-        return result;
+        return;
     }
-    const auto list = decode_list_response(
-        ByteView{workspace->payload.data(), reply.length});
-    if (!list) {
-        fail(list.error());
-        return result;
+    const Error list_error = decode_list_response_into(
+        ByteView{workspace->payload.data(), reply.length}, result.snapshot.list);
+    if (list_error != Error::OK) {
+        fail(list_error);
+        return;
     }
-    if (list.value().epoch != hello.value().epoch ||
-        !same_producer(list.value().producer, hello.value().producer)) {
+    if (result.snapshot.list.epoch != hello.value().epoch ||
+        !same_producer(result.snapshot.list.producer, hello.value().producer)) {
         fail(Error::PROTOCOL_ERROR);
-        return result;
+        return;
     }
-    const Error list_valid = validate_list_response(list.value());
+    const Error list_valid = validate_list_response(result.snapshot.list);
     if (list_valid != Error::OK) {
         fail(list_valid);
-        return result;
+        return;
     }
 
     StatusRequest status_request{};
@@ -405,7 +409,7 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
         encode_status_request);
     if (!status_size) {
         fail(status_size.error());
-        return result;
+        return;
     }
     remote_code = 0U;
     const auto status_reply = roundtrip(
@@ -415,43 +419,42 @@ StatusFetchResult fetch_status_with_required_features(ClientTransport& transport
     if (!status_reply) {
         result.remote_error_code = remote_code;
         fail(status_reply.error());
-        return result;
+        return;
     }
-    const auto status = decode_status_response(
-        ByteView{workspace->payload.data(), reply.length});
-    if (!status) {
-        fail(status.error());
-        return result;
+    const Error status_error = decode_status_response_into(
+        ByteView{workspace->payload.data(), reply.length}, result.snapshot.status);
+    if (status_error != Error::OK) {
+        fail(status_error);
+        return;
     }
-    if (status.value().scope.kind != status_request.scope.kind ||
-        status.value().scope.id != status_request.scope.id ||
-        status.value().context.epoch != hello.value().epoch ||
-        !same_producer(status.value().producer, hello.value().producer)) {
+    if (result.snapshot.status.scope.kind != status_request.scope.kind ||
+        result.snapshot.status.scope.id != status_request.scope.id ||
+        result.snapshot.status.context.epoch != hello.value().epoch ||
+        !same_producer(result.snapshot.status.producer, hello.value().producer)) {
         fail(Error::PROTOCOL_ERROR);
-        return result;
+        return;
     }
-    const StatusContext context{&list.value()};
-    const Error status_valid = validate_status_response(status.value(), context);
+    const StatusContext context{&result.snapshot.list};
+    const Error status_valid = validate_status_response(result.snapshot.status, context);
     if (status_valid != Error::OK) {
         fail(status_valid);
-        return result;
+        return;
     }
-    if (!same_snapshot_identity(list.value(), status.value())) {
+    if (!same_snapshot_identity(result.snapshot.list, result.snapshot.status)) {
         fail(Error::PROTOCOL_ERROR);
-        return result;
+        return;
     }
 
-    result.snapshot.list = list.value();
-    result.snapshot.status = status.value();
     result.error = Error::OK;
-    return result;
 }
 
 }  // namespace
 
 StatusFetchResult fetch_status(ClientTransport& transport) noexcept
 {
-    return fetch_status_with_required_features(transport, 0U);
+    StatusFetchResult result{};
+    fetch_status_with_required_features(transport, 0U, result);
+    return result;
 }
 
 namespace {
@@ -575,7 +578,9 @@ StatusFetchResult fetch_status(TimedClientTransport& transport, Timeout timeout,
         transport.close();
         return StatusFetchResult{StatusSnapshot{}, Error::TIMEOUT, 0U};
     }
-    return fetch_status_with_required_features(adapter, required_features);
+    StatusFetchResult result{};
+    fetch_status_with_required_features(adapter, required_features, result);
+    return result;
 }
 
 LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
@@ -600,7 +605,8 @@ LnbPowerResult set_lnb_power(TimedClientTransport& transport, bool enabled,
         return result;
     }
 
-    const StatusFetchResult status = fetch_status_with_required_features(adapter, 0U);
+    StatusFetchResult status{};
+    fetch_status_with_required_features(adapter, 0U, status);
     if (!status) {
         result.error = status.error;
         result.remote_error_code = status.remote_error_code;
@@ -675,8 +681,8 @@ CardOpenResult begin_card(TimedClientTransport& transport,
         transport.close();
         return result;
     }
-    const StatusFetchResult status =
-        fetch_status_with_required_features(adapter, kFeatureCardService);
+    StatusFetchResult status{};
+    fetch_status_with_required_features(adapter, kFeatureCardService, status);
     if (!status) {
         result.error = status.error;
         result.remote_error_code = status.remote_error_code;
@@ -1128,7 +1134,8 @@ RecordingControlResult begin_recording(TimedClientTransport& transport,
         transport.close();
         return result;
     }
-    const StatusFetchResult status = fetch_status(adapter);
+    StatusFetchResult status{};
+    fetch_status_with_required_features(adapter, 0U, status);
     if (!status) {
         result.error = status.error;
         result.remote_error_code = status.remote_error_code;
