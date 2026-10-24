@@ -2457,4 +2457,22 @@ Error decode_list_response_into(ByteView input, ListResponse& value) noexcept
     return Error::OK;
 }
 
+Error decode_tune_request_into(ByteView input, TuneRequest& value) noexcept
+{
+    if (!valid_view(input)) {
+        return Error::INVALID_ARGUMENT;
+    }
+    value = TuneRequest{};
+    Decoder reader;
+    reader.in = input.data;
+    reader.size = input.size;
+    if (!codec(reader, value)) {
+        return reader.error;
+    }
+    if (reader.pos != input.size) {
+        return Error::PROTOCOL_ERROR;
+    }
+    return Error::OK;
+}
+
 }  // namespace dtv::userland::wire

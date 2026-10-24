@@ -53,11 +53,58 @@ struct AuthorityJob final {
     bool deferred = false;
 };
 
+struct AuthorityCleanup final {
+    AuthorityJobKind kind = AuthorityJobKind::tune;
+    SessionKey key{};
+    std::uint64_t client_id = 0U;
+    std::uint64_t lease_id = 0U;
+    ReceiverId receiver = 0U;
+    Error rollback_error = Error::OK;
+    bool deferred = false;
+
+    AuthorityCleanup& operator=(const AuthorityJob& job) noexcept
+    {
+        kind = job.kind;
+        key = job.key;
+        client_id = job.client_id;
+        lease_id = job.lease_id;
+        receiver = job.receiver;
+        rollback_error = job.rollback_error;
+        deferred = job.deferred;
+        return *this;
+    }
+
+    void copy_to(AuthorityJob& job) const noexcept
+    {
+        job = AuthorityJob{};
+        job.kind = kind;
+        job.key = key;
+        job.client_id = client_id;
+        job.lease_id = lease_id;
+        job.receiver = receiver;
+        job.rollback_error = rollback_error;
+        job.deferred = deferred;
+    }
+
+    operator AuthorityJob() const noexcept
+    {
+        AuthorityJob job{};
+        copy_to(job);
+        return job;
+    }
+};
+
 class ControlAuthorityExecutor {
 public:
     virtual ~ControlAuthorityExecutor() noexcept = default;
     // false means no worker owns the job; true transfers the value to it.
     virtual bool submit(const AuthorityJob& job) noexcept = 0;
+    bool submit(const AuthorityCleanup& job) noexcept
+    {
+        AuthorityJob value{};
+        job.copy_to(value);
+        return submit(value);
+    }
     // Handles only the short metadata STOP entrance; implementations retain
     // physical cleanup ownership when publication is rejected.
     virtual Result<StreamStopResult> stop_stream_v1(std::uint64_t client_id,
@@ -81,7 +128,7 @@ struct AuthorityReply final {
     // The caller owns cleanup until submit acceptance and must retain it when
     // submit rejects; a returned completion never submits this value itself.
     bool cleanup_required = false;
-    AuthorityJob cleanup{};
+    AuthorityCleanup cleanup{};
 };
 
 class ControlAuthority;
@@ -152,6 +199,7 @@ public:
     AuthorityReply complete(const SessionKey& key, Error result) noexcept;
     // Records acceptance for a retained disconnect value after rollback/close.
     Error cleanup_submitted(const AuthorityJob& job, bool accepted) noexcept;
+    Error cleanup_submitted(const AuthorityCleanup& job, bool accepted) noexcept;
     Error response_sent(ControlServiceSession& session, bool complete_frame,
                         ControlAuthorityExecutor& executor,
                         AuthorityJob* rejected_cleanup) noexcept;
@@ -175,6 +223,7 @@ private:
     bool remember_lease(ControlServiceSession& session, std::uint64_t lease_id,
                         ReceiverId receiver) noexcept;
     void forget_lease(ControlServiceSession& session, std::uint64_t lease_id) noexcept;
+    AuthorityCleanup close_cleanup(ControlServiceSession& session) noexcept;
     AuthorityJob disconnect_job(ControlServiceSession& session) noexcept;
 
     wire::ServerHello server_;

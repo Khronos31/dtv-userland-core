@@ -249,7 +249,7 @@ AuthorityReply ControlAuthority::accept(ControlServiceSession& session,
     if (inbound.action == wire::InboundAction::close) {
         AuthorityReply result;
         result.action = wire::InboundAction::close;
-        result.cleanup = close(session);
+        result.cleanup = close_cleanup(session);
         if (!executor.submit(result.cleanup)) result.cleanup_required = true;
         return result;
     }
@@ -596,7 +596,14 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
 
 AuthorityJob ControlAuthority::close(ControlServiceSession& session) noexcept
 {
-    AuthorityJob job;
+    AuthorityJob job{};
+    close_cleanup(session).copy_to(job);
+    return job;
+}
+
+AuthorityCleanup ControlAuthority::close_cleanup(ControlServiceSession& session) noexcept
+{
+    AuthorityCleanup job;
     if (&session.authority_ != this || !session.connected()) return job;
     if (session.pending_ &&
         (session.pending_kind_ == AuthorityJobKind::acquire ||
@@ -653,6 +660,21 @@ AuthorityJob ControlAuthority::disconnect_job(ControlServiceSession& session) no
 }
 
 Error ControlAuthority::cleanup_submitted(const AuthorityJob& job, bool accepted) noexcept
+{
+    if (job.kind != AuthorityJobKind::disconnect || job.deferred)
+        return Error::INVALID_ARGUMENT;
+    ControlServiceSession* session = find_session(job.client_id);
+    if (session == nullptr || !session->closed_ ||
+        (session->pending_ && session->pending_kind_ != AuthorityJobKind::disconnect) ||
+        job.key.client_id != session->client_id_ ||
+        job.key.request_id != session->pending_request_id_)
+        return Error::NOT_FOUND;
+    session->pending_ = accepted;
+    session->pending_kind_ = AuthorityJobKind::disconnect;
+    return Error::OK;
+}
+
+Error ControlAuthority::cleanup_submitted(const AuthorityCleanup& job, bool accepted) noexcept
 {
     if (job.kind != AuthorityJobKind::disconnect || job.deferred)
         return Error::INVALID_ARGUMENT;

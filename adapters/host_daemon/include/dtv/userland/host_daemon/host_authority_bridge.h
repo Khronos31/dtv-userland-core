@@ -209,7 +209,7 @@ private:
         };
         std::optional<dtv::userland::detail::ControlServiceSession> session{};
         std::array<StreamOwner, dtv::userland::detail::kReceiverEngineCapacity> streams{};
-        dtv::userland::detail::AuthorityJob cleanup{};
+        dtv::userland::detail::AuthorityCleanup cleanup{};
         dtv::userland::detail::AuthorityReply response{};
         std::uint64_t client_id = 0U;
         std::size_t inflight = 0U;
@@ -254,7 +254,11 @@ private:
     std::size_t find_slot(std::uint64_t client_id) const noexcept;
     bool queue_job(const dtv::userland::detail::AuthorityJob& job,
                    std::size_t slot) noexcept;
+    bool queue_job(const dtv::userland::detail::AuthorityCleanup& job,
+                   std::size_t slot) noexcept;
     void retain_cleanup(const dtv::userland::detail::AuthorityJob& job,
+                        std::size_t slot) noexcept;
+    void retain_cleanup(const dtv::userland::detail::AuthorityCleanup& job,
                         std::size_t slot) noexcept;
     void close_all() noexcept;
     void close_all_data() noexcept;
