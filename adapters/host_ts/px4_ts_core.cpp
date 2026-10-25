@@ -861,7 +861,14 @@ public:
             for (std::size_t packet = 0U; packet < packets; ++packet) {
                 const auto written = output_.write(
                     ByteView{data.value().packets.data + packet * 188U, 188U}, signal_);
-                if (!written) return fail(written.error(), Px4TsFailureKind::output);
+                if (!written) {
+                    if (written.error() == Error::TIMEOUT && signal_.stop_requested()) {
+                        packets_written_ += packet;
+                        output_stop_requested_ = true;
+                        return Result<void>::success();
+                    }
+                    return fail(written.error(), Px4TsFailureKind::output);
+                }
             }
             packets_written_ += packets;
             last_progress_ms_ = clock_.monotonic_ms();
@@ -901,6 +908,7 @@ public:
     std::uint64_t duration_started_ms() const noexcept { return duration_started_ms_; }
     Px4TsFailureKind failure_kind() const noexcept { return failure_kind_; }
     Error failure() const noexcept { return failure_; }
+    bool output_stop_requested() const noexcept { return output_stop_requested_; }
 
 private:
     Px4TsOutput& output_;
@@ -913,6 +921,7 @@ private:
     bool attached_ = false;
     bool limit_reached_ = false;
     bool final_valid_ = false;
+    bool output_stop_requested_ = false;
     bool duration_started_ = false;
     std::uint64_t duration_started_ms_ = 0U;
     std::uint64_t packets_written_ = 0U;
@@ -1440,6 +1449,10 @@ static Result<Px4TsRunResult> run_wire_profile(
             ByteView{read_buffer.data(), read.value()}, reader);
         if (!fed) {
             primary = fed.error();
+            break;
+        }
+        if (reader.output_stop_requested()) {
+            stop_requested_by_client = true;
             break;
         }
         partial_frame_pending = receiver.pending_size() != 0U;
