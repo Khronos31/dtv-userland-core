@@ -997,7 +997,15 @@ bool test_internal_card_status_authority_response()
                   << " samples="
                   << backend.card_status_sample_count() - samples_before_concurrent
                   << " clients=" << bridge.client_id(opened.value()) << ','
-                  << bridge.client_id(second.value()) << '\n';
+                  << bridge.client_id(second.value())
+                  << " queued_completions="
+                  << created.value()->pending_completions_for_test(
+                         created.value()->authority_status_lane())
+                  << " worker_error="
+                  << static_cast<unsigned>(created.value()->error())
+                  << " fatal_slots="
+                  << bridge.fatal_unresolved_for_test(opened.value()) << ','
+                  << bridge.fatal_unresolved_for_test(second.value()) << '\n';
         return fail("concurrent_response_wait");
     }
     for (std::size_t i = 0U; i < concurrent_replies.size(); ++i) {
