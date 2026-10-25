@@ -983,8 +983,10 @@ bool test_internal_card_status_authority_response()
            (concurrent_replies[0U].action != w::InboundAction::respond ||
             concurrent_replies[1U].action != w::InboundAction::respond)) {
         (void)bridge.poll();
-        concurrent_replies[0U] = bridge.take_response(opened.value());
-        concurrent_replies[1U] = bridge.take_response(second.value());
+        if (concurrent_replies[0U].action != w::InboundAction::respond)
+            concurrent_replies[0U] = bridge.take_response(opened.value());
+        if (concurrent_replies[1U].action != w::InboundAction::respond)
+            concurrent_replies[1U] = bridge.take_response(second.value());
         if (concurrent_replies[0U].action != w::InboundAction::respond ||
             concurrent_replies[1U].action != w::InboundAction::respond)
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
