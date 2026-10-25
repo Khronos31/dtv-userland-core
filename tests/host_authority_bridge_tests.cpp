@@ -26,6 +26,7 @@ public:
     w::Optional<bool> sample_internal_card_inserted() noexcept override
     {
         std::unique_lock<std::mutex> lock(card_status_mutex);
+        ++card_status_samples;
         if (card_status_blocked) {
             card_status_entered = true;
             card_status_condition.notify_all();
@@ -125,6 +126,12 @@ public:
     bool card_status_blocked = false;
     bool card_status_entered = false;
     bool card_status_released = false;
+    unsigned card_status_samples = 0U;
+    unsigned card_status_sample_count() noexcept
+    {
+        std::lock_guard<std::mutex> lock(card_status_mutex);
+        return card_status_samples;
+    }
     void block_card_status() noexcept
     {
         std::lock_guard<std::mutex> lock(card_status_mutex);
@@ -958,6 +965,7 @@ bool test_internal_card_status_authority_response()
     concurrent_context.epoch = list.epoch;
     concurrent_context.state = w::ContextState::ready;
     w::Snapshot concurrent_snapshot;
+    const unsigned samples_before_concurrent = backend.card_status_sample_count();
     const auto first_pending = bridge.accept(opened.value(),
         frame(w::kOpcodeStatus, 5U,
             {concurrent_payload.data(), concurrent_size.value()}),
@@ -982,8 +990,16 @@ bool test_internal_card_status_authority_response()
             std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     if (concurrent_replies[0U].action != w::InboundAction::respond ||
-        concurrent_replies[1U].action != w::InboundAction::respond)
+        concurrent_replies[1U].action != w::InboundAction::respond) {
+        std::cerr << "internal card STATUS concurrent response actions="
+                  << static_cast<unsigned>(concurrent_replies[0U].action) << ','
+                  << static_cast<unsigned>(concurrent_replies[1U].action)
+                  << " samples="
+                  << backend.card_status_sample_count() - samples_before_concurrent
+                  << " clients=" << bridge.client_id(opened.value()) << ','
+                  << bridge.client_id(second.value()) << '\n';
         return fail("concurrent_response_wait");
+    }
     for (std::size_t i = 0U; i < concurrent_replies.size(); ++i) {
         const auto& concurrent_reply = concurrent_replies[i];
         if (concurrent_reply.action != w::InboundAction::respond ||
