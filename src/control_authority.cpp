@@ -296,6 +296,24 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
         if (projected != Error::OK)
             return error_reply(session, request.opcode, request.request_id,
                                projected, "status");
+        if (request.status.scope.kind == wire::ScopeKind::enclosure &&
+            executor.supports_internal_card_observation()) {
+            AuthorityJob job;
+            job.kind = AuthorityJobKind::internal_card_status;
+            job.key = SessionKey{session.client_id_, request.request_id};
+            job.client_id = session.client_id_;
+            if (!executor.submit(job))
+                return error_reply(session, request.opcode, request.request_id,
+                                   Error::RESOURCE_LIMIT, "status");
+            session.pending_ = true;
+            session.pending_request_id_ = request.request_id;
+            session.pending_kind_ = AuthorityJobKind::internal_card_status;
+            session.pending_status_opcode_ = request.opcode;
+            AuthorityReply queued;
+            queued.action = wire::InboundAction::dispatch;
+            queued.queued = true;
+            return queued;
+        }
         const auto size = wire::encode_status_frame(request.request_id, status, canonical_, output);
         return size ? reply(session, size.value())
                     : error_reply(session, request.opcode, request.request_id,
@@ -805,6 +823,24 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
         session->lease_count_ = 0U;
         return {};
     }
+    if (completion.kind == AuthorityJobKind::internal_card_status) {
+        if (session->closed_) return {};
+        if (result != Error::OK) {
+            session->pending_ = false;
+            return error_reply(*session, session->pending_status_opcode_,
+                               static_cast<std::uint32_t>(key.request_id), result,
+                               "status");
+        }
+        session->status_response_.card_inserted = completion.internal_card_inserted;
+        const auto size = wire::encode_status_frame(
+            static_cast<std::uint32_t>(key.request_id), session->status_response_,
+            canonical_, MutableByteView{session->response_.data(), session->response_.size()});
+        session->pending_ = false;
+        return size ? reply(*session, size.value())
+                    : error_reply(*session, session->pending_status_opcode_,
+                                  static_cast<std::uint32_t>(key.request_id), size.error(),
+                                  "status");
+    }
     session->pending_ = false;
     if (completion.kind == AuthorityJobKind::card) {
         const wire::ControlRequestKind kind = session->pending_card_kind_;
@@ -1032,6 +1068,7 @@ AuthorityCompletion ControlAuthority::execute_job_value(ReceiverEngine& engine,
         return completion;
     }
     case AuthorityJobKind::card:
+    case AuthorityJobKind::internal_card_status:
         completion.error = Error::INVALID_ARGUMENT;
         return completion;
     }

@@ -15,6 +15,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -44,6 +45,38 @@ w::WString<N> text(const char* value)
 
 class Backend final : public TunerServiceBackend {
 public:
+    bool supports_internal_card_observation() const noexcept override
+    {
+        return internal_card_observation_enabled;
+    }
+    w::Optional<bool> sample_internal_card_inserted() noexcept override
+    {
+        std::unique_lock<std::mutex> lock(card_status_mutex);
+        card_status_entered = true;
+        card_status_condition.notify_all();
+        card_status_condition.wait(lock, [this] { return card_status_released; });
+        w::Optional<bool> result;
+        result.present = true;
+        result.value = true;
+        return result;
+    }
+    bool internal_card_observation_enabled = false;
+    std::mutex card_status_mutex;
+    std::condition_variable card_status_condition;
+    bool card_status_entered = false;
+    bool card_status_released = false;
+    bool wait_card_status() noexcept
+    {
+        std::unique_lock<std::mutex> lock(card_status_mutex);
+        return card_status_condition.wait_for(lock, std::chrono::seconds(5),
+            [this] { return card_status_entered; });
+    }
+    void release_card_status() noexcept
+    {
+        std::lock_guard<std::mutex> lock(card_status_mutex);
+        card_status_released = true;
+        card_status_condition.notify_all();
+    }
     std::uint8_t receiver_count() const noexcept override { return 8U; }
     Result<void> open_receiver(std::uint8_t) noexcept override
     {
@@ -253,11 +286,13 @@ class Family final : public host_runtime::EnclosureFamily {
 public:
     explicit Family(std::shared_ptr<std::atomic<bool>> shutdown,
                     bool fail_capture_start = false,
-                    bool missing_final_when_unattached = false)
+                    bool missing_final_when_unattached = false,
+                    bool internal_card_observation = false)
         : shutdown_(std::move(shutdown)),
           stream_(missing_final_when_unattached)
     {
         tuner_.fail_capture_start = fail_capture_start;
+        tuner_.internal_card_observation_enabled = internal_card_observation;
     }
     Result<void> shutdown() noexcept override
     {
@@ -269,6 +304,8 @@ public:
     CardProtocolSession& card_protocol() noexcept override { return card_session_; }
     TunerServiceTime& time() noexcept override { return clock_; }
     TunerStreamControl* stream_control() noexcept override { return &stream_; }
+    bool wait_card_status() noexcept { return tuner_.wait_card_status(); }
+    void release_card_status() noexcept { tuner_.release_card_status(); }
 private:
     std::shared_ptr<std::atomic<bool>> shutdown_;
     Backend tuner_;
@@ -359,7 +396,8 @@ bool write_record(w::TimedClientTransport& transport, std::uint16_t opcode,
 
 bool lifecycle(bool fail_capture_start = false,
                bool missing_final_when_unattached = false,
-               bool default_runtime_root = false)
+               bool default_runtime_root = false,
+               bool internal_card_observation = false)
 {
 #if defined(_WIN32)
     const char* runtime_parent = std::getenv("LOCALAPPDATA");
@@ -440,7 +478,9 @@ bool lifecycle(bool fail_capture_start = false,
 #endif
     auto shutdown = std::make_shared<std::atomic<bool>>(false);
     std::unique_ptr<Family> family(new Family(shutdown, fail_capture_start,
-                                               missing_final_when_unattached));
+                                               missing_final_when_unattached,
+                                               internal_card_observation));
+    Family* family_access = family.get();
     ContextConfig config;
     if (!default_runtime_root) config.runtime_directory = runtime_path;
     config.product = "listener-test";
@@ -513,6 +553,51 @@ bool lifecycle(bool fail_capture_start = false,
         "default runtime root client connect";
     do {
         if (!default_client_ok || !control) break;
+        if (internal_card_observation) {
+            stage = "blocked internal CARD STATUS leaves listener responsive";
+            auto status_control = host_runtime::connect_control(
+                control_endpoint, Timeout{5000U});
+            if (!status_control) break;
+            bool status_observation_ok = false;
+            std::thread status_request([&] {
+                const auto result = w::fetch_status(*status_control.value(), Timeout{5000U});
+                status_observation_ok = result &&
+                    result.snapshot.status.card_inserted.present &&
+                    result.snapshot.status.card_inserted.value;
+            });
+            if (!family_access->wait_card_status()) {
+                family_access->release_card_status();
+                status_request.join();
+                break;
+            }
+            auto list_control = host_runtime::connect_control(
+                control_endpoint, Timeout{1000U});
+            bool list_responded = false;
+            if (list_control) {
+                w::Frame hello_response;
+                if (write_record(*list_control.value(), w::kOpcodeHello, 1U,
+                        w::HelloRequest{{1U, 0U}, {1U, 0U}, 0U, 0U},
+                        &w::encode_hello_request) && read_frame(*list_control.value(),
+                        hello_response) && hello_response.header.kind == w::Kind::response) {
+                    const auto hello = w::decode_hello_response(hello_response.payload);
+                    if (hello) {
+                        w::ListRequest list_request{hello.value().epoch};
+                        w::Frame list_response;
+                        list_responded = write_record(*list_control.value(), w::kOpcodeList,
+                            2U, list_request, &w::encode_list_request) &&
+                            read_frame(*list_control.value(), list_response) &&
+                            list_response.header.kind == w::Kind::response &&
+                            list_response.header.opcode == w::kOpcodeList &&
+                            static_cast<bool>(w::decode_list_response(list_response.payload));
+                    }
+                }
+                list_control.value()->close();
+            }
+            family_access->release_card_status();
+            status_request.join();
+            status_control.value()->close();
+            if (!list_responded || !status_observation_ok) break;
+        }
         stage = "CARD status/connect/reset/APDU/disconnect";
         auto card_control = host_runtime::connect_control(control_endpoint, Timeout{5000U});
         if (!card_control) break;
@@ -815,9 +900,10 @@ bool lifecycle(bool fail_capture_start = false,
 int main()
 {
 #if defined(_WIN32)
-    return lifecycle() && lifecycle(true, false) && lifecycle(true, true) ? 0 : 1;
+    return lifecycle() && lifecycle(true, false) && lifecycle(true, true) &&
+        lifecycle(false, false, false, true) ? 0 : 1;
 #else
     return lifecycle() && lifecycle(true, false) && lifecycle(true, true) &&
-        lifecycle(false, false, true) ? 0 : 1;
+        lifecycle(false, false, true) && lifecycle(false, false, false, true) ? 0 : 1;
 #endif
 }

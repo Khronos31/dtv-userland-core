@@ -61,6 +61,9 @@ bool operation_lane_valid(ControlWorkerLane lane, const ControlWorkerTask& task,
         if (task.authority_job.kind ==
             dtv::userland::detail::AuthorityJobKind::lnb_power)
             return lane == execution.lnb_lane;
+        if (task.authority_job.kind ==
+            dtv::userland::detail::AuthorityJobKind::internal_card_status)
+            return lane == execution.status_lane;
         if (task.receiver >= execution.receiver_count ||
             task.receiver >= execution.receiver_lane.size())
             return false;
@@ -1476,6 +1479,7 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
                 return Result<void>::failure(Error::INVALID_ARGUMENT);
         } else if (job.kind != dtv::userland::detail::AuthorityJobKind::tune &&
             job.kind != dtv::userland::detail::AuthorityJobKind::lnb_power &&
+            job.kind != dtv::userland::detail::AuthorityJobKind::internal_card_status &&
             job.kind != dtv::userland::detail::AuthorityJobKind::acquire &&
             job.kind != dtv::userland::detail::AuthorityJobKind::release &&
             job.kind != dtv::userland::detail::AuthorityJobKind::rollback_release &&
@@ -1516,6 +1520,14 @@ dtv::userland::detail::AuthorityCompletion ControlWorkerLanes::execute_authority
     TunerService& tuner_service,
     const dtv::userland::detail::AuthorityJob& job) noexcept
 {
+    if (job.kind == dtv::userland::detail::AuthorityJobKind::internal_card_status) {
+        dtv::userland::detail::AuthorityCompletion completion;
+        completion.key = job.key;
+        completion.kind = job.kind;
+        completion.internal_card_inserted =
+            tuner_service.sample_internal_card_inserted();
+        return completion;
+    }
     return dtv::userland::detail::ControlAuthority::execute_job_value(
         tuner_service.engine_, job);
 }
@@ -1739,6 +1751,11 @@ Result<ControlWorkerLane> ControlWorkerLanes::authority_lnb_lane() const noexcep
 {
     if (!impl_) return Result<ControlWorkerLane>::failure(Error::NOT_READY);
     return Result<ControlWorkerLane>::success(impl_->execution.lnb_lane);
+}
+
+ControlWorkerLane ControlWorkerLanes::authority_status_lane() const noexcept
+{
+    return impl_ ? impl_->execution.status_lane : ControlWorkerLane::card;
 }
 
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
