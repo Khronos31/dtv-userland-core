@@ -1120,7 +1120,18 @@ bool test_host_ctl_real_server()
     Listener control;
     if (!control.bind(tree.root, "ctl-live", "control.sock")) return false;
     FakeService service("ctl-live");
+    service.list.functions.count = 2U;
+    service.list.functions.items[0U].id = 1U;
+    service.list.functions.items[1U] = service.list.functions.items[0U];
+    service.list.functions.items[1U].id = 2U;
+    service.list.receivers.value.count = 2U;
+    service.list.receivers.value.items[0U].id = 0U;
     service.list.receivers.value.items[0U].systems.mask = 0x03U;
+    service.list.receivers.value.items[0U].binding.value = wire::Binding{1U, 0U};
+    service.list.receivers.value.items[1U].id = 4U;
+    service.list.receivers.value.items[1U].systems.mask = 0x02U;
+    service.list.receivers.value.items[1U].binding.present = true;
+    service.list.receivers.value.items[1U].binding.value = wire::Binding{2U, 0U};
     FakeControlServer server(control, service,
 #if !defined(_WIN32)
                              4U
@@ -1199,7 +1210,9 @@ bool test_host_ctl_real_server()
 #endif
     server.join();
     return flushed && restored &&
-           list_text.find("receiver=513 device=1 local=0 system=ISDB-T,ISDB-S\n") !=
+           list_text.find("receiver=0 device=1 local=0 system=ISDB-T,ISDB-S\n") !=
+               std::string::npos &&
+           list_text.find("receiver=4 device=2 local=0 system=ISDB-S\n") !=
                std::string::npos &&
            list_text.find("ISDB-T/S") == std::string::npos &&
            list_status == 0 && status_status == 0 && missing_explicit_status == 3 &&

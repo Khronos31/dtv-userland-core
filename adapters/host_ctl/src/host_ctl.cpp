@@ -355,7 +355,7 @@ bool print_list(const wire::ListResponse& list, const wire::StatusResponse& stat
             const char* separator = "";
             if (std::fprintf(stdout, "receiver=%u device=%u local=%u system=",
                     static_cast<unsigned int>(receiver.id),
-                    static_cast<unsigned int>(receiver.binding.value.function_id + 1U),
+                    static_cast<unsigned int>(receiver.binding.value.function_id),
                     static_cast<unsigned int>(receiver.binding.value.local_id)) < 0) return false;
             if ((receiver.systems.mask & 0x01U) != 0U) {
                 if (std::fprintf(stdout, "%sISDB-T", separator) < 0) return false;
