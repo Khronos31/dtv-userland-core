@@ -1151,6 +1151,7 @@ bool test_internal_card_status_queue_and_completion()
     CHECK(status && status.value().card_inserted.present &&
           status.value().card_inserted.value);
     CHECK(send_full(authority, session, executor) == Error::OK);
+    CHECK(authority.close(session).kind == AuthorityJobKind::disconnect);
     return true;
 }
 
