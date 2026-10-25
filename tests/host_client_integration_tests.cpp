@@ -20,6 +20,7 @@
 #include <windows.h>
 #include <sddl.h>
 #include "windows/windows_security.h"
+#include <io.h>
 #else
 #include <cerrno>
 #include <dirent.h>
@@ -1119,6 +1120,7 @@ bool test_host_ctl_real_server()
     Listener control;
     if (!control.bind(tree.root, "ctl-live", "control.sock")) return false;
     FakeService service("ctl-live");
+    service.list.receivers.value.items[0U].systems.mask = 0x03U;
     FakeControlServer server(control, service,
 #if !defined(_WIN32)
                              4U
@@ -1137,8 +1139,46 @@ bool test_host_ctl_real_server()
                                "--instance", "ctl-live", "list"};
     const char* status_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
                                  "--instance", "ctl-live", "status"};
+    FILE* list_output = std::tmpfile();
+    if (list_output == nullptr || std::fflush(stdout) != 0) return false;
+#if defined(_WIN32)
+    const int stdout_fd = ::_fileno(stdout);
+    const int saved_stdout = ::_dup(stdout_fd);
+    const bool redirected = saved_stdout >= 0 &&
+        ::_dup2(::_fileno(list_output), stdout_fd) == 0;
+#else
+    const int stdout_fd = ::fileno(stdout);
+    const int saved_stdout = ::dup(stdout_fd);
+    const bool redirected = saved_stdout >= 0 &&
+        ::dup2(::fileno(list_output), stdout_fd) >= 0;
+#endif
+    if (!redirected) {
+        if (saved_stdout >= 0) {
+#if defined(_WIN32)
+            (void)::_close(saved_stdout);
+#else
+            (void)::close(saved_stdout);
+#endif
+        }
+        std::fclose(list_output);
+        return false;
+    }
     const int list_status = dtv::userland::host_ctl::run_control_cli(
         6, list_args, profile);
+    const bool flushed = std::fflush(stdout) == 0;
+#if defined(_WIN32)
+    const bool restored = ::_dup2(saved_stdout, stdout_fd) == 0;
+    (void)::_close(saved_stdout);
+#else
+    const bool restored = ::dup2(saved_stdout, stdout_fd) >= 0;
+    (void)::close(saved_stdout);
+#endif
+    std::rewind(list_output);
+    std::array<char, 2048U> listed{};
+    const std::size_t listed_size = std::fread(
+        listed.data(), 1U, listed.size() - 1U, list_output);
+    std::fclose(list_output);
+    const std::string list_text(listed.data(), listed_size);
     const int status_status = dtv::userland::host_ctl::run_control_cli(
         6, status_args, profile);
 #if !defined(_WIN32)
@@ -1158,7 +1198,11 @@ bool test_host_ctl_real_server()
     const int default_status_status = 0;
 #endif
     server.join();
-    return list_status == 0 && status_status == 0 && missing_explicit_status == 3 &&
+    return flushed && restored &&
+           list_text.find("receiver=513 device=1 local=0 system=ISDB-T,ISDB-S\n") !=
+               std::string::npos &&
+           list_text.find("ISDB-T/S") == std::string::npos &&
+           list_status == 0 && status_status == 0 && missing_explicit_status == 3 &&
            default_list_status == 0 && default_status_status == 0 && server.good.load();
 }
 
