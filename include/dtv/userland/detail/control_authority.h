@@ -19,7 +19,8 @@ struct SessionKey final {
 };
 
 enum class AuthorityJobKind : std::uint8_t {
-    acquire, tune, lnb_power, release, rollback_release, disconnect, card
+    acquire, tune, lnb_power, release, rollback_release, disconnect, card,
+    internal_card_status
 };
 
 struct AuthorityCompletion final {
@@ -35,6 +36,7 @@ struct AuthorityCompletion final {
     wire::CardTransmitResponse card_transmit{};
     wire::BeginTransactionResponse card_transaction{};
     bool lnb_enabled = false;
+    wire::Optional<bool> internal_card_inserted{};
 };
 
 struct AuthorityJob final {
@@ -118,6 +120,7 @@ public:
     }
     // Returns cached enclosure state only; STATUS must not trigger hardware I/O.
     virtual wire::Optional<bool> lnb_power_state() noexcept { return {}; }
+    virtual bool supports_internal_card_observation() const noexcept { return false; }
 };
 
 struct AuthorityReply final {
@@ -173,6 +176,7 @@ private:
     bool closed_ = false;
     wire::ControlRequestKind pending_card_kind_ = wire::ControlRequestKind::card_status;
     std::uint16_t pending_card_opcode_ = 0U;
+    std::uint16_t pending_status_opcode_ = 0U;
 };
 
 class ControlAuthority final {

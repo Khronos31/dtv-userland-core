@@ -174,6 +174,10 @@ public:
         return true;
     }
     w::Optional<bool> lnb_power_state() noexcept override { return lnb_state; }
+    bool supports_internal_card_observation() const noexcept override
+    {
+        return internal_card_observation;
+    }
     AuthorityJob pop()
     {
         AuthorityJob job = jobs[0U];
@@ -185,6 +189,7 @@ public:
     std::size_t count = 0U;
     bool reject = false;
     w::Optional<bool> lnb_state{};
+    bool internal_card_observation = false;
 };
 
 Error send_full(ControlAuthority& authority, ControlServiceSession& session,
@@ -1086,6 +1091,70 @@ bool test_lnb_power_dispatch_and_status()
     return true;
 }
 
+bool test_internal_card_status_queue_and_completion()
+{
+    const ReceiverId ids[] = {2U};
+    auto list = make_list(ids, 1U);
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    ReceiverEngine engine(backend, ids, 1U, tokens, clock);
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession session(authority);
+    Executor executor;
+    executor.internal_card_observation = true;
+    CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
+
+    w::StatusRequest request{list.epoch, w::Scope{}};
+    std::array<std::uint8_t, 64U> payload{};
+    const auto size = w::encode_status_request(request, {payload.data(), payload.size()});
+    CHECK(size);
+    w::Context context;
+    context.epoch = list.epoch;
+    w::Snapshot snapshot;
+
+    executor.reject = true;
+    auto reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 2U, {payload.data(), size.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(reply.action == w::InboundAction::respond && !reply.queued);
+    const auto refused_header = w::decode_header({reply.frame.data, w::kHeaderSize});
+    CHECK(refused_header && refused_header.value().kind == w::Kind::error_response &&
+          refused_header.value().request_id == 2U);
+    const auto refused = w::decode_error_response(
+        {reply.frame.data + w::kHeaderSize, refused_header.value().payload_length});
+    CHECK(refused && refused.value().error.code ==
+          static_cast<std::uint32_t>(Error::RESOURCE_LIMIT));
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    executor.reject = false;
+    reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 3U, {payload.data(), size.value()}), context,
+        snapshot, 0U, executor);
+    CHECK(reply.queued && executor.count == 1U);
+    const AuthorityJob job = executor.pop();
+    CHECK(job.kind == AuthorityJobKind::internal_card_status &&
+          job.key.client_id == session.client_id() && job.key.request_id == 3U);
+    AuthorityCompletion completion;
+    completion.key = job.key;
+    completion.kind = job.kind;
+    completion.internal_card_inserted.present = true;
+    completion.internal_card_inserted.value = true;
+    reply = authority.complete(completion);
+    CHECK(reply.action == w::InboundAction::respond && reply.frame.size >= w::kHeaderSize);
+    const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
+    CHECK(header && header.value().kind == w::Kind::response &&
+          header.value().opcode == w::kOpcodeStatus && header.value().request_id == 3U);
+    const auto status = w::decode_status_response(
+        {reply.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(status && status.value().card_inserted.present &&
+          status.value().card_inserted.value);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+    CHECK(authority.close(session).kind == AuthorityJobKind::disconnect);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -1100,6 +1169,7 @@ int main()
     if (!test_client_id_domain_and_authority_exhaustion()) return 1;
     if (!test_card_dispatch_rejects_unadvertised_reader()) return 1;
     if (!test_lnb_power_dispatch_and_status()) return 1;
+    if (!test_internal_card_status_queue_and_completion()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }

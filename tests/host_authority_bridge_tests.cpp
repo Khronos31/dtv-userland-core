@@ -19,6 +19,21 @@ using namespace px4::userland::ipc::posix;
 
 class Backend final : public TunerServiceBackend {
 public:
+    bool supports_internal_card_observation() const noexcept override
+    {
+        return internal_card_observation_supported;
+    }
+    w::Optional<bool> sample_internal_card_inserted() noexcept override
+    {
+        std::unique_lock<std::mutex> lock(card_status_mutex);
+        ++card_status_samples;
+        if (card_status_blocked) {
+            card_status_entered = true;
+            card_status_condition.notify_all();
+            card_status_condition.wait(lock, [this] { return card_status_released; });
+        }
+        return internal_card_inserted;
+    }
     Result<void> open_receiver(std::uint8_t receiver) noexcept override
     {
         ++opens[receiver];
@@ -104,6 +119,39 @@ public:
     unsigned capture_starts = 0U;
     unsigned capture_stops = 0U;
     bool fail_capture_start = false;
+    bool internal_card_observation_supported = false;
+    w::Optional<bool> internal_card_inserted{};
+    std::mutex card_status_mutex;
+    std::condition_variable card_status_condition;
+    bool card_status_blocked = false;
+    bool card_status_entered = false;
+    bool card_status_released = false;
+    unsigned card_status_samples = 0U;
+    unsigned card_status_sample_count() noexcept
+    {
+        std::lock_guard<std::mutex> lock(card_status_mutex);
+        return card_status_samples;
+    }
+    void block_card_status() noexcept
+    {
+        std::lock_guard<std::mutex> lock(card_status_mutex);
+        card_status_blocked = true;
+        card_status_entered = false;
+        card_status_released = false;
+    }
+    bool wait_card_status() noexcept
+    {
+        std::unique_lock<std::mutex> lock(card_status_mutex);
+        return card_status_condition.wait_for(lock, std::chrono::seconds(5),
+            [this] { return card_status_entered; });
+    }
+    void release_card_status() noexcept
+    {
+        std::lock_guard<std::mutex> lock(card_status_mutex);
+        card_status_blocked = false;
+        card_status_released = true;
+        card_status_condition.notify_all();
+    }
     void block_open(std::uint8_t receiver) noexcept
     {
         std::lock_guard<std::mutex> lock(gate_mutex);
@@ -819,6 +867,238 @@ bool test_response_sent_retains_rejected_hello_disconnect()
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
+}
+
+bool request_card_status(HostAuthorityBridge& bridge, std::uint8_t slot,
+                         const w::Uuid& epoch, std::uint32_t request_id,
+                         w::Optional<bool> expected)
+{
+    const auto fail = [](const char* stage) {
+        std::cerr << "internal card STATUS request failed at " << stage << '\n';
+        return false;
+    };
+    std::array<std::uint8_t, 64U> payload{};
+    const w::StatusRequest request{epoch, w::Scope{}};
+    const auto size = w::encode_status_request(request,
+        {payload.data(), payload.size()});
+    if (!size) return fail("encode_request");
+    w::Context context;
+    context.epoch = epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    auto reply = bridge.accept(slot, frame(w::kOpcodeStatus, request_id,
+        {payload.data(), size.value()}), context, snapshot, 0U);
+    if (!reply.queued) return fail("request_not_queued");
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        reply = bridge.take_response(slot);
+        if (reply.action == w::InboundAction::respond) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (reply.action != w::InboundAction::respond)
+        return fail("response_wait");
+    if (reply.frame.size < w::kHeaderSize)
+        return fail("response_header_size");
+    const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
+    if (!header || header.value().kind != w::Kind::response ||
+        header.value().opcode != w::kOpcodeStatus ||
+        header.value().request_id != request_id)
+        return fail("response_header");
+    const auto decoded = w::decode_status_response(
+        {reply.frame.data + w::kHeaderSize, header.value().payload_length});
+    if (!decoded || decoded.value().card_inserted.present != expected.present ||
+        (expected.present && decoded.value().card_inserted.value != expected.value))
+        return fail("response_projection");
+    if (bridge.response_sent(slot, true) != Error::OK)
+        return fail("response_sent");
+    return true;
+}
+
+bool test_internal_card_status_authority_response()
+{
+    const auto fail = [](const char* stage) {
+        std::cerr << "internal card STATUS authority response failed at "
+                  << stage << '\n';
+        return false;
+    };
+    Backend backend;
+    backend.internal_card_observation_supported = true;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    auto created = ControlWorkerLanes::create(card, tuner);
+    if (!created) return fail("create_workers");
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    const auto opened = bridge.open_session();
+    if (!opened || !hello(bridge, opened.value())) return fail("open_first_session");
+
+    for (const bool value : {true, false}) {
+        backend.internal_card_inserted.present = true;
+        backend.internal_card_inserted.value = value;
+        w::Optional<bool> expected;
+        expected.present = true;
+        expected.value = value;
+        if (!request_card_status(bridge, opened.value(), list.epoch,
+                                 value ? 2U : 3U, expected))
+            return fail(value ? "present_true" : "present_false");
+    }
+    backend.internal_card_inserted = {};
+    if (!request_card_status(bridge, opened.value(), list.epoch, 4U, {}))
+        return fail("present_unknown");
+
+    const auto second = bridge.open_session();
+    if (!second || !hello(bridge, second.value())) return fail("open_second_session");
+    backend.internal_card_inserted.present = true;
+    backend.internal_card_inserted.value = true;
+    std::array<std::uint8_t, 64U> concurrent_payload{};
+    const w::StatusRequest concurrent_request{list.epoch, w::Scope{}};
+    const auto concurrent_size = w::encode_status_request(concurrent_request,
+        {concurrent_payload.data(), concurrent_payload.size()});
+    if (!concurrent_size) return fail("concurrent_encode_request");
+    w::Context concurrent_context;
+    concurrent_context.epoch = list.epoch;
+    concurrent_context.state = w::ContextState::ready;
+    w::Snapshot concurrent_snapshot;
+    const unsigned samples_before_concurrent = backend.card_status_sample_count();
+    const auto first_pending = bridge.accept(opened.value(),
+        frame(w::kOpcodeStatus, 5U,
+            {concurrent_payload.data(), concurrent_size.value()}),
+        concurrent_context, concurrent_snapshot, 0U);
+    const auto second_pending = bridge.accept(second.value(),
+        frame(w::kOpcodeStatus, 5U,
+            {concurrent_payload.data(), concurrent_size.value()}),
+        concurrent_context, concurrent_snapshot, 0U);
+    if (!first_pending.queued || !second_pending.queued)
+        return fail("concurrent_queue");
+    std::array<dtv::userland::detail::AuthorityReply, 2U> concurrent_replies{};
+    const auto concurrent_until = std::chrono::steady_clock::now() +
+        std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < concurrent_until &&
+           (concurrent_replies[0U].action != w::InboundAction::respond ||
+            concurrent_replies[1U].action != w::InboundAction::respond)) {
+        (void)bridge.poll();
+        if (concurrent_replies[0U].action != w::InboundAction::respond)
+            concurrent_replies[0U] = bridge.take_response(opened.value());
+        if (concurrent_replies[1U].action != w::InboundAction::respond)
+            concurrent_replies[1U] = bridge.take_response(second.value());
+        if (concurrent_replies[0U].action != w::InboundAction::respond ||
+            concurrent_replies[1U].action != w::InboundAction::respond)
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (concurrent_replies[0U].action != w::InboundAction::respond ||
+        concurrent_replies[1U].action != w::InboundAction::respond) {
+        std::cerr << "internal card STATUS concurrent response actions="
+                  << static_cast<unsigned>(concurrent_replies[0U].action) << ','
+                  << static_cast<unsigned>(concurrent_replies[1U].action)
+                  << " samples="
+                  << backend.card_status_sample_count() - samples_before_concurrent
+                  << " clients=" << bridge.client_id(opened.value()) << ','
+                  << bridge.client_id(second.value())
+                  << " queued_completions="
+                  << created.value()->pending_completions_for_test(
+                         created.value()->authority_status_lane())
+                  << " worker_error="
+                  << static_cast<unsigned>(created.value()->error())
+                  << " fatal_slots="
+                  << bridge.fatal_unresolved_for_test(opened.value()) << ','
+                  << bridge.fatal_unresolved_for_test(second.value()) << '\n';
+        return fail("concurrent_response_wait");
+    }
+    for (std::size_t i = 0U; i < concurrent_replies.size(); ++i) {
+        const auto& concurrent_reply = concurrent_replies[i];
+        if (concurrent_reply.action != w::InboundAction::respond ||
+            concurrent_reply.frame.size < w::kHeaderSize)
+            return fail(i == 0U ? "concurrent_first_frame" : "concurrent_second_frame");
+        const auto header = w::decode_header(
+            {concurrent_reply.frame.data, w::kHeaderSize});
+        const auto decoded = header ? w::decode_status_response(
+            {concurrent_reply.frame.data + w::kHeaderSize,
+             header.value().payload_length})
+            : Result<w::StatusResponse>::failure(Error::INTERNAL);
+        if (!header || header.value().kind != w::Kind::response ||
+            header.value().request_id != 5U || !decoded ||
+            !decoded.value().card_inserted.present ||
+            !decoded.value().card_inserted.value)
+            return fail(i == 0U ? "concurrent_first_projection" :
+                                  "concurrent_second_projection");
+    }
+    if (bridge.response_sent(opened.value(), true) != Error::OK ||
+        bridge.response_sent(second.value(), true) != Error::OK ||
+        bridge.close_session(second.value()) != Error::OK || !wait_free(bridge, second.value()))
+        return fail("close_second_session");
+
+    backend.block_card_status();
+    std::array<std::uint8_t, 64U> payload{};
+    const w::StatusRequest request{list.epoch, w::Scope{}};
+    const auto size = w::encode_status_request(request,
+        {payload.data(), payload.size()});
+    if (!size) return fail("close_pending_encode_request");
+    w::Context context;
+    context.epoch = list.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto pending = bridge.accept(opened.value(), frame(w::kOpcodeStatus, 6U,
+        {payload.data(), size.value()}), context, snapshot, 0U);
+    if (!pending.queued) {
+        backend.release_card_status();
+        return fail("close_pending_queue");
+    }
+    if (!backend.wait_card_status()) {
+        backend.release_card_status();
+        return fail("close_pending_hook_wait");
+    }
+    if (bridge.close_session(opened.value()) != Error::OK) {
+        backend.release_card_status();
+        return fail("close_pending_session");
+    }
+    backend.release_card_status();
+    if (!wait_free(bridge, opened.value())) return fail("close_pending_wait_free");
+    const auto reused = bridge.open_session();
+    if (!reused || reused.value() != opened.value())
+        return fail("reuse_slot");
+    if (!hello(bridge, reused.value())) return fail("reuse_hello");
+    backend.internal_card_inserted.present = true;
+    backend.internal_card_inserted.value = false;
+    w::Optional<bool> expected;
+    expected.present = true;
+    expected.value = false;
+    if (!request_card_status(bridge, reused.value(), list.epoch, 2U, expected))
+        return fail("reused_slot_status");
+    backend.block_card_status();
+    const w::StatusRequest shutdown_request{list.epoch, w::Scope{}};
+    const auto shutdown_size = w::encode_status_request(
+        shutdown_request, {payload.data(), payload.size()});
+    if (!shutdown_size) return fail("shutdown_encode_request");
+    const auto shutdown_pending = bridge.accept(reused.value(),
+        frame(w::kOpcodeStatus, 3U, {payload.data(), shutdown_size.value()}),
+        context, snapshot, 0U);
+    if (!shutdown_pending.queued) {
+        backend.release_card_status();
+        return fail("shutdown_queue");
+    }
+    if (!backend.wait_card_status()) {
+        backend.release_card_status();
+        return fail("shutdown_hook_wait");
+    }
+    if (bridge.begin_shutdown() != Error::OK) {
+        backend.release_card_status();
+        return fail("begin_shutdown");
+    }
+    backend.release_card_status();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!bridge.stopped() && std::chrono::steady_clock::now() < until) {
+        (void)bridge.poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!bridge.stopped()) return fail("shutdown_wait_stopped");
+    if (bridge.shutdown_result() != Error::OK) return fail("shutdown_result");
+    return true;
 }
 
 bool test_disconnect_direct_observation()
@@ -2974,6 +3254,10 @@ int main(int argc, char** argv)
     }
     if (!test_disconnect_direct_observation()) {
         std::cerr << "disconnect direct observation fixture failed\n";
+        return 1;
+    }
+    if (!test_internal_card_status_authority_response()) {
+        std::cerr << "internal card STATUS authority response fixture failed\n";
         return 1;
     }
     if (!test_capacity_and_send_failure()) {

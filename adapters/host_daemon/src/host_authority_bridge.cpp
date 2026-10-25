@@ -486,6 +486,11 @@ dtv::userland::wire::Optional<bool> HostAuthorityBridge::lnb_power_state() noexc
     return tuner_service_.independent_lnb_power_state();
 }
 
+bool HostAuthorityBridge::supports_internal_card_observation() const noexcept
+{
+    return tuner_service_.supports_internal_card_observation();
+}
+
 Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream_impl(
     std::uint8_t control_slot, std::uint64_t lease_id,
     std::uint64_t stream_id, bool retain_submit_rejection) noexcept
@@ -628,6 +633,8 @@ bool HostAuthorityBridge::queue_job(const AuthorityJob& job,
         ? Result<ControlWorkerLane>::success(workers_.reader_lane())
         : job.kind == AuthorityJobKind::lnb_power
         ? workers_.authority_lnb_lane()
+        : job.kind == AuthorityJobKind::internal_card_status
+        ? Result<ControlWorkerLane>::success(workers_.authority_status_lane())
         : workers_.authority_lane(
               task.receiver, job.kind == AuthorityJobKind::disconnect);
     if (!lane || !workers_.submit(lane.value(), task)) return false;

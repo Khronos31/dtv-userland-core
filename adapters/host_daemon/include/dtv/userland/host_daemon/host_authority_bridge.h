@@ -119,6 +119,7 @@ public:
         std::uint64_t client_id, std::uint64_t lease_id,
         std::uint64_t stream_id) noexcept override;
     dtv::userland::wire::Optional<bool> lnb_power_state() noexcept override;
+    bool supports_internal_card_observation() const noexcept override;
     HostAuthorityDataCounts data_counts() const noexcept;
     Error set_legacy_completion_sink(LegacyCompletionSink sink,
                                      void* context) noexcept;

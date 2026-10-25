@@ -231,6 +231,7 @@ public:
                                              bool cleanup) const noexcept;
     ControlWorkerLane reader_lane() const noexcept;
     Result<ControlWorkerLane> authority_lnb_lane() const noexcept;
+    ControlWorkerLane authority_status_lane() const noexcept;
     bool try_pop(ControlWorkerLane lane, ControlWorkerCompletion& completion) noexcept;
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     std::size_t pending_completions_for_test(ControlWorkerLane lane) const noexcept;
