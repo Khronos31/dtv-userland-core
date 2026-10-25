@@ -348,6 +348,24 @@ bool print_list(const wire::ListResponse& list, const wire::StatusResponse& stat
                 static_cast<unsigned int>(function.pid),
                 function.present ? "yes" : "no") < 0) return false;
     }
+    if (list.receivers.present) {
+        for (std::size_t index = 0U; index < list.receivers.value.count; ++index) {
+            const auto& receiver = list.receivers.value.items[index];
+            if (!receiver.binding.present) continue;
+            const char* separator = "";
+            if (std::fprintf(stdout, "receiver=%u device=%u local=%u system=",
+                    static_cast<unsigned int>(receiver.id),
+                    static_cast<unsigned int>(receiver.binding.value.function_id),
+                    static_cast<unsigned int>(receiver.binding.value.local_id)) < 0) return false;
+            if ((receiver.systems.mask & 0x01U) != 0U) {
+                if (std::fprintf(stdout, "%sISDB-T", separator) < 0) return false;
+                separator = ",";
+            }
+            if ((receiver.systems.mask & 0x02U) != 0U &&
+                std::fprintf(stdout, "%sISDB-S", separator) < 0) return false;
+            if (std::putchar('\n') == EOF) return false;
+        }
+    }
     return std::fflush(stdout) == 0;
 }
 
