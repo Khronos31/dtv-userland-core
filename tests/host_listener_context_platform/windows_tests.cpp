@@ -29,6 +29,7 @@ using namespace dtv::userland;
 using namespace dtv::userland::host_listener_context::detail;
 using dtv::userland::host_listener_context::ListenerDiagnostic;
 using dtv::userland::host_listener_context::ListenerDiagnosticReason;
+using dtv::userland::host_listener_context::RuntimeDirectoryLayer;
 
 namespace dtv::userland::host_listener_context::detail {
 Error set_connection_send_buffer_for_test(ListenerIo& io, ConnectionToken connection,
@@ -180,6 +181,44 @@ bool apply_current_user_endpoint_security(const wchar_t* path) noexcept
             owner, nullptr, acl, nullptr);
     (void)::LocalFree(acl);
     return status == ERROR_SUCCESS && endpoint_dacl_is_current_user_only(path);
+}
+
+bool create_private_directory_for_test(const std::wstring& path) noexcept
+{
+    return ::CreateDirectoryW(path.c_str(), nullptr) != 0 &&
+           windows_security::set_current_user_owner_and_dacl(path.c_str());
+}
+
+bool add_untrusted_runtime_write_for_test(const wchar_t* path) noexcept
+{
+    SECURITY_ATTRIBUTES attributes{};
+    SECURITY_DESCRIPTOR descriptor{};
+    PACL current_acl = nullptr;
+    windows_security::SidBuffer current_storage{};
+    if (!windows_security::build_current_user_security(attributes, descriptor,
+            current_acl, current_storage)) return false;
+    std::array<std::uint8_t, SECURITY_MAX_SID_SIZE> world_storage{};
+    DWORD world_size = static_cast<DWORD>(world_storage.size());
+    if (::CreateWellKnownSid(WinWorldSid, nullptr, world_storage.data(), &world_size) == 0) {
+        (void)::LocalFree(current_acl);
+        return false;
+    }
+    EXPLICIT_ACCESS_W access{};
+    access.grfAccessPermissions = GENERIC_WRITE;
+    access.grfAccessMode = GRANT_ACCESS;
+    access.grfInheritance = NO_INHERITANCE;
+    access.Trustee.TrusteeForm = TRUSTEE_IS_SID;
+    access.Trustee.TrusteeType = TRUSTEE_IS_WELL_KNOWN_GROUP;
+    access.Trustee.ptstrName = reinterpret_cast<LPWSTR>(world_storage.data());
+    PACL acl = nullptr;
+    const DWORD acl_status = ::SetEntriesInAclW(1U, &access, current_acl, &acl);
+    (void)::LocalFree(current_acl);
+    if (acl_status != ERROR_SUCCESS || acl == nullptr) return false;
+    const DWORD status = ::SetNamedSecurityInfoW(const_cast<LPWSTR>(path), SE_FILE_OBJECT,
+        DACL_SECURITY_INFORMATION | PROTECTED_DACL_SECURITY_INFORMATION,
+        nullptr, nullptr, acl, nullptr);
+    (void)::LocalFree(acl);
+    return status == ERROR_SUCCESS;
 }
 
 bool endpoint_is_af_unix_socket(const wchar_t* path) noexcept
@@ -546,6 +585,59 @@ bool test_invalid_runtime_utf8_diagnostic()
                  "report invalid UTF-8 runtime directory conversion");
 }
 
+bool test_directory_layer_security_diagnostic()
+{
+    std::wstring runtime;
+    std::string root;
+    if (!check(make_runtime(runtime, root), "diagnostic runtime directory")) return false;
+    const std::array<std::wstring, 4U> paths{
+        runtime,
+        runtime + L"\\listener-test",
+        runtime + L"\\listener-test\\v1",
+        runtime + L"\\listener-test\\v1\\instance"};
+    if (!create_private_directory_for_test(paths[1U]) ||
+        !create_private_directory_for_test(paths[2U]) ||
+        !create_private_directory_for_test(paths[3U])) {
+        std::filesystem::remove_all(runtime);
+        return check(false, "prepare private nested runtime directories");
+    }
+    const auto control = config(root, "control.sock");
+    auto data = control;
+    data.endpoint_name = "stream.sock";
+    const std::array<RuntimeDirectoryLayer, 4U> layers{
+        RuntimeDirectoryLayer::runtime_root,
+        RuntimeDirectoryLayer::product,
+        RuntimeDirectoryLayer::version,
+        RuntimeDirectoryLayer::instance};
+    const std::array<const char*, 4U> labels{
+        "report insecure runtime root layer",
+        "report insecure product directory layer",
+        "report insecure version directory layer",
+        "report insecure instance directory layer"};
+    bool passed = true;
+    for (std::size_t index = 0U; index < paths.size(); ++index) {
+        if (!add_untrusted_runtime_write_for_test(paths[index].c_str())) {
+            passed = false;
+            break;
+        }
+        ListenerDiagnostic diagnostic{};
+        auto io = create_listener_io();
+        const Error result = io == nullptr ? Error::INTERNAL :
+            io->reserve_pair(control, data, &diagnostic);
+        io.reset();
+        const bool restored = windows_security::set_current_user_owner_and_dacl(
+            paths[index].c_str());
+        if (!check(result == Error::UNSUPPORTED && restored &&
+                   diagnostic.reason == ListenerDiagnosticReason::runtime_directory_security &&
+                   diagnostic.directory_layer == layers[index], labels[index])) {
+            passed = false;
+            break;
+        }
+    }
+    std::filesystem::remove_all(runtime);
+    return passed;
+}
+
 }  // namespace
 
 int main() noexcept
@@ -553,7 +645,8 @@ int main() noexcept
     WSADATA data{};
     if (!check(::WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup")) return 1;
     const bool passed = test_pair_io_and_dacl() && test_stale_foreign_and_shared_boundary() &&
-        test_identity_failure_rollback() && test_invalid_runtime_utf8_diagnostic();
+        test_identity_failure_rollback() && test_invalid_runtime_utf8_diagnostic() &&
+        test_directory_layer_security_diagnostic();
     (void)::WSACleanup();
     return passed ? 0 : 1;
 }

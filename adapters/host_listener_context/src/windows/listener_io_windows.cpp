@@ -361,13 +361,21 @@ public:
         std::wstring version_path = product_path + separator + L"v1";
         std::wstring instance_path = version_path + separator;
         instance_path.append(control.instance.begin(), control.instance.end());
-        if (!windows_security::verify_runtime_parent(runtime.c_str()) ||
-            !ensure_private_directory(product_path) || !ensure_private_directory(version_path) ||
-            !ensure_private_directory(instance_path)) {
-            if (diagnostic != nullptr)
+        const auto security_failure = [diagnostic](RuntimeDirectoryLayer layer) noexcept {
+            if (diagnostic != nullptr) {
                 diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+                diagnostic->directory_layer = layer;
+            }
             return Error::UNSUPPORTED;
-        }
+        };
+        if (!windows_security::verify_runtime_parent(runtime.c_str()))
+            return security_failure(RuntimeDirectoryLayer::runtime_root);
+        if (!ensure_private_directory(product_path))
+            return security_failure(RuntimeDirectoryLayer::product);
+        if (!ensure_private_directory(version_path))
+            return security_failure(RuntimeDirectoryLayer::version);
+        if (!ensure_private_directory(instance_path))
+            return security_failure(RuntimeDirectoryLayer::instance);
         control_path_ = control_result.value();
         data_path_ = data_result.value();
         if (!utf8_to_wide(control_path_, control_wide_) ||
