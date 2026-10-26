@@ -1337,8 +1337,14 @@ static Result<Px4TsRunResult> run_wire_profile(
     std::uint16_t receiver_id = arguments.receiver;
     if (profile != nullptr) {
         if (!has_discovered_snapshot) {
-            auto probe = SocketStream::connect(control_endpoint, Timeout{2000U});
+            if (diagnostics != nullptr)
+                diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+            auto probe = SocketStream::connect(
+                control_endpoint, Timeout{2000U},
+                diagnostics != nullptr ? &diagnostics->endpoint_connect : nullptr);
             if (!probe) return Result<Px4TsRunResult>::failure(probe.error());
+            if (diagnostics != nullptr)
+                diagnostics->stage = Px4TsDiagnosticStage::none;
             SocketClientTransport probe_transport(probe.value());
             const auto snapshot = wire::fetch_status(probe_transport, Timeout{4000U});
             probe.value().close();
