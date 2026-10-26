@@ -1572,6 +1572,47 @@ bool test_host_ts_tune_rejection_diagnostic()
            output_text.find("frequency is invalid") == std::string_view::npos;
 }
 
+#if !defined(_WIN32)
+bool test_host_ts_missing_endpoint_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("missing")) return false;
+    auto arguments = test_ts_arguments(1U);
+    arguments.instance = "missing";
+    arguments.runtime_directory = root.root;
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        arguments, profile, output, clock, signal, {}, nullptr, &diagnostics);
+    if (result || result.error() != Error::NOT_FOUND ||
+        diagnostics.stage != px4::userland::cli::Px4TsDiagnosticStage::endpoint_connect ||
+        diagnostics.endpoint_connect.stage !=
+            dtv::userland::host_runtime::EndpointConnectStage::endpoint ||
+        !output.bytes.empty()) return false;
+    FILE* text = std::tmpfile();
+    if (text == nullptr) return false;
+    px4::userland::cli::print_px4_ts_run_diagnostic(
+        text, "fake-ts", result.error(), diagnostics);
+    if (std::fflush(text) != 0) {
+        (void)std::fclose(text);
+        return false;
+    }
+    std::rewind(text);
+    std::array<char, 512U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, text);
+    const bool closed = std::fclose(text) == 0;
+    const std::string_view output_text(message.data(), size);
+    return closed && output_text.find("control endpoint is missing") !=
+                         std::string_view::npos &&
+           output_text.find("--runtime-dir") != std::string_view::npos &&
+           output_text.find("--instance") != std::string_view::npos;
+}
+#endif
+
 bool run_host_ts_output_timeout_case(bool request_signal)
 {
     RuntimeTree live_root;
@@ -1823,6 +1864,11 @@ int main()
     const bool eof = run_ts_lifecycle(true);
     const bool ts_receiver_ambiguity = test_host_ts_receiver_ambiguity_diagnostic();
     const bool ts_tune_rejection = test_host_ts_tune_rejection_diagnostic();
+#if !defined(_WIN32)
+    const bool ts_missing_endpoint = test_host_ts_missing_endpoint_diagnostic();
+#else
+    const bool ts_missing_endpoint = true;
+#endif
     const bool output_timeouts = test_host_ts_output_timeouts();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
@@ -1856,6 +1902,8 @@ int main()
         std::puts("fake_server_host_ts_receiver_ambiguity=PASS");
     if (ts_tune_rejection)
         std::puts("fake_server_host_ts_tune_rejection_diagnostic=PASS");
+    if (ts_missing_endpoint)
+        std::puts("explicit_instance_ts_missing_endpoint_diagnostic=PASS");
     if (output_timeouts)
         std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
@@ -1868,6 +1916,7 @@ int main()
            ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
            ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
            ts && eof && ts_receiver_ambiguity && ts_tune_rejection &&
+           ts_missing_endpoint &&
            output_timeouts && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }
