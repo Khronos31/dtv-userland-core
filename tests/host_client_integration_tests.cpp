@@ -1154,25 +1154,52 @@ px4::userland::cli::Px4TsArguments test_ts_arguments(std::uint64_t packet_count)
 
 bool test_host_ctl_endpoint_path_diagnostic()
 {
+#if defined(_WIN32)
+    const std::string runtime = "C:\\" + std::string(120U, 'x');
+#else
     const std::string runtime = "/" + std::string(120U, 'x');
+#endif
     const char* arguments[] = {
         "fake-ctl", "--runtime-dir", runtime.c_str(), "--instance", "test", "status"};
     const auto profile = fake_serial_ctl_profile();
-    FILE* capture = std::tmpfile();
-    if (capture == nullptr || std::fflush(stderr) != 0) {
-        if (capture != nullptr) (void)std::fclose(capture);
+    FILE* stderr_capture = std::tmpfile();
+    FILE* stdout_capture = std::tmpfile();
+    if (stderr_capture == nullptr || stdout_capture == nullptr ||
+        std::fflush(stderr) != 0 || std::fflush(stdout) != 0) {
+        if (stderr_capture != nullptr) (void)std::fclose(stderr_capture);
+        if (stdout_capture != nullptr) (void)std::fclose(stdout_capture);
         return false;
     }
 #if defined(_WIN32)
     const int saved_stderr = ::_dup(::_fileno(stderr));
-    const bool redirected = saved_stderr >= 0 &&
-        ::_dup2(::_fileno(capture), ::_fileno(stderr)) == 0;
+    const int saved_stdout = ::_dup(::_fileno(stdout));
+    const bool stderr_redirected = saved_stderr >= 0 &&
+        ::_dup2(::_fileno(stderr_capture), ::_fileno(stderr)) == 0;
+    const bool stdout_redirected = stderr_redirected && saved_stdout >= 0 &&
+        ::_dup2(::_fileno(stdout_capture), ::_fileno(stdout)) == 0;
 #else
     const int saved_stderr = ::dup(::fileno(stderr));
-    const bool redirected = saved_stderr >= 0 &&
-        ::dup2(::fileno(capture), ::fileno(stderr)) >= 0;
+    const int saved_stdout = ::dup(::fileno(stdout));
+    const bool stderr_redirected = saved_stderr >= 0 &&
+        ::dup2(::fileno(stderr_capture), ::fileno(stderr)) >= 0;
+    const bool stdout_redirected = stderr_redirected && saved_stdout >= 0 &&
+        ::dup2(::fileno(stdout_capture), ::fileno(stdout)) >= 0;
 #endif
-    if (!redirected) {
+    if (!stderr_redirected || !stdout_redirected) {
+        if (stderr_redirected) {
+#if defined(_WIN32)
+            (void)::_dup2(saved_stderr, ::_fileno(stderr));
+#else
+            (void)::dup2(saved_stderr, ::fileno(stderr));
+#endif
+        }
+        if (stdout_redirected) {
+#if defined(_WIN32)
+            (void)::_dup2(saved_stdout, ::_fileno(stdout));
+#else
+            (void)::dup2(saved_stdout, ::fileno(stdout));
+#endif
+        }
         if (saved_stderr >= 0) {
 #if defined(_WIN32)
             (void)::_close(saved_stderr);
@@ -1180,28 +1207,46 @@ bool test_host_ctl_endpoint_path_diagnostic()
             (void)::close(saved_stderr);
 #endif
         }
-        (void)std::fclose(capture);
+        if (saved_stdout >= 0) {
+#if defined(_WIN32)
+            (void)::_close(saved_stdout);
+#else
+            (void)::close(saved_stdout);
+#endif
+        }
+        (void)std::fclose(stderr_capture);
+        (void)std::fclose(stdout_capture);
         return false;
     }
     const int status = dtv::userland::host_ctl::run_control_cli(
         6, arguments, profile);
     (void)std::fflush(stderr);
+    (void)std::fflush(stdout);
 #if defined(_WIN32)
-    const bool restored = ::_dup2(saved_stderr, ::_fileno(stderr)) == 0;
+    const bool stderr_restored = ::_dup2(saved_stderr, ::_fileno(stderr)) == 0;
     (void)::_close(saved_stderr);
+    const bool stdout_restored = ::_dup2(saved_stdout, ::_fileno(stdout)) == 0;
+    (void)::_close(saved_stdout);
 #else
-    const bool restored = ::dup2(saved_stderr, ::fileno(stderr)) >= 0;
+    const bool stderr_restored = ::dup2(saved_stderr, ::fileno(stderr)) >= 0;
     (void)::close(saved_stderr);
+    const bool stdout_restored = ::dup2(saved_stdout, ::fileno(stdout)) >= 0;
+    (void)::close(saved_stdout);
 #endif
-    std::rewind(capture);
+    std::rewind(stderr_capture);
     std::array<char, 1024U> message{};
-    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, capture);
-    const bool closed = std::fclose(capture) == 0;
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U,
+                                        stderr_capture);
+    (void)std::fseek(stdout_capture, 0L, SEEK_END);
+    const long stdout_size = std::ftell(stdout_capture);
+    const bool stderr_closed = std::fclose(stderr_capture) == 0;
+    const bool stdout_closed = std::fclose(stdout_capture) == 0;
     const std::string_view output(message.data(), size);
-    return restored && closed && status == 2 &&
+    return stderr_restored && stdout_restored && stderr_closed && stdout_closed &&
+           status == 2 && stdout_size == 0L &&
            output.find("endpoint path is too long") != std::string_view::npos &&
            output.find("UTF-8 bytes") != std::string_view::npos &&
-           output.find("--runtime-dir or --instance") != std::string_view::npos;
+           output.find("shorten --runtime-dir or --instance") != std::string_view::npos;
 }
 
 #if !defined(_WIN32)
