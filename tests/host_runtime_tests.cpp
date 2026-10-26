@@ -693,7 +693,16 @@ bool socket_transport_test()
         else {
             std::memcpy(address.sun_path, path.value().c_str(), path.value().size() + 1U);
             ok = ::bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
-                 ::chmod(path.value().c_str(), 0600) == 0 && ::listen(server, 4) == 0;
+                 ::chmod(path.value().c_str(), 0600) == 0;
+            if (ok) {
+                dtv::userland::host_runtime::EndpointConnectDiagnostic refused_diagnostic{};
+                const auto refused = dtv::userland::host_runtime::connect_control(
+                    config, {1000U}, &refused_diagnostic);
+                ok = !refused && refused.error() == dtv::userland::Error::NOT_READY &&
+                     refused_diagnostic.stage ==
+                         dtv::userland::host_runtime::EndpointConnectStage::connect;
+            }
+            ok = ok && ::listen(server, 4) == 0;
         }
     }
     if (ok) {

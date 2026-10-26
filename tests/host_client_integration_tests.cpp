@@ -431,6 +431,7 @@ struct FakeService final {
     std::atomic<unsigned int> release_order{0U};
     bool unsupported_status = false;
     bool refuse_lnb_power = false;
+    bool refuse_tune = false;
     unsigned int replace_serial_at_list = 0U;
     std::string replacement_serial;
     unsigned int replace_usb_path_at_list = 0U;
@@ -544,6 +545,14 @@ struct FakeService final {
         }
         if (request.kind == wire::ControlRequestKind::tune) {
             saw_tune.store(true);
+            if (refuse_tune) {
+                std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> output{};
+                const auto frame = wire::encode_error_frame(
+                    request.opcode, request.request_id, hello.epoch,
+                    static_cast<std::uint32_t>(Error::INVALID_ARGUMENT), "tune",
+                    wire::Scope{}, MutableByteView{output.data(), output.size()});
+                return frame && send_all(peer, output.data(), frame.value());
+            }
             wire::TuneResult response{};
             response.epoch = hello.epoch;
             response.tune_revision = 3U;
@@ -1518,6 +1527,51 @@ bool test_host_ts_receiver_ambiguity_diagnostic()
            output.bytes.empty();
 }
 
+bool test_host_ts_tune_rejection_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("tune-reject")) return false;
+    Listener control;
+    if (!control.bind(root.root, "tune-reject", "control.sock")) return false;
+    FakeService service("tune-reject");
+    service.refuse_tune = true;
+    FakeControlServer server(control, service, 2U);
+    server.start();
+
+    auto arguments = test_ts_arguments(1U);
+    arguments.instance = "tune-reject";
+    arguments.runtime_directory = root.root;
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        arguments, profile, output, clock, signal, {}, nullptr, &diagnostics);
+    server.join();
+    if (result || result.error() != Error::INVALID_ARGUMENT || !server.good.load() ||
+        !service.saw_tune.load() ||
+        diagnostics.stage != px4::userland::cli::Px4TsDiagnosticStage::recording_setup ||
+        output.bytes.size() != 0U) return false;
+    FILE* text = std::tmpfile();
+    if (text == nullptr) return false;
+    px4::userland::cli::print_px4_ts_run_diagnostic(
+        text, "fake-ts", result.error(), diagnostics);
+    if (std::fflush(text) != 0) {
+        (void)std::fclose(text);
+        return false;
+    }
+    std::rewind(text);
+    std::array<char, 512U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, text);
+    const bool closed = std::fclose(text) == 0;
+    const std::string_view output_text(message.data(), size);
+    return closed && output_text.find("recording setup request") != std::string_view::npos &&
+           output_text.find("protocol does not identify") != std::string_view::npos &&
+           output_text.find("frequency is invalid") == std::string_view::npos;
+}
+
 bool run_host_ts_output_timeout_case(bool request_signal)
 {
     RuntimeTree live_root;
@@ -1768,6 +1822,7 @@ int main()
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
     const bool ts_receiver_ambiguity = test_host_ts_receiver_ambiguity_diagnostic();
+    const bool ts_tune_rejection = test_host_ts_tune_rejection_diagnostic();
     const bool output_timeouts = test_host_ts_output_timeouts();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
@@ -1799,6 +1854,8 @@ int main()
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
     if (ts_receiver_ambiguity)
         std::puts("fake_server_host_ts_receiver_ambiguity=PASS");
+    if (ts_tune_rejection)
+        std::puts("fake_server_host_ts_tune_rejection_diagnostic=PASS");
     if (output_timeouts)
         std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
@@ -1810,6 +1867,7 @@ int main()
     return ctl && ctl_endpoint_path && lnb_ctl && ctl_discovery && ctl_ambiguous &&
            ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
            ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
-           ts && eof && ts_receiver_ambiguity && output_timeouts && overlong &&
+           ts && eof && ts_receiver_ambiguity && ts_tune_rejection &&
+           output_timeouts && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }
