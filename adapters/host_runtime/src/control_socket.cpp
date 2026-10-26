@@ -427,24 +427,54 @@ Result<std::string> control_endpoint_path(const EndpointConfig& config,
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     const EndpointConfig& config, Timeout timeout) noexcept
 {
-    const auto path_result = endpoint_path(config);
-    if (!path_result) return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(path_result.error());
+    return connect_endpoint(config, timeout, nullptr);
+}
+
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointConnectDiagnostic{};
+    EndpointDiagnostic endpoint_diagnostic{};
+    const auto path_result = endpoint_path(config, &endpoint_diagnostic);
+    if (!path_result) {
+        if (diagnostic != nullptr) {
+            diagnostic->stage = EndpointConnectStage::endpoint_path;
+            diagnostic->endpoint = endpoint_diagnostic;
+        }
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(path_result.error());
+    }
     const std::string& path = path_result.value();
     const auto deadline = Clock::now() + std::chrono::milliseconds(timeout.milliseconds);
 
 #if defined(_WIN32)
-    if (config.access != EndpointAccess::private_user)
+    if (config.access != EndpointAccess::private_user) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::runtime_namespace;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
-    if (!ensure_winsock())
+    }
+    if (!ensure_winsock()) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
+    }
     const Error security = endpoint_security(path);
-    if (security != Error::OK)
+    if (security != Error::OK) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::endpoint;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(security);
+    }
     NativeSocket socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (socket == kInvalidSocket) return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
+    if (socket == kInvalidSocket) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
+    }
     u_long nonblocking = 1U;
     if (::ioctlsocket(socket, FIONBIO, &nonblocking) != 0) {
         (void)::closesocket(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
     }
     SOCKADDR_UN address{};
@@ -455,10 +485,14 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         const int error = ::WSAGetLastError();
         if (error != WSAEWOULDBLOCK && error != WSAEINPROGRESS && error != WSAEALREADY) {
             (void)::closesocket(socket);
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::connect;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::NOT_READY);
         }
         if (!wait_socket(socket, true, deadline)) {
             (void)::closesocket(socket);
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::connect_timeout;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::TIMEOUT);
         }
         int socket_error_value = 0;
@@ -466,6 +500,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         if (::getsockopt(socket, SOL_SOCKET, SO_ERROR,
                 reinterpret_cast<char*>(&socket_error_value), &error_length) != 0 || socket_error_value != 0) {
             (void)::closesocket(socket);
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::connect;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::NOT_READY);
         }
     }
@@ -483,21 +519,33 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         &runtime_directory, &product_dir, &version_dir, &instance_dir};
     for (const std::string* directory : directories) {
         const DirectoryCheck check = secure_directory(*directory, config.access, owner);
-        if (check != DirectoryCheck::ready)
+        if (check != DirectoryCheck::ready) {
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::runtime_namespace;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(
                 check == DirectoryCheck::missing ? Error::NOT_READY : Error::UNSUPPORTED);
+        }
     }
     struct stat endpoint_before{};
     const EndpointCheck endpoint_check = secure_endpoint(
         path, config.access, owner, endpoint_before);
-    if (endpoint_check != EndpointCheck::ready)
+    if (endpoint_check != EndpointCheck::ready) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::endpoint;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(
             endpoint_check == EndpointCheck::missing ? Error::NOT_FOUND : Error::UNSUPPORTED);
+    }
     NativeSocket socket = ::socket(AF_UNIX, SOCK_STREAM, 0);
-    if (socket < 0) return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
+    if (socket < 0) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
+    }
     const int original = ::fcntl(socket, F_GETFL, 0);
     if (original < 0 || ::fcntl(socket, F_SETFL, original | O_NONBLOCK) != 0) {
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::INTERNAL);
     }
     sockaddr_un address{};
@@ -507,11 +555,15 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     if (connected != 0 && errno != EINPROGRESS) {
         const Error error = socket_error(errno);
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::connect;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(error);
     }
     if (connected != 0) {
         if (!wait_socket(socket, POLLOUT, deadline)) {
             (void)::close(socket);
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::connect_timeout;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::TIMEOUT);
         }
         int socket_error_value = 0;
@@ -520,6 +572,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
             socket_error_value != 0) {
             const Error error = socket_error(socket_error_value == 0 ? errno : socket_error_value);
             (void)::close(socket);
+            if (diagnostic != nullptr)
+                diagnostic->stage = EndpointConnectStage::connect;
             return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(error);
         }
     }
@@ -527,6 +581,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     if (secure_endpoint(path, config.access, owner, endpoint_after) != EndpointCheck::ready ||
         endpoint_before.st_dev != endpoint_after.st_dev || endpoint_before.st_ino != endpoint_after.st_ino) {
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::endpoint;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
     }
 #if defined(SO_PEERCRED)
@@ -535,6 +591,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     if (::getsockopt(socket, SOL_SOCKET, SO_PEERCRED, &peer, &peer_length) != 0 ||
         peer_length != sizeof(peer)) {
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::peer_identity;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
     }
     const std::int64_t expected_uid = config.expected_peer_uid < 0 ?
@@ -542,6 +600,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     if (expected_uid < 0 || static_cast<std::uint64_t>(peer.uid) !=
             static_cast<std::uint64_t>(expected_uid)) {
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::peer_identity;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
     }
 #elif defined(__APPLE__) || defined(__FreeBSD__)
@@ -551,12 +611,16 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         static_cast<std::int64_t>(peer_uid) != (config.expected_peer_uid < 0 ?
             static_cast<std::int64_t>(owner) : config.expected_peer_uid)) {
         (void)::close(socket);
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::peer_identity;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
     }
     (void)peer_gid;
 #else
     (void)config.expected_peer_uid;
     (void)::close(socket);
+    if (diagnostic != nullptr)
+        diagnostic->stage = EndpointConnectStage::peer_identity;
     return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
 #endif
 #endif
@@ -567,6 +631,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
 #else
         (void)::close(socket);
 #endif
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::transport;
         return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::RESOURCE_LIMIT);
     }
     return Result<std::unique_ptr<wire::TimedClientTransport>>::success(std::move(transport));
@@ -575,9 +641,103 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
     const EndpointConfig& config, Timeout timeout) noexcept
 {
+    return connect_control(config, timeout, nullptr);
+}
+
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept
+{
     EndpointConfig control = config;
     control.endpoint_name = "control.sock";
-    return connect_endpoint(control, timeout);
+    return connect_endpoint(control, timeout, diagnostic);
+}
+
+void print_endpoint_connect_diagnostic(
+    std::FILE* output, const char* tool_name, Error error,
+    const EndpointConnectDiagnostic& diagnostic) noexcept
+{
+    if (output == nullptr) return;
+    const char* name = tool_name == nullptr ? "client" : tool_name;
+    const EndpointDiagnostic& endpoint = diagnostic.endpoint;
+    if (diagnostic.stage == EndpointConnectStage::endpoint_path) {
+        if (endpoint.reason == EndpointDiagnosticReason::path_too_long) {
+            std::fprintf(output,
+                "%s: endpoint path is too long (%zu UTF-8 bytes; %zu bytes including NUL required, this build's native sun_path capacity is %zu bytes including NUL); shorten --runtime-dir or --instance\n",
+                name, endpoint.path_bytes, endpoint.required_bytes,
+                endpoint.native_capacity);
+        } else if (endpoint.reason == EndpointDiagnosticReason::instance) {
+            std::fprintf(output,
+                "%s: invalid or empty --instance for endpoint path; supply a nonempty valid instance token\n",
+                name);
+        } else if (endpoint.reason == EndpointDiagnosticReason::runtime_directory) {
+            std::fprintf(output,
+                "%s: --runtime-dir must be an absolute local runtime directory\n",
+                name);
+        } else {
+            std::fprintf(output,
+                "%s: invalid endpoint path configuration; check --runtime-dir and --instance\n",
+                name);
+        }
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::runtime_namespace) {
+        if (error == Error::NOT_READY) {
+            std::fprintf(output,
+                "%s: runtime namespace is missing; check --runtime-dir and --instance, and confirm the service has started\n",
+                name);
+        } else {
+            std::fprintf(output,
+                "%s: runtime namespace access checks failed or this access mode is unsupported; use a runtime directory permitted for the current user and supported by this platform\n",
+                name);
+        }
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::endpoint) {
+        if (error == Error::NOT_FOUND) {
+            std::fprintf(output,
+                "%s: control endpoint is missing; check --runtime-dir and --instance and confirm the service is running\n",
+                name);
+        } else {
+            std::fprintf(output,
+                "%s: control endpoint verification failed or is unsupported; check the configured endpoint and the service's runtime access conditions\n",
+                name);
+        }
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::connect_timeout) {
+        std::fprintf(output,
+            "%s: timed out connecting to the control endpoint; check --runtime-dir, --instance, and service responsiveness\n",
+            name);
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::connect) {
+        if (error == Error::INTERNAL) {
+            std::fprintf(output,
+                "%s: could not initialize the local control connection; check local socket support and resource availability\n",
+                name);
+        } else if (error == Error::UNSUPPORTED) {
+            std::fprintf(output,
+                "%s: this local control connection operation is unsupported; check the selected endpoint and platform support\n",
+                name);
+        } else {
+            std::fprintf(output,
+                "%s: the control endpoint refused or could not accept the connection; check that the matching service is running for this --instance\n",
+                name);
+        }
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::peer_identity) {
+        std::fprintf(output,
+            "%s: connected service identity did not satisfy the current peer check; use the service owned by the expected user\n",
+            name);
+        return;
+    }
+    if (diagnostic.stage == EndpointConnectStage::transport) {
+        std::fprintf(output, "%s: could not allocate the control connection transport\n", name);
+        return;
+    }
+    std::fprintf(output, "%s: connect failed (%s)\n", name, error_string(error));
 }
 
 }  // namespace dtv::userland::host_runtime

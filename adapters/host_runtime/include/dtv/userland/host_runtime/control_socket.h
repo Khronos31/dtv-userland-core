@@ -6,6 +6,7 @@
 #include <dtv/userland/error.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -44,6 +45,22 @@ struct EndpointDiagnostic final {
     std::size_t required_bytes = 0U;
 };
 
+enum class EndpointConnectStage : std::uint8_t {
+    none,
+    endpoint_path,
+    runtime_namespace,
+    endpoint,
+    connect,
+    connect_timeout,
+    peer_identity,
+    transport,
+};
+
+struct EndpointConnectDiagnostic final {
+    EndpointConnectStage stage = EndpointConnectStage::none;
+    EndpointDiagnostic endpoint{};
+};
+
 Result<std::string> control_endpoint_path(const EndpointConfig& config) noexcept;
 Result<std::string> control_endpoint_path(
     const EndpointConfig& config, EndpointDiagnostic* diagnostic) noexcept;
@@ -55,8 +72,17 @@ Result<std::string> endpoint_path(
 // permissions, and peer identity. The returned transport owns its socket.
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
     const EndpointConfig& config, Timeout timeout) noexcept;
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept;
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     const EndpointConfig& config, Timeout timeout) noexcept;
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept;
+void print_endpoint_connect_diagnostic(
+    std::FILE* output, const char* tool_name, Error error,
+    const EndpointConnectDiagnostic& diagnostic) noexcept;
 
 }  // namespace dtv::userland::host_runtime
 

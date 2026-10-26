@@ -1134,6 +1134,58 @@ px4::userland::cli::Px4TsArguments test_ts_arguments(std::uint64_t packet_count)
     return args;
 }
 
+bool test_host_ctl_endpoint_path_diagnostic()
+{
+    const std::string runtime = "/" + std::string(120U, 'x');
+    const char* arguments[] = {
+        "fake-ctl", "--runtime-dir", runtime.c_str(), "--instance", "test", "status"};
+    const auto profile = fake_serial_ctl_profile();
+    FILE* capture = std::tmpfile();
+    if (capture == nullptr || std::fflush(stderr) != 0) {
+        if (capture != nullptr) (void)std::fclose(capture);
+        return false;
+    }
+#if defined(_WIN32)
+    const int saved_stderr = ::_dup(::_fileno(stderr));
+    const bool redirected = saved_stderr >= 0 &&
+        ::_dup2(::_fileno(capture), ::_fileno(stderr)) == 0;
+#else
+    const int saved_stderr = ::dup(::fileno(stderr));
+    const bool redirected = saved_stderr >= 0 &&
+        ::dup2(::fileno(capture), ::fileno(stderr)) >= 0;
+#endif
+    if (!redirected) {
+        if (saved_stderr >= 0) {
+#if defined(_WIN32)
+            (void)::_close(saved_stderr);
+#else
+            (void)::close(saved_stderr);
+#endif
+        }
+        (void)std::fclose(capture);
+        return false;
+    }
+    const int status = dtv::userland::host_ctl::run_control_cli(
+        6, arguments, profile);
+    (void)std::fflush(stderr);
+#if defined(_WIN32)
+    const bool restored = ::_dup2(saved_stderr, ::_fileno(stderr)) == 0;
+    (void)::_close(saved_stderr);
+#else
+    const bool restored = ::dup2(saved_stderr, ::fileno(stderr)) >= 0;
+    (void)::close(saved_stderr);
+#endif
+    std::rewind(capture);
+    std::array<char, 1024U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, capture);
+    const bool closed = std::fclose(capture) == 0;
+    const std::string_view output(message.data(), size);
+    return restored && closed && status == 2 &&
+           output.find("endpoint path is too long") != std::string_view::npos &&
+           output.find("UTF-8 bytes") != std::string_view::npos &&
+           output.find("--runtime-dir or --instance") != std::string_view::npos;
+}
+
 bool test_host_ctl_real_server()
 {
     RuntimeTree tree;
@@ -1419,6 +1471,53 @@ bool run_ts_lifecycle(bool close_before_stream_end,
     return result && diagnostics.stream_end_valid && diagnostics.packets_written == 1U;
 }
 
+bool test_host_ts_receiver_ambiguity_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("ambiguous")) return false;
+    Listener control;
+    if (!control.bind(root.root, "ambiguous", "control.sock")) return false;
+    FakeService service("ambiguous");
+    service.list.receivers.value.count = 2U;
+    service.list.receivers.value.items[1U] = service.list.receivers.value.items[0U];
+    service.list.receivers.value.items[1U].id = 514U;
+    service.list.receivers.value.items[1U].binding.value.local_id = 1U;
+    FakeControlServer server(control, service, 1U);
+    server.start();
+
+    auto arguments = test_ts_arguments(1U);
+    arguments.instance = "ambiguous";
+    arguments.runtime_directory = root.root;
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        arguments, profile, output, clock, signal, {}, nullptr, &diagnostics);
+    server.join();
+    if (result || result.error() != Error::INVALID_ARGUMENT || !server.good.load() ||
+        diagnostics.stage != px4::userland::cli::Px4TsDiagnosticStage::receiver_selection ||
+        diagnostics.receiver_count != 2U) return false;
+    FILE* text = std::tmpfile();
+    if (text == nullptr) return false;
+    px4::userland::cli::print_px4_ts_run_diagnostic(
+        text, "fake-ts", result.error(), diagnostics);
+    if (std::fflush(text) != 0) {
+        (void)std::fclose(text);
+        return false;
+    }
+    std::rewind(text);
+    std::array<char, 512U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, text);
+    const bool closed = std::fclose(text) == 0;
+    const std::string_view output_text(message.data(), size);
+    return closed && output_text.find("2 receivers are listed") != std::string_view::npos &&
+           output_text.find("--receiver") != std::string_view::npos &&
+           output.bytes.empty();
+}
+
 bool run_host_ts_output_timeout_case(bool request_signal)
 {
     RuntimeTree live_root;
@@ -1653,6 +1752,7 @@ int main()
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
 #endif
     const bool ctl = test_host_ctl_real_server();
+    const bool ctl_endpoint_path = test_host_ctl_endpoint_path_diagnostic();
     const bool lnb_ctl = test_host_ctl_lnb_commands();
     const bool ctl_discovery = test_host_ctl_device_instance_discovery();
     const bool ctl_ambiguous = test_host_ctl_device_instance_ambiguity();
@@ -1667,6 +1767,7 @@ int main()
     const bool lnb_refused = test_host_ctl_lnb_remote_refusal();
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
+    const bool ts_receiver_ambiguity = test_host_ts_receiver_ambiguity_diagnostic();
     const bool output_timeouts = test_host_ts_output_timeouts();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
@@ -1681,6 +1782,7 @@ int main()
     (void)::WSACleanup();
 #endif
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
+    if (ctl_endpoint_path) std::puts("fake_server_host_ctl_endpoint_path=PASS");
     if (lnb_ctl) std::puts("fake_server_host_ctl_lnb_on_off=PASS");
     if (ctl_discovery) std::puts("fake_server_host_ctl_device_instance_discovery=PASS");
     if (ctl_ambiguous) std::puts("fake_server_host_ctl_device_ambiguity=PASS");
@@ -1695,6 +1797,8 @@ int main()
     if (lnb_refused) std::puts("fake_server_host_ctl_lnb_remote_refusal=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
+    if (ts_receiver_ambiguity)
+        std::puts("fake_server_host_ts_receiver_ambiguity=PASS");
     if (output_timeouts)
         std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
@@ -1703,9 +1807,9 @@ int main()
     if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && lnb_ctl && ctl_discovery && ctl_ambiguous &&
+    return ctl && ctl_endpoint_path && lnb_ctl && ctl_discovery && ctl_ambiguous &&
            ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
            ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
-           ts && eof && output_timeouts && overlong &&
+           ts && eof && ts_receiver_ambiguity && output_timeouts && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }

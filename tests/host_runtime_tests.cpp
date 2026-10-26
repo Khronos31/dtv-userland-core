@@ -501,6 +501,9 @@ bool default_runtime_roots_test()
     dtv::userland::host_runtime::EndpointDiagnostic long_path_diagnostic{};
     const auto long_endpoint_path = dtv::userland::host_runtime::control_endpoint_path(
         long_endpoint, &long_path_diagnostic);
+    dtv::userland::host_runtime::EndpointConnectDiagnostic long_connect_diagnostic{};
+    const auto long_connect = dtv::userland::host_runtime::connect_control(
+        {long_xdg, "siano-userland", "test"}, {1000U}, &long_connect_diagnostic);
     const auto long_path_fallback = ok
         ? px4::userland::ipc::posix::select_publish_runtime_root(
             "siano-userland", "test")
@@ -511,6 +514,11 @@ bool default_runtime_roots_test()
         long_path_diagnostic.path_bytes + 1U == long_path_diagnostic.required_bytes &&
         long_path_diagnostic.required_bytes > long_path_diagnostic.native_capacity &&
         long_path_diagnostic.native_capacity == sizeof(sockaddr_un{}.sun_path) &&
+        !long_connect && long_connect.error() ==
+            px4::userland::Error::INVALID_ARGUMENT &&
+        long_connect_diagnostic.stage ==
+            dtv::userland::host_runtime::EndpointConnectStage::endpoint_path &&
+        long_connect_diagnostic.endpoint.path_bytes == long_path_diagnostic.path_bytes &&
         long_path_fallback && long_path_fallback.value() == selected_path &&
         saved_xdg.set(unsafe_xdg.c_str());
 
@@ -669,6 +677,12 @@ bool socket_transport_test()
     bool ok = make_directory(product) && make_directory(version) && make_directory(instance);
     dtv::userland::host_runtime::EndpointConfig config{root, "siano-userland", "test"};
     const auto path = dtv::userland::host_runtime::control_endpoint_path(config);
+    dtv::userland::host_runtime::EndpointConnectDiagnostic missing_diagnostic{};
+    const auto missing_endpoint = dtv::userland::host_runtime::connect_control(
+        config, {1000U}, &missing_diagnostic);
+    ok = ok && !missing_endpoint && missing_endpoint.error() ==
+        dtv::userland::Error::NOT_FOUND && missing_diagnostic.stage ==
+        dtv::userland::host_runtime::EndpointConnectStage::endpoint;
     int server = -1;
     if (!ok || !path) ok = false;
     else {
@@ -724,6 +738,34 @@ bool socket_transport_test()
     (void)::rmdir(root.c_str());
     return ok;
 }
+
+bool endpoint_connect_diagnostic_text_test()
+{
+    FILE* output = std::tmpfile();
+    if (output == nullptr) return false;
+    dtv::userland::host_runtime::EndpointConnectDiagnostic diagnostic{};
+    diagnostic.stage = dtv::userland::host_runtime::EndpointConnectStage::endpoint_path;
+    diagnostic.endpoint.reason =
+        dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long;
+    diagnostic.endpoint.path_bytes = 113U;
+    diagnostic.endpoint.required_bytes = 114U;
+    diagnostic.endpoint.native_capacity = 108U;
+    dtv::userland::host_runtime::print_endpoint_connect_diagnostic(
+        output, "test-client", dtv::userland::Error::INVALID_ARGUMENT, diagnostic);
+    if (std::fflush(output) != 0) {
+        (void)std::fclose(output);
+        return false;
+    }
+    std::rewind(output);
+    std::array<char, 512U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, output);
+    const bool closed = std::fclose(output) == 0;
+    const std::string_view text(message.data(), size);
+    return closed && text.find("113 UTF-8 bytes") != std::string_view::npos &&
+           text.find("114 bytes including NUL required") != std::string_view::npos &&
+           text.find("108 bytes including NUL") != std::string_view::npos &&
+           text.find("--runtime-dir or --instance") != std::string_view::npos;
+}
 #endif
 
 }  // namespace
@@ -762,6 +804,12 @@ int main()
         std::fputs("control socket security/transport fixture failed\n", stderr);
         return 1;
     }
+#if !defined(_WIN32)
+    if (!endpoint_connect_diagnostic_text_test()) {
+        std::fputs("endpoint connect diagnostic text fixture failed\n", stderr);
+        return 1;
+    }
+#endif
 #if !defined(_WIN32)
     if (!default_runtime_roots_test()) {
         std::fputs("POSIX default runtime-root fixture failed\n", stderr);

@@ -649,6 +649,7 @@ void print_px4_ts_usage(void* output) noexcept
                  "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver 0..7 --runtime-dir PATH --group\n"
                  "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
+                 "      endpoint socket path limits apply to the complete runtime/product/version/instance/file path and vary by OS; shorten --runtime-dir or --instance if diagnosed\n"
                  "  -h, --help\n"
                  "      --version\n");
 }
@@ -669,6 +670,7 @@ void print_px4_ts_usage(const TsClientProfile& profile, void* output) noexcept
                  "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver ID --runtime-dir PATH --group\n"
                  "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
+                 "      endpoint socket path limits apply to the complete runtime/product/version/instance/file path and vary by OS; shorten --runtime-dir or --instance if diagnosed\n"
                  "  -h, --help\n"
                  "      --version\n", profile.tool_name);
 }
@@ -698,6 +700,49 @@ int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
     case Error::INTERNAL: return 70;
     }
     return 70;
+}
+
+void print_px4_ts_run_diagnostic(
+    std::FILE* output, const char* tool_name, Error error,
+    const Px4TsRunDiagnostics& diagnostics) noexcept
+{
+    if (output == nullptr) return;
+    const char* name = tool_name == nullptr ? "px4-ts" : tool_name;
+    if (diagnostics.stage == Px4TsDiagnosticStage::endpoint_connect) {
+        dtv::userland::host_runtime::print_endpoint_connect_diagnostic(
+            output, name, error, diagnostics.endpoint_connect);
+        return;
+    }
+    if (diagnostics.stage == Px4TsDiagnosticStage::receiver_selection) {
+        if (!diagnostics.receiver_explicit && diagnostics.receiver_count > 1U) {
+            std::fprintf(output,
+                "%s: receiver selection is ambiguous (%u receivers are listed); specify --receiver using an ID listed by the service\n",
+                name, static_cast<unsigned int>(diagnostics.receiver_count));
+        } else if (diagnostics.receiver_explicit && error == Error::NOT_FOUND) {
+            std::fprintf(output,
+                "%s: --receiver %u is not present in the selected service; check the receiver ID reported by its status\n",
+                name, static_cast<unsigned int>(diagnostics.requested_receiver));
+        } else if (error == Error::UNSUPPORTED) {
+            std::fprintf(output,
+                "%s: --receiver %u does not support the requested %s system; select a compatible receiver\n",
+                name, static_cast<unsigned int>(diagnostics.requested_receiver),
+                diagnostics.requested_system == ipc::System::ISDB_T ? "ISDB-T" : "ISDB-S");
+        } else if (diagnostics.receiver_count == 0U) {
+            std::fprintf(output,
+                "%s: the selected service has no receiver available; check that its tuner is ready\n",
+                name);
+        } else {
+            std::fprintf(output,
+                "%s: requested receiver selection is not available; check --receiver and the service receiver list\n",
+                name);
+        }
+        return;
+    }
+    if (diagnostics.stage == Px4TsDiagnosticStage::recording_setup) {
+        std::fprintf(output,
+            "%s: daemon rejected a recording setup request (%s); the current protocol does not identify the individual request field; check --receiver and the channel/frequency/system/slot/TSID options against the selected service\n",
+            name, error_string(error));
+    }
 }
 
 namespace {
@@ -1200,23 +1245,48 @@ static Result<Px4TsRunResult> run_wire_profile(
                     return Result<Px4TsRunResult>::failure(
                         !minimum_control_path ? minimum_control_path.error() :
                                                 minimum_data_path.error());
+                dtv::userland::host_runtime::EndpointDiagnostic path_diagnostic{};
                 const auto candidate_control_path = dtv::userland::host_runtime::
-                    control_endpoint_path({root, product_slug, candidate_instance});
+                    control_endpoint_path({root, product_slug, candidate_instance},
+                                          &path_diagnostic);
+                if (!candidate_control_path) {
+                    if (diagnostics != nullptr) {
+                        diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+                        diagnostics->endpoint_connect.stage =
+                            dtv::userland::host_runtime::EndpointConnectStage::endpoint_path;
+                        diagnostics->endpoint_connect.endpoint = path_diagnostic;
+                    }
+                    continue;
+                }
                 const auto candidate_data_path = dtv::userland::host_runtime::
                     endpoint_path({root, product_slug, candidate_instance,
                                    dtv::userland::host_runtime::EndpointAccess::private_user,
-                                   -1, "stream.sock"});
-                if (!candidate_control_path || !candidate_data_path) continue;
+                                   -1, "stream.sock"}, &path_diagnostic);
+                if (!candidate_data_path) {
+                    if (diagnostics != nullptr) {
+                        diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+                        diagnostics->endpoint_connect.stage =
+                            dtv::userland::host_runtime::EndpointConnectStage::endpoint_path;
+                        diagnostics->endpoint_connect.endpoint = path_diagnostic;
+                    }
+                    continue;
+                }
 #endif
                 const EndpointConfig endpoint{root.c_str(), candidate_instance.c_str(),
                                               "control.sock", access,
                                               product_slug};
-                auto probe = SocketStream::connect(endpoint, Timeout{budget});
+                if (diagnostics != nullptr)
+                    diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+                auto probe = SocketStream::connect(
+                    endpoint, Timeout{budget},
+                    diagnostics != nullptr ? &diagnostics->endpoint_connect : nullptr);
                 if (!probe) {
                     if (probe.error() == Error::NOT_FOUND ||
                         probe.error() == Error::NOT_READY) continue;
                     return Result<Px4TsRunResult>::failure(probe.error());
                 }
+                if (diagnostics != nullptr)
+                    diagnostics->stage = Px4TsDiagnosticStage::none;
                 SocketClientTransport probe_transport(probe.value());
                 const std::uint32_t fetch_budget = remaining();
                 if (fetch_budget == 0U) {
@@ -1281,15 +1351,32 @@ static Result<Px4TsRunResult> run_wire_profile(
              !matches_product_identity(discovered_snapshot.list, resolved_identity,
                                        profile)))
             return Result<Px4TsRunResult>::failure(Error::NOT_FOUND);
+        if (diagnostics != nullptr) {
+            diagnostics->stage = Px4TsDiagnosticStage::receiver_selection;
+            diagnostics->receiver_count = static_cast<std::uint16_t>(
+                discovered_snapshot.list.receivers.present
+                    ? discovered_snapshot.list.receivers.value.count : 0U);
+            diagnostics->requested_receiver = arguments.receiver;
+            diagnostics->receiver_explicit = arguments.receiver_explicit;
+            diagnostics->requested_system = arguments.system;
+        }
         const Error selected = select_receiver(discovered_snapshot.list,
                                                arguments.receiver_explicit,
                                                arguments.receiver, arguments.system,
                                                receiver_id);
         if (selected != Error::OK) return Result<Px4TsRunResult>::failure(selected);
+        if (diagnostics != nullptr)
+            diagnostics->stage = Px4TsDiagnosticStage::none;
     }
 
-    auto control = SocketStream::connect(control_endpoint, Timeout{2000U});
+    if (diagnostics != nullptr)
+        diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+    auto control = SocketStream::connect(
+        control_endpoint, Timeout{2000U},
+        diagnostics != nullptr ? &diagnostics->endpoint_connect : nullptr);
     if (!control) return Result<Px4TsRunResult>::failure(control.error());
+    if (diagnostics != nullptr)
+        diagnostics->stage = Px4TsDiagnosticStage::none;
     SocketClientTransport control_transport(control.value());
 
     wire::RecordingOptions options{};
@@ -1338,18 +1425,26 @@ static Result<Px4TsRunResult> run_wire_profile(
         : wire::begin_recording(control_transport, options,
                                 Timeout{arguments.tune_timeout_ms + 6000U});
     if (!started) {
+        if (diagnostics != nullptr && started.remote_error_code != 0U)
+            diagnostics->stage = Px4TsDiagnosticStage::recording_setup;
         control.value().close();
         return Result<Px4TsRunResult>::failure(started.error);
     }
     wire::RecordingSession session = started.session;
 
-    auto data = SocketStream::connect(stream_endpoint, Timeout{2000U});
+    if (diagnostics != nullptr)
+        diagnostics->stage = Px4TsDiagnosticStage::endpoint_connect;
+    auto data = SocketStream::connect(
+        stream_endpoint, Timeout{2000U},
+        diagnostics != nullptr ? &diagnostics->endpoint_connect : nullptr);
     if (!data) {
         (void)wire::stop_recording(control_transport, session, Timeout{4000U});
         (void)wire::release_recording(control_transport, session, Timeout{4000U});
         control.value().close();
         return Result<Px4TsRunResult>::failure(data.error());
     }
+    if (diagnostics != nullptr)
+        diagnostics->stage = Px4TsDiagnosticStage::none;
 
     wire::AttachRequest attach{};
     attach.epoch = session.epoch;

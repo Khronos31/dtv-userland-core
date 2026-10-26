@@ -296,11 +296,19 @@ int exit_status(Error error, bool card_operation = false) noexcept
     return 70;
 }
 
+void print_connect_diagnostic(const char* tool_name, Error error,
+                              const host_runtime::EndpointConnectDiagnostic& diagnostic) noexcept
+{
+    host_runtime::print_endpoint_connect_diagnostic(stderr, tool_name, error, diagnostic);
+}
+
 void usage(FILE* output, const Profile& profile) noexcept
 {
     std::fprintf(output, "usage: %s [--runtime-dir PATH] [--instance TOKEN] "
         "[--device usb:BUS-PORT[,BUS-PORT...]] [--group] COMMAND\n"
         "  --runtime-dir overrides the standard runtime root; --instance is required unless --device is supplied\n"
+        "  endpoint socket path limits apply to the complete runtime/product/version/instance/control.sock path and vary by OS\n"
+        "  if diagnosed as too long, shorten --runtime-dir or --instance\n"
         "       %s --help | --version\ncommands: list, status",
         profile.tool_name, profile.tool_name);
     if (profile.card_supported || profile.internal_card_status_supported)
@@ -416,9 +424,25 @@ static int run_control_cli_impl(
     if (has_device_assertion) {
         const auto selector = identity::parse_device_selector(arguments.device);
         if (!selector || (selector.value().kind == identity::SelectorKind::serial &&
-                          !profile.serial_selector_supported)) return 2;
+                          !profile.serial_selector_supported)) {
+            if (profile.serial_selector_supported) {
+                std::fprintf(stderr,
+                    "%s: invalid or unsupported --device selector; use serial:VALUE or usb:BUS-PORT[.PORT...]\n",
+                    profile.tool_name);
+            } else {
+                std::fprintf(stderr,
+                    "%s: invalid or unsupported --device selector; use usb:BUS-PORT[.PORT...]\n",
+                    profile.tool_name);
+            }
+            return 2;
+        }
         const auto resolved = identity::resolve_selector(profile.product, selector.value());
-        if (!resolved) return exit_status(resolved.error());
+        if (!resolved) {
+            std::fprintf(stderr,
+                "%s: could not resolve --device selector (%s); check the selector value\n",
+                profile.tool_name, error_string(resolved.error()));
+            return exit_status(resolved.error());
+        }
         expected_identity = resolved.value();
     }
     std::string instance = arguments.instance;
@@ -444,8 +468,13 @@ static int run_control_cli_impl(
         px4::userland::ipc::posix::RuntimeRootCandidates roots{};
         if (!selected_runtime_directory.empty()) {
             roots.count = 1U;
-            if (selected_runtime_directory.size() >= roots.paths[0U].size())
+            if (selected_runtime_directory.size() >= roots.paths[0U].size()) {
+                std::fprintf(stderr,
+                    "%s: --runtime-dir is too long for runtime discovery (%zu bytes; capacity is %zu bytes including NUL); use a shorter runtime root\n",
+                    profile.tool_name, selected_runtime_directory.size(),
+                    roots.paths[0U].size());
                 return exit_status(Error::INVALID_ARGUMENT);
+            }
             std::memcpy(roots.paths[0U].data(), selected_runtime_directory.c_str(),
                         selected_runtime_directory.size() + 1U);
         } else if (roots_override != nullptr) {
@@ -511,10 +540,16 @@ static int run_control_cli_impl(
                 const auto minimum_path = host_runtime::control_endpoint_path(
                     {"/", profile.product_slug, candidate_instance});
                 if (!minimum_path) return exit_status(minimum_path.error());
+                host_runtime::EndpointDiagnostic path_diagnostic{};
                 const auto candidate_path = host_runtime::control_endpoint_path(
-                    {root, profile.product_slug, candidate_instance});
+                    {root, profile.product_slug, candidate_instance}, &path_diagnostic);
                 if (!candidate_path) {
                     if (selected_runtime_directory.empty()) continue;
+                    host_runtime::EndpointConnectDiagnostic diagnostic{};
+                    diagnostic.stage = host_runtime::EndpointConnectStage::endpoint_path;
+                    diagnostic.endpoint = path_diagnostic;
+                    print_connect_diagnostic(profile.tool_name, candidate_path.error(),
+                                             diagnostic);
                     return exit_status(candidate_path.error());
                 }
 #endif
@@ -569,12 +604,14 @@ static int run_control_cli_impl(
     SocketStreamTransport default_transport(default_stream);
     std::unique_ptr<wire::TimedClientTransport> owned_transport;
     wire::TimedClientTransport* transport = nullptr;
+    host_runtime::EndpointConnectDiagnostic connect_diagnostic{};
     const auto connect_control = [&]() {
+        connect_diagnostic = host_runtime::EndpointConnectDiagnostic{};
         if (selected_runtime_directory.empty()) {
             const px4::userland::ipc::posix::EndpointConfig default_endpoint{
                 nullptr, instance.c_str(), "control.sock", access, profile.product_slug};
             auto connected = px4::userland::ipc::posix::SocketStream::connect(
-                default_endpoint, Timeout{5000U});
+                default_endpoint, Timeout{5000U}, &connect_diagnostic);
             if (!connected) return connected.error();
             default_stream = std::move(connected.value());
             transport = &default_transport;
@@ -584,7 +621,8 @@ static int run_control_cli_impl(
             selected_runtime_directory, profile.product_slug, instance,
             arguments.group ? host_runtime::EndpointAccess::shared_group :
                               host_runtime::EndpointAccess::private_user};
-        auto connected = host_runtime::connect_control(explicit_endpoint, Timeout{5000U});
+        auto connected = host_runtime::connect_control(explicit_endpoint, Timeout{5000U},
+                                                       &connect_diagnostic);
         if (!connected) {
             return connected.error();
         }
@@ -593,8 +631,7 @@ static int run_control_cli_impl(
         return Error::OK;
     };
     if (const auto error = connect_control(); error != Error::OK) {
-        std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                     static_cast<unsigned int>(error));
+        print_connect_diagnostic(profile.tool_name, error, connect_diagnostic);
         return exit_status(error);
     }
     const std::uint64_t required_features =
@@ -621,8 +658,7 @@ static int run_control_cli_impl(
         transport->close();
         owned_transport.reset();
         if (const auto error = connect_control(); error != Error::OK) {
-            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                         static_cast<unsigned int>(error));
+            print_connect_diagnostic(profile.tool_name, error, connect_diagnostic);
             return exit_status(error);
         }
         const wire::StatusAssertion assertion{
