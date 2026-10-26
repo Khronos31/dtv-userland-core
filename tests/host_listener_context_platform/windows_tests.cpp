@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include "detail/listener_io.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
 #include <windows/windows_security.h>
 
 #include <array>
@@ -26,6 +27,8 @@
 
 using namespace dtv::userland;
 using namespace dtv::userland::host_listener_context::detail;
+using dtv::userland::host_listener_context::ListenerDiagnostic;
+using dtv::userland::host_listener_context::ListenerDiagnosticReason;
 
 namespace dtv::userland::host_listener_context::detail {
 Error set_connection_send_buffer_for_test(ListenerIo& io, ConnectionToken connection,
@@ -527,6 +530,22 @@ bool test_identity_failure_rollback() noexcept
                  "identity substitution preserves foreign endpoint and permits later retry");
 }
 
+bool test_invalid_runtime_utf8_diagnostic()
+{
+    std::string runtime = "C:\\";
+    runtime.push_back(static_cast<char>(0xff));
+    runtime.append("\\runtime");
+    host_runtime::EndpointConfig control{runtime, "listener-test", "instance"};
+    host_runtime::EndpointConfig data = control;
+    data.endpoint_name = "stream.sock";
+    auto io = create_listener_io();
+    ListenerDiagnostic diagnostic{};
+    const Error result = io->reserve_pair(control, data, &diagnostic);
+    return check(result == Error::INVALID_ARGUMENT &&
+                 diagnostic.reason == ListenerDiagnosticReason::runtime_directory_encoding,
+                 "report invalid UTF-8 runtime directory conversion");
+}
+
 }  // namespace
 
 int main() noexcept
@@ -534,7 +553,7 @@ int main() noexcept
     WSADATA data{};
     if (!check(::WSAStartup(MAKEWORD(2, 2), &data) == 0, "Winsock startup")) return 1;
     const bool passed = test_pair_io_and_dacl() && test_stale_foreign_and_shared_boundary() &&
-        test_identity_failure_rollback();
+        test_identity_failure_rollback() && test_invalid_runtime_utf8_diagnostic();
     (void)::WSACleanup();
     return passed ? 0 : 1;
 }

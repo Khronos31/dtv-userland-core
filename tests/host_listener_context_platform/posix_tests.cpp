@@ -316,10 +316,72 @@ bool test_shared_group_boundary() noexcept
                  "report completed listener endpoint path length");
 }
 
+bool test_nested_directory_diagnostics() noexcept
+{
+    using Layer = dtv::userland::host_listener_context::RuntimeDirectoryLayer;
+    const Layer layers[] = {Layer::product, Layer::version, Layer::instance};
+    for (const Layer layer : layers) {
+        std::string root;
+        if (!check(make_root(root), "nested runtime root")) return false;
+        const std::string product = root + "/listener-test";
+        const std::string version = product + "/v1";
+        const std::string instance = version + "/instance";
+        std::string target = product;
+        bool created = true;
+        if (layer != Layer::product) {
+            created = ::mkdir(product.c_str(), 0700) == 0;
+            target = version;
+        }
+        if (layer == Layer::instance) {
+            created = created && ::mkdir(version.c_str(), 0700) == 0;
+            target = instance;
+        }
+        created = created && ::mkdir(target.c_str(), 0700) == 0 &&
+                  ::chmod(target.c_str(), 0777) == 0;
+        auto io = create_listener_io();
+        ListenerDiagnostic diagnostic{};
+        const auto control = config(root, "control.sock");
+        const auto data = config(root, "stream.sock");
+        const Error result = created ? io->reserve_pair(control, data, &diagnostic)
+                                     : Error::INTERNAL;
+        const bool valid = created && result == Error::INTERNAL &&
+            diagnostic.reason == ListenerDiagnosticReason::runtime_directory_mode &&
+            diagnostic.directory_layer == layer;
+        io.reset();
+        (void)::chmod(target.c_str(), 0700);
+        std::filesystem::remove_all(root);
+        if (!check(valid, "report nested runtime directory mode and layer")) return false;
+    }
+
+    if (::geteuid() == 0) {
+        std::string root;
+        if (!check(make_root(root), "nested owner runtime root")) return false;
+        const std::string product = root + "/listener-test";
+        if (::mkdir(product.c_str(), 0700) != 0 ||
+            ::chown(product.c_str(), 65534, 65534) != 0) {
+            std::filesystem::remove_all(root);
+            return false;
+        }
+        auto io = create_listener_io();
+        ListenerDiagnostic diagnostic{};
+        const auto control = config(root, "control.sock");
+        const auto data = config(root, "stream.sock");
+        const Error result = io->reserve_pair(control, data, &diagnostic);
+        const bool valid = result == Error::INTERNAL &&
+            diagnostic.reason == ListenerDiagnosticReason::runtime_directory_owner &&
+            diagnostic.directory_layer == Layer::product;
+        io.reset();
+        (void)::chown(product.c_str(), ::geteuid(), ::getegid());
+        std::filesystem::remove_all(root);
+        if (!check(valid, "report nested runtime directory owner and layer")) return false;
+    }
+    return true;
+}
+
 }  // namespace
 
 int main() noexcept
 {
     return test_pair_io_and_interest() && test_stale_and_foreign_rollback() &&
-        test_shared_group_boundary() ? 0 : 1;
+        test_shared_group_boundary() && test_nested_directory_diagnostics() ? 0 : 1;
 }

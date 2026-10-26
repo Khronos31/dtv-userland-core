@@ -41,10 +41,19 @@ enum class ListenerDiagnosticReason : std::uint8_t {
     runtime_directory_owner,
     runtime_directory_mode,
     runtime_directory_security,
+    runtime_directory_encoding,
+};
+
+enum class RuntimeDirectoryLayer : std::uint8_t {
+    runtime_root,
+    product,
+    version,
+    instance,
 };
 
 struct ListenerDiagnostic final {
     ListenerDiagnosticReason reason = ListenerDiagnosticReason::none;
+    RuntimeDirectoryLayer directory_layer = RuntimeDirectoryLayer::runtime_root;
     host_runtime::EndpointDiagnostic endpoint{};
     std::string_view endpoint_name{};
 };

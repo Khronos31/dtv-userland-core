@@ -351,6 +351,8 @@ public:
         }
         std::wstring runtime;
         if (!utf8_to_wide(std::string(control.runtime_directory), runtime)) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_encoding;
             return Error::INVALID_ARGUMENT;
         }
         const std::wstring separator = L"\\";

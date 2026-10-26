@@ -432,6 +432,8 @@ struct FakeService final {
     bool unsupported_status = false;
     bool refuse_lnb_power = false;
     bool refuse_tune = false;
+    void (*after_status)(void*) = nullptr;
+    void* after_status_context = nullptr;
     unsigned int replace_serial_at_list = 0U;
     std::string replacement_serial;
     unsigned int replace_usb_path_at_list = 0U;
@@ -531,11 +533,18 @@ struct FakeService final {
             wire::StatusResponse status{};
             if (wire::build_status_shell(list, context, snapshot,
                     request.status.scope, status) != Error::OK) return false;
+            if (status.readers.present) {
+                for (std::size_t i = 0U; i < status.readers.value.count; ++i)
+                    status.readers.value.items[i].card.reason =
+                        static_cast<std::uint8_t>(wire::UnknownReason::not_sampled);
+            }
             std::array<std::uint8_t, wire::kHeaderSize + wire::kMaxControlPayload> output{};
             const auto frame = wire::encode_status_frame(
                 request.request_id, status, list,
                 MutableByteView{output.data(), output.size()});
-            return frame && send_all(peer, output.data(), frame.value());
+            const bool sent = frame && send_all(peer, output.data(), frame.value());
+            if (sent && after_status != nullptr) after_status(after_status_context);
+            return sent;
         }
         if (request.kind == wire::ControlRequestKind::acquire) {
             saw_acquire.store(true);
@@ -1195,6 +1204,124 @@ bool test_host_ctl_endpoint_path_diagnostic()
            output.find("--runtime-dir or --instance") != std::string_view::npos;
 }
 
+#if !defined(_WIN32)
+bool test_host_ctl_auto_root_overlong_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance(std::string(64U, 'a'))) return false;
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(root.root, roots)) return false;
+    const auto profile = fake_serial_ctl_profile();
+    const char* arguments[] = {"fake-ctl", "--device", "serial:expected", "list"};
+    FILE* stderr_capture = std::tmpfile();
+    FILE* stdout_capture = std::tmpfile();
+    if (stderr_capture == nullptr || stdout_capture == nullptr ||
+        std::fflush(stderr) != 0 || std::fflush(stdout) != 0) {
+        if (stderr_capture != nullptr) (void)std::fclose(stderr_capture);
+        if (stdout_capture != nullptr) (void)std::fclose(stdout_capture);
+        return false;
+    }
+    const int saved_stderr = ::dup(::fileno(stderr));
+    const int saved_stdout = ::dup(::fileno(stdout));
+    const bool stderr_redirected = saved_stderr >= 0 &&
+        ::dup2(::fileno(stderr_capture), ::fileno(stderr)) >= 0;
+    const bool stdout_redirected = stderr_redirected && saved_stdout >= 0 &&
+        ::dup2(::fileno(stdout_capture), ::fileno(stdout)) >= 0;
+    if (!stderr_redirected || !stdout_redirected) {
+        if (stderr_redirected) (void)::dup2(saved_stderr, ::fileno(stderr));
+        if (saved_stderr >= 0) (void)::close(saved_stderr);
+        if (stdout_redirected) (void)::dup2(saved_stdout, ::fileno(stdout));
+        if (saved_stdout >= 0) (void)::close(saved_stdout);
+        (void)std::fclose(stderr_capture);
+        (void)std::fclose(stdout_capture);
+        return false;
+    }
+    const int status = dtv::userland::host_ctl::test_access::run_control_cli_with_roots(
+        4, arguments, profile, roots);
+    (void)std::fflush(stderr);
+    (void)std::fflush(stdout);
+    const bool stderr_restored = ::dup2(saved_stderr, ::fileno(stderr)) >= 0;
+    const bool stdout_restored = ::dup2(saved_stdout, ::fileno(stdout)) >= 0;
+    (void)::close(saved_stderr);
+    (void)::close(saved_stdout);
+    std::rewind(stderr_capture);
+    std::array<char, 1024U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U,
+                                        stderr_capture);
+    (void)std::fseek(stdout_capture, 0L, SEEK_END);
+    const long stdout_size = std::ftell(stdout_capture);
+    const bool stderr_closed = std::fclose(stderr_capture) == 0;
+    const bool stdout_closed = std::fclose(stdout_capture) == 0;
+    const std::string_view output(message.data(), size);
+    return stderr_restored && stdout_restored && stderr_closed && stdout_closed && status == 3 &&
+           stdout_size == 0L && output.find("endpoint path is too long") !=
+               std::string_view::npos &&
+           output.find("shorten --runtime-dir or --instance") !=
+               std::string_view::npos;
+}
+
+struct UnlinkAfterStatus final {
+    const std::string* path = nullptr;
+    bool unlinked = false;
+};
+
+bool test_host_ctl_card_reconnect_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("card-reconnect")) return false;
+    Listener control;
+    if (!control.bind(root.root, "card-reconnect", "control.sock")) return false;
+    FakeService service("card-reconnect");
+    service.hello.features |= wire::kFeatureCardService;
+    service.list.readers.value.count = 1U;
+    service.list.readers.value.items[0U].id = 2U;
+    UnlinkAfterStatus unlink_state{&control.path, false};
+    service.after_status_context = &unlink_state;
+    service.after_status = [](void* context) {
+        auto* state = static_cast<UnlinkAfterStatus*>(context);
+        state->unlinked = ::unlink(state->path->c_str()) == 0;
+    };
+    FakeControlServer server(control, service, 1U);
+    server.start();
+    dtv::userland::host_ctl::Profile profile{};
+    profile.tool_name = "fake-ctl";
+    profile.product_slug = "test-product";
+    profile.product_version = "1.0.0-test";
+    profile.product = dtv::userland::identity::Product::px4;
+    profile.card_supported = true;
+    const char* arguments[] = {"fake-ctl", "--runtime-dir", root.root.c_str(),
+                               "--instance", "card-reconnect", "card-atr"};
+    FILE* capture = std::tmpfile();
+    if (capture == nullptr || std::fflush(stderr) != 0) {
+        if (capture != nullptr) (void)std::fclose(capture);
+        return false;
+    }
+    const int saved_stderr = ::dup(::fileno(stderr));
+    if (saved_stderr < 0 || ::dup2(::fileno(capture), ::fileno(stderr)) < 0) {
+        if (saved_stderr >= 0) (void)::close(saved_stderr);
+        (void)std::fclose(capture);
+        return false;
+    }
+    const int status = dtv::userland::host_ctl::run_control_cli(6, arguments, profile);
+    (void)std::fflush(stderr);
+    const bool restored = ::dup2(saved_stderr, ::fileno(stderr)) >= 0;
+    (void)::close(saved_stderr);
+    server.join();
+    std::rewind(capture);
+    std::array<char, 1024U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, capture);
+    const bool closed = std::fclose(capture) == 0;
+    const std::string_view output(message.data(), size);
+    const bool passed = restored && closed && status == 3 && server.good.load() &&
+           service.saw_status.load() && unlink_state.unlinked &&
+           output.find("control endpoint is missing") != std::string_view::npos &&
+           output.find("--runtime-dir") != std::string_view::npos &&
+           output.find("--instance") != std::string_view::npos &&
+           output.find("connect failed (") == std::string_view::npos;
+    return passed;
+}
+#endif
+
 bool test_host_ctl_real_server()
 {
     RuntimeTree tree;
@@ -1572,6 +1699,53 @@ bool test_host_ts_tune_rejection_diagnostic()
            output_text.find("frequency is invalid") == std::string_view::npos;
 }
 
+bool test_host_ts_stream_endpoint_diagnostic()
+{
+    RuntimeTree root;
+    if (!root.create() || !root.create_instance("stream-missing")) return false;
+    Listener control;
+    if (!control.bind(root.root, "stream-missing", "control.sock")) return false;
+    FakeService service("stream-missing");
+    FakeControlServer server(control, service, 2U);
+    server.start();
+
+    auto arguments = test_ts_arguments(1U);
+    arguments.instance = "stream-missing";
+    arguments.runtime_directory = root.root;
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        arguments, profile, output, clock, signal, {}, nullptr, &diagnostics);
+    server.join();
+    if (result || result.error() != Error::NOT_FOUND || !server.good.load() ||
+        !service.saw_tune.load() || !service.saw_stop.load() ||
+        !service.saw_release.load() ||
+        diagnostics.stage != px4::userland::cli::Px4TsDiagnosticStage::endpoint_connect ||
+        diagnostics.endpoint_connect.role !=
+            dtv::userland::host_runtime::EndpointRole::stream || !output.bytes.empty())
+        return false;
+    FILE* text = std::tmpfile();
+    if (text == nullptr) return false;
+    px4::userland::cli::print_px4_ts_run_diagnostic(
+        text, "fake-ts", result.error(), diagnostics);
+    if (std::fflush(text) != 0) {
+        (void)std::fclose(text);
+        return false;
+    }
+    std::rewind(text);
+    std::array<char, 512U> message{};
+    const std::size_t size = std::fread(message.data(), 1U, message.size() - 1U, text);
+    const bool closed = std::fclose(text) == 0;
+    const std::string_view output_text(message.data(), size);
+    return closed && output_text.find("stream endpoint is missing") !=
+                         std::string_view::npos &&
+           output_text.find("control endpoint") == std::string_view::npos;
+}
+
 #if !defined(_WIN32)
 bool test_host_ts_missing_endpoint_diagnostic()
 {
@@ -1848,6 +2022,13 @@ int main()
 #endif
     const bool ctl = test_host_ctl_real_server();
     const bool ctl_endpoint_path = test_host_ctl_endpoint_path_diagnostic();
+#if !defined(_WIN32)
+    const bool ctl_auto_root_overlong = test_host_ctl_auto_root_overlong_diagnostic();
+    const bool ctl_card_reconnect = test_host_ctl_card_reconnect_diagnostic();
+#else
+    const bool ctl_auto_root_overlong = true;
+    const bool ctl_card_reconnect = true;
+#endif
     const bool lnb_ctl = test_host_ctl_lnb_commands();
     const bool ctl_discovery = test_host_ctl_device_instance_discovery();
     const bool ctl_ambiguous = test_host_ctl_device_instance_ambiguity();
@@ -1864,6 +2045,7 @@ int main()
     const bool eof = run_ts_lifecycle(true);
     const bool ts_receiver_ambiguity = test_host_ts_receiver_ambiguity_diagnostic();
     const bool ts_tune_rejection = test_host_ts_tune_rejection_diagnostic();
+    const bool ts_stream_endpoint = test_host_ts_stream_endpoint_diagnostic();
 #if !defined(_WIN32)
     const bool ts_missing_endpoint = test_host_ts_missing_endpoint_diagnostic();
 #else
@@ -1884,6 +2066,10 @@ int main()
 #endif
     if (ctl) std::puts("fake_server_host_ctl_list_status=PASS");
     if (ctl_endpoint_path) std::puts("fake_server_host_ctl_endpoint_path=PASS");
+    if (ctl_auto_root_overlong)
+        std::puts("host_ctl_auto_root_overlong_endpoint_diagnostic=PASS");
+    if (ctl_card_reconnect)
+        std::puts("fake_server_host_ctl_card_reconnect_diagnostic=PASS");
     if (lnb_ctl) std::puts("fake_server_host_ctl_lnb_on_off=PASS");
     if (ctl_discovery) std::puts("fake_server_host_ctl_device_instance_discovery=PASS");
     if (ctl_ambiguous) std::puts("fake_server_host_ctl_device_ambiguity=PASS");
@@ -1902,6 +2088,8 @@ int main()
         std::puts("fake_server_host_ts_receiver_ambiguity=PASS");
     if (ts_tune_rejection)
         std::puts("fake_server_host_ts_tune_rejection_diagnostic=PASS");
+    if (ts_stream_endpoint)
+        std::puts("fake_server_host_ts_stream_endpoint_diagnostic=PASS");
     if (ts_missing_endpoint)
         std::puts("explicit_instance_ts_missing_endpoint_diagnostic=PASS");
     if (output_timeouts)
@@ -1912,10 +2100,12 @@ int main()
     if (not_ready) std::puts("runtime_discovery_not_ready_then_live=PASS");
     else std::fputs("runtime_discovery_not_ready_then_live=FAIL\n", stderr);
     if (security) std::puts("runtime_discovery_security_refusal_not_skipped=PASS");
-    return ctl && ctl_endpoint_path && lnb_ctl && ctl_discovery && ctl_ambiguous &&
+    return ctl && ctl_endpoint_path && ctl_auto_root_overlong && ctl_card_reconnect &&
+           lnb_ctl && ctl_discovery && ctl_ambiguous &&
            ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
            ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
            ts && eof && ts_receiver_ambiguity && ts_tune_rejection &&
+           ts_stream_endpoint &&
            ts_missing_endpoint &&
            output_timeouts && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;

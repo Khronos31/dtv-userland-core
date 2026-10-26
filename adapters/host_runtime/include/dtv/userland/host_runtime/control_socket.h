@@ -56,8 +56,15 @@ enum class EndpointConnectStage : std::uint8_t {
     transport,
 };
 
+enum class EndpointRole : std::uint8_t {
+    control,
+    stream,
+    other,
+};
+
 struct EndpointConnectDiagnostic final {
     EndpointConnectStage stage = EndpointConnectStage::none;
+    EndpointRole role = EndpointRole::control;
     EndpointDiagnostic endpoint{};
 };
 

@@ -435,6 +435,10 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     EndpointConnectDiagnostic* diagnostic) noexcept
 {
     if (diagnostic != nullptr) *diagnostic = EndpointConnectDiagnostic{};
+    if (diagnostic != nullptr) {
+        diagnostic->role = config.endpoint_name == "control.sock" ? EndpointRole::control :
+            config.endpoint_name == "stream.sock" ? EndpointRole::stream : EndpointRole::other;
+    }
     EndpointDiagnostic endpoint_diagnostic{};
     const auto path_result = endpoint_path(config, &endpoint_diagnostic);
     if (!path_result) {
@@ -659,6 +663,8 @@ void print_endpoint_connect_diagnostic(
 {
     if (output == nullptr) return;
     const char* name = tool_name == nullptr ? "client" : tool_name;
+    const char* endpoint_name = diagnostic.role == EndpointRole::control ? "control" :
+        diagnostic.role == EndpointRole::stream ? "stream" : "socket";
     const EndpointDiagnostic& endpoint = diagnostic.endpoint;
     if (diagnostic.stage == EndpointConnectStage::endpoint_path) {
         if (endpoint.reason == EndpointDiagnosticReason::path_too_long) {
@@ -696,34 +702,34 @@ void print_endpoint_connect_diagnostic(
     if (diagnostic.stage == EndpointConnectStage::endpoint) {
         if (error == Error::NOT_FOUND) {
             std::fprintf(output,
-                "%s: control endpoint is missing; check --runtime-dir and --instance and confirm the service is running\n",
-                name);
+                "%s: %s endpoint is missing; check --runtime-dir and --instance and confirm the service is running\n",
+                name, endpoint_name);
         } else {
             std::fprintf(output,
-                "%s: control endpoint verification failed or is unsupported; check the configured endpoint and the service's runtime access conditions\n",
-                name);
+                "%s: %s endpoint verification failed or is unsupported; check the configured endpoint and the service's runtime access conditions\n",
+                name, endpoint_name);
         }
         return;
     }
     if (diagnostic.stage == EndpointConnectStage::connect_timeout) {
         std::fprintf(output,
-            "%s: timed out connecting to the control endpoint; check --runtime-dir, --instance, and service responsiveness\n",
-            name);
+            "%s: timed out connecting to the %s endpoint; check --runtime-dir, --instance, and service responsiveness\n",
+            name, endpoint_name);
         return;
     }
     if (diagnostic.stage == EndpointConnectStage::connect) {
         if (error == Error::INTERNAL) {
             std::fprintf(output,
-                "%s: could not initialize the local control connection; check local socket support and resource availability\n",
-                name);
+                "%s: could not initialize the local %s connection; check local socket support and resource availability\n",
+                name, endpoint_name);
         } else if (error == Error::UNSUPPORTED) {
             std::fprintf(output,
-                "%s: this local control connection operation is unsupported; check the selected endpoint and platform support\n",
-                name);
+                "%s: this local %s connection operation is unsupported; check the selected endpoint and platform support\n",
+                name, endpoint_name);
         } else {
             std::fprintf(output,
-                "%s: the control endpoint refused or could not accept the connection; check that the matching service is running for this --instance\n",
-                name);
+                "%s: the %s endpoint refused or could not accept the connection; check that the matching service is running for this --instance\n",
+                name, endpoint_name);
         }
         return;
     }

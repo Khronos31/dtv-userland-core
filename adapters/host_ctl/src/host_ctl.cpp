@@ -491,6 +491,9 @@ static int run_control_cli_impl(
         const auto deadline = std::chrono::steady_clock::now() +
                               std::chrono::milliseconds(2000);
         std::size_t matches = 0U;
+        std::size_t candidate_count = 0U;
+        std::size_t overlong_path_count = 0U;
+        host_runtime::EndpointConnectDiagnostic overlong_path_diagnostic{};
         std::string matched_root;
         std::string matched_instance;
         const auto remaining = [&deadline]() noexcept -> std::uint32_t {
@@ -532,6 +535,7 @@ static int run_control_cli_impl(
             }
             if (discovered.value().canonical_collision) return exit_status(Error::NOT_FOUND);
             for (std::size_t candidate = 0U; candidate < discovered.value().count; ++candidate) {
+                ++candidate_count;
                 const std::uint32_t budget = remaining();
                 if (budget == 0U) return exit_status(Error::TIMEOUT);
                 const std::string candidate_instance(
@@ -544,7 +548,16 @@ static int run_control_cli_impl(
                 const auto candidate_path = host_runtime::control_endpoint_path(
                     {root, profile.product_slug, candidate_instance}, &path_diagnostic);
                 if (!candidate_path) {
-                    if (selected_runtime_directory.empty()) continue;
+                    if (selected_runtime_directory.empty()) {
+                        if (path_diagnostic.reason ==
+                            host_runtime::EndpointDiagnosticReason::path_too_long) {
+                            ++overlong_path_count;
+                            overlong_path_diagnostic.stage =
+                                host_runtime::EndpointConnectStage::endpoint_path;
+                            overlong_path_diagnostic.endpoint = path_diagnostic;
+                        }
+                        continue;
+                    }
                     host_runtime::EndpointConnectDiagnostic diagnostic{};
                     diagnostic.stage = host_runtime::EndpointConnectStage::endpoint_path;
                     diagnostic.endpoint = path_diagnostic;
@@ -595,7 +608,13 @@ static int run_control_cli_impl(
                 }
             }
         }
-        if (matches != 1U) return exit_status(Error::NOT_FOUND);
+        if (matches != 1U) {
+            if (matches == 0U && candidate_count != 0U &&
+                overlong_path_count == candidate_count)
+                print_connect_diagnostic(profile.tool_name, Error::INVALID_ARGUMENT,
+                                         overlong_path_diagnostic);
+            return exit_status(Error::NOT_FOUND);
+        }
         selected_runtime_directory = matched_root;
         instance = matched_instance;
         has_discovered_snapshot = true;
@@ -722,8 +741,7 @@ static int run_control_cli_impl(
         transport->close();
         owned_transport.reset();
         if (const auto error = connect_control(); error != Error::OK) {
-            std::fprintf(stderr, "%s: connect failed (%u)\n", profile.tool_name,
-                         static_cast<unsigned int>(error));
+            print_connect_diagnostic(profile.tool_name, error, connect_diagnostic);
             return exit_status(error, true);
         }
         wire::CardClientOptions options{};
