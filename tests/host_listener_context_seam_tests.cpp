@@ -15,7 +15,8 @@ static_assert(!std::is_copy_constructible<
 class FakeListenerIo final : public ListenerIo {
 public:
     Error reserve_pair(const dtv::userland::host_runtime::EndpointConfig&,
-                       const dtv::userland::host_runtime::EndpointConfig&) noexcept override
+                       const dtv::userland::host_runtime::EndpointConfig&,
+                       dtv::userland::host_listener_context::ListenerDiagnostic*) noexcept override
     {
         return Error::OK;
     }

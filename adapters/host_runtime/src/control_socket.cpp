@@ -340,21 +340,47 @@ private:
 
 Result<std::string> endpoint_path(const EndpointConfig& config) noexcept
 {
-    if (config.runtime_directory.empty() || config.product.empty() ||
-        config.instance.empty() || !valid_component(config.product) ||
-        !valid_component(config.instance) || !valid_component(config.endpoint_name))
+    return endpoint_path(config, nullptr);
+}
+
+Result<std::string> endpoint_path(const EndpointConfig& config,
+                                  EndpointDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = EndpointDiagnostic{};
+    if (config.runtime_directory.empty()) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
         return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (config.product.empty() || !valid_component(config.product)) {
+        if (diagnostic != nullptr) diagnostic->reason = EndpointDiagnosticReason::product;
+        return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (config.instance.empty() || !valid_component(config.instance)) {
+        if (diagnostic != nullptr) diagnostic->reason = EndpointDiagnosticReason::instance;
+        return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (config.endpoint_name.empty() || !valid_component(config.endpoint_name)) {
+        if (diagnostic != nullptr) diagnostic->reason = EndpointDiagnosticReason::endpoint_name;
+        return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
 #if defined(_WIN32)
     if (config.runtime_directory.size() < 3U ||
         !((config.runtime_directory[0] >= 'A' && config.runtime_directory[0] <= 'Z') ||
           (config.runtime_directory[0] >= 'a' && config.runtime_directory[0] <= 'z')) ||
         config.runtime_directory[1] != ':' ||
-        (config.runtime_directory[2] != '\\' && config.runtime_directory[2] != '/'))
+        (config.runtime_directory[2] != '\\' && config.runtime_directory[2] != '/')) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
         return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
     constexpr char separator = '\\';
 #else
-    if (config.runtime_directory.front() != '/')
+    if (config.runtime_directory.front() != '/') {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::runtime_directory;
         return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
     constexpr char separator = '/';
 #endif
     std::string path(config.runtime_directory);
@@ -368,19 +394,34 @@ Result<std::string> endpoint_path(const EndpointConfig& config) noexcept
     path.push_back(separator);
     path.append(config.endpoint_name.data(), config.endpoint_name.size());
 #if defined(_WIN32)
-    if (path.size() >= sizeof(SOCKADDR_UN{}.sun_path))
+    const std::size_t native_capacity = sizeof(SOCKADDR_UN{}.sun_path);
 #else
-    if (path.size() >= sizeof(sockaddr_un{}.sun_path))
+    const std::size_t native_capacity = sizeof(sockaddr_un{}.sun_path);
 #endif
+    if (diagnostic != nullptr) {
+        diagnostic->path_bytes = path.size();
+        diagnostic->native_capacity = native_capacity;
+        diagnostic->required_bytes = path.size() + 1U;
+    }
+    if (path.size() >= native_capacity) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = EndpointDiagnosticReason::path_too_long;
         return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    }
     return Result<std::string>::success(std::move(path));
 }
 
 Result<std::string> control_endpoint_path(const EndpointConfig& config) noexcept
 {
+    return control_endpoint_path(config, nullptr);
+}
+
+Result<std::string> control_endpoint_path(const EndpointConfig& config,
+                                          EndpointDiagnostic* diagnostic) noexcept
+{
     EndpointConfig control = config;
     control.endpoint_name = "control.sock";
-    return endpoint_path(control);
+    return endpoint_path(control, diagnostic);
 }
 
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(

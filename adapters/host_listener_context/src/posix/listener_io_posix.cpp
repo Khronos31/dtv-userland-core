@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "detail/listener_io.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
 
 #include <algorithm>
 #include <array>
@@ -69,15 +70,33 @@ bool same_identity(const PathIdentity& expected, const struct stat& actual) noex
 }
 
 bool secure_directory(const std::string& path, host_runtime::EndpointAccess access,
-                      uid_t owner) noexcept
+                      uid_t owner, ListenerDiagnostic* diagnostic = nullptr) noexcept
 {
     struct stat info{};
-    if (::lstat(path.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
-        S_ISLNK(info.st_mode) || info.st_uid != owner) {
+    if (::lstat(path.c_str(), &info) != 0) {
+        if (diagnostic != nullptr) {
+            diagnostic->reason = errno == ENOENT
+                ? ListenerDiagnosticReason::runtime_directory_missing
+                : ListenerDiagnosticReason::runtime_directory_lookup;
+        }
         return false;
     }
-    if (access == host_runtime::EndpointAccess::private_user) return (info.st_mode & 0077) == 0;
-    return (info.st_mode & 0007) == 0 && (info.st_mode & 0070) == 0070;
+    if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_type;
+        return false;
+    }
+    if (info.st_uid != owner) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_owner;
+        return false;
+    }
+    const bool allowed = access == host_runtime::EndpointAccess::private_user
+        ? (info.st_mode & 0077) == 0
+        : (info.st_mode & 0007) == 0 && (info.st_mode & 0070) == 0070;
+    if (!allowed && diagnostic != nullptr)
+        diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
+    return allowed;
 }
 
 bool ensure_directory(const std::string& path, host_runtime::EndpointAccess access,
@@ -161,7 +180,8 @@ public:
     }
 
     Error reserve_pair(const host_runtime::EndpointConfig& control,
-                       const host_runtime::EndpointConfig& data) noexcept override
+                       const host_runtime::EndpointConfig& data,
+                       ListenerDiagnostic* diagnostic) noexcept override
     {
         if (reserved_ || control.endpoint_name != "control.sock" ||
             data.endpoint_name != "stream.sock" ||
@@ -170,15 +190,33 @@ public:
             control.access != data.access || control.expected_peer_uid != data.expected_peer_uid) {
             return Error::INVALID_ARGUMENT;
         }
-        const auto control_result = host_runtime::endpoint_path(control);
-        const auto data_result = host_runtime::endpoint_path(data);
-        if (!control_result || !data_result) {
-            return !control_result ? control_result.error() : data_result.error();
+        host_runtime::EndpointDiagnostic endpoint_diagnostic{};
+        const auto control_result = host_runtime::endpoint_path(control,
+                                                                &endpoint_diagnostic);
+        if (!control_result) {
+            if (diagnostic != nullptr) {
+                diagnostic->reason = ListenerDiagnosticReason::endpoint_path;
+                diagnostic->endpoint = endpoint_diagnostic;
+                diagnostic->endpoint_name = control.endpoint_name;
+            }
+            return control_result.error();
+        }
+        const auto data_result = host_runtime::endpoint_path(data,
+                                                             &endpoint_diagnostic);
+        if (!data_result) {
+            if (diagnostic != nullptr) {
+                diagnostic->reason = ListenerDiagnosticReason::endpoint_path;
+                diagnostic->endpoint = endpoint_diagnostic;
+                diagnostic->endpoint_name = data.endpoint_name;
+            }
+            return data_result.error();
         }
 
         const uid_t owner = ::geteuid();
         const std::string runtime(control.runtime_directory);
-        if (!secure_directory(runtime, control.access, owner)) return Error::UNSUPPORTED;
+        if (!secure_directory(runtime, control.access, owner, diagnostic)) {
+            return Error::UNSUPPORTED;
+        }
         std::string product_directory = runtime;
         product_directory.push_back('/');
         product_directory.append(control.product.data(), control.product.size());

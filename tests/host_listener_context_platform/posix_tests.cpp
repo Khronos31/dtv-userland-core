@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "detail/listener_io.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
 
 #include <array>
 #include <chrono>
@@ -19,6 +20,8 @@
 
 using namespace dtv::userland;
 using namespace dtv::userland::host_listener_context::detail;
+using dtv::userland::host_listener_context::ListenerDiagnostic;
+using dtv::userland::host_listener_context::ListenerDiagnosticReason;
 
 namespace {
 
@@ -266,9 +269,51 @@ bool test_shared_group_boundary() noexcept
     control = config(root, "control.sock", host_runtime::EndpointAccess::shared_group);
     data = config(root, "stream.sock", host_runtime::EndpointAccess::shared_group);
     io = create_listener_io();
-    const Error denied = io->reserve_pair(control, data);
+    ListenerDiagnostic diagnostic{};
+    const Error denied = io->reserve_pair(control, data, &diagnostic);
     std::filesystem::remove_all(root);
-    return check(denied == Error::UNSUPPORTED, "reject world-accessible shared-group root");
+    if (!check(denied == Error::UNSUPPORTED, "reject world-accessible shared-group root") ||
+        !check(diagnostic.reason == ListenerDiagnosticReason::runtime_directory_mode,
+               "report actual runtime mode refusal")) return false;
+
+    if (!check(make_root(root), "owner fixture root")) return false;
+    if (::geteuid() == 0) {
+        if (!check(::chown(root.c_str(), 65534, 65534) == 0, "set foreign runtime owner"))
+            return false;
+        control = config(root, "control.sock");
+        data = config(root, "stream.sock");
+        diagnostic = ListenerDiagnostic{};
+        const Error owner_denied = io->reserve_pair(control, data, &diagnostic);
+        const bool refused = owner_denied == Error::UNSUPPORTED &&
+            diagnostic.reason == ListenerDiagnosticReason::runtime_directory_owner;
+        (void)::chown(root.c_str(), ::geteuid(), ::getegid());
+        if (!check(refused, "report actual runtime owner refusal")) return false;
+    }
+    std::filesystem::remove_all(root);
+
+    const std::string missing_root = root + "/missing";
+    control = config(missing_root, "control.sock");
+    data = config(missing_root, "stream.sock");
+    diagnostic = ListenerDiagnostic{};
+    const Error missing_error = io->reserve_pair(control, data, &diagnostic);
+    if (!check(missing_error == Error::UNSUPPORTED &&
+               diagnostic.reason == ListenerDiagnosticReason::runtime_directory_missing,
+               "report absent runtime directory without claiming ACL failure")) return false;
+
+    const std::string overlong_root = "/" + std::string(96U, 'x');
+    control = config(overlong_root, "control.sock");
+    data = config(overlong_root, "stream.sock");
+    diagnostic = ListenerDiagnostic{};
+    const Error long_error = io->reserve_pair(control, data, &diagnostic);
+    return check(long_error == Error::INVALID_ARGUMENT &&
+                 diagnostic.reason == ListenerDiagnosticReason::endpoint_path &&
+                 diagnostic.endpoint.reason ==
+                    host_runtime::EndpointDiagnosticReason::path_too_long &&
+                 diagnostic.endpoint.path_bytes + 1U ==
+                    diagnostic.endpoint.required_bytes &&
+                 diagnostic.endpoint.required_bytes >
+                    diagnostic.endpoint.native_capacity,
+                 "report completed listener endpoint path length");
 }
 
 }  // namespace

@@ -9,6 +9,10 @@
 #include <cstddef>
 #include <cstdint>
 
+namespace dtv::userland::host_listener_context {
+struct ListenerDiagnostic;
+}
+
 namespace dtv::userland::host_listener_context::detail {
 
 inline constexpr std::size_t kListenerIoEventCapacity = 67U;
@@ -78,7 +82,8 @@ public:
     // Reserves only the shared namespace. publish_pair() publishes both
     // endpoints atomically and rolls back only paths created by this owner.
     virtual Error reserve_pair(const host_runtime::EndpointConfig& control,
-                               const host_runtime::EndpointConfig& data) noexcept = 0;
+                               const host_runtime::EndpointConfig& data,
+                               ListenerDiagnostic* diagnostic = nullptr) noexcept = 0;
     virtual Error publish_pair(ListenerPair& pair) noexcept = 0;
     // Returns readiness only; all following accept/read/write calls are
     // nonblocking. event_count is set to the number of initialized entries.

@@ -8,6 +8,7 @@ if(WIN32)
         DTV_LISTENER_CONTEXT_TESTING=1)
     target_include_directories(host_listener_context_platform_tests PRIVATE
         ${_listener_context_root}/adapters/host_listener_context/src
+        ${_listener_context_root}/adapters/host_listener_context/include
         ${_listener_context_root}/adapters/host_runtime/include)
     target_link_libraries(host_listener_context_platform_tests PRIVATE dtv::host_runtime)
     if(MSVC)
@@ -20,6 +21,7 @@ else()
         ${_listener_context_root}/adapters/host_listener_context/src/posix/listener_io_posix.cpp)
     target_include_directories(host_listener_context_platform_tests PRIVATE
         ${_listener_context_root}/adapters/host_listener_context/src
+        ${_listener_context_root}/adapters/host_listener_context/include
         ${_listener_context_root}/adapters/host_runtime/include)
     target_link_libraries(host_listener_context_platform_tests PRIVATE dtv::host_runtime)
     if(NOT MSVC)

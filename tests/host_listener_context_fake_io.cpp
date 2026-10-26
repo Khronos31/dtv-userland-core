@@ -52,7 +52,8 @@ public:
     explicit FakeListenerIo(FakeListenerIoControl::Impl& state) noexcept : state_(state) {}
 
     Error reserve_pair(const host_runtime::EndpointConfig&,
-                       const host_runtime::EndpointConfig&) noexcept override
+                       const host_runtime::EndpointConfig&,
+                       host_listener_context::ListenerDiagnostic*) noexcept override
     {
         std::lock_guard<std::mutex> lock(state_.mutex);
         if (state_.reserved) return Error::BUSY;

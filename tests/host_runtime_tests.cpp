@@ -498,16 +498,57 @@ bool default_runtime_roots_test()
     ok = ok && make_directory(long_xdg) && saved_xdg.set(long_xdg.c_str());
     dtv::userland::host_runtime::EndpointConfig long_endpoint{
         long_xdg, "siano-userland", "test"};
-    const auto long_endpoint_path =
-        dtv::userland::host_runtime::control_endpoint_path(long_endpoint);
+    dtv::userland::host_runtime::EndpointDiagnostic long_path_diagnostic{};
+    const auto long_endpoint_path = dtv::userland::host_runtime::control_endpoint_path(
+        long_endpoint, &long_path_diagnostic);
     const auto long_path_fallback = ok
         ? px4::userland::ipc::posix::select_publish_runtime_root(
             "siano-userland", "test")
         : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
     ok = ok && !long_endpoint_path &&
         long_endpoint_path.error() == px4::userland::Error::INVALID_ARGUMENT &&
+        long_path_diagnostic.reason == dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long &&
+        long_path_diagnostic.path_bytes + 1U == long_path_diagnostic.required_bytes &&
+        long_path_diagnostic.required_bytes > long_path_diagnostic.native_capacity &&
+        long_path_diagnostic.native_capacity == sizeof(sockaddr_un{}.sun_path) &&
         long_path_fallback && long_path_fallback.value() == selected_path &&
         saved_xdg.set(unsafe_xdg.c_str());
+
+    dtv::userland::host_runtime::EndpointConfig invalid_instance{
+        selected_path, "siano-userland", ""};
+    dtv::userland::host_runtime::EndpointDiagnostic invalid_diagnostic{};
+    const auto invalid_endpoint = dtv::userland::host_runtime::control_endpoint_path(
+        invalid_instance, &invalid_diagnostic);
+    ok = ok && !invalid_endpoint &&
+        invalid_endpoint.error() == px4::userland::Error::INVALID_ARGUMENT &&
+        invalid_diagnostic.reason ==
+            dtv::userland::host_runtime::EndpointDiagnosticReason::instance;
+
+    const std::size_t fixed_bytes = 1U + std::strlen("siano-userland") + 1U + 2U +
+        1U + std::strlen("test") + 1U + std::strlen("control.sock");
+    const std::size_t capacity = sizeof(sockaddr_un{}.sun_path);
+    const std::string boundary_root = "/r" +
+        std::string(capacity - fixed_bytes - 3U, 'b');
+    dtv::userland::host_runtime::EndpointConfig boundary_endpoint{
+        boundary_root, "siano-userland", "test"};
+    dtv::userland::host_runtime::EndpointDiagnostic boundary_diagnostic{};
+    const auto boundary_path = dtv::userland::host_runtime::control_endpoint_path(
+        boundary_endpoint, &boundary_diagnostic);
+    ok = ok && boundary_path && boundary_diagnostic.path_bytes == capacity - 1U &&
+        boundary_diagnostic.required_bytes == capacity;
+
+    const std::string over_boundary_root = boundary_root + "b";
+    dtv::userland::host_runtime::EndpointConfig over_boundary_endpoint{
+        over_boundary_root, "siano-userland", "test"};
+    dtv::userland::host_runtime::EndpointDiagnostic over_boundary_diagnostic{};
+    const auto over_boundary_path = dtv::userland::host_runtime::control_endpoint_path(
+        over_boundary_endpoint, &over_boundary_diagnostic);
+    ok = ok && !over_boundary_path &&
+        over_boundary_path.error() == px4::userland::Error::INVALID_ARGUMENT &&
+        over_boundary_diagnostic.reason ==
+            dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long &&
+        over_boundary_diagnostic.path_bytes == capacity &&
+        over_boundary_diagnostic.required_bytes == capacity + 1U;
 
     const std::string product = selected_path + "/siano-userland";
     const std::string version = product + "/v1";

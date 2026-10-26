@@ -28,8 +28,28 @@ struct EndpointConfig final {
     std::string_view endpoint_name = "control.sock";
 };
 
+enum class EndpointDiagnosticReason : std::uint8_t {
+    none,
+    runtime_directory,
+    product,
+    instance,
+    endpoint_name,
+    path_too_long,
+};
+
+struct EndpointDiagnostic final {
+    EndpointDiagnosticReason reason = EndpointDiagnosticReason::none;
+    std::size_t path_bytes = 0U;
+    std::size_t native_capacity = 0U;
+    std::size_t required_bytes = 0U;
+};
+
 Result<std::string> control_endpoint_path(const EndpointConfig& config) noexcept;
+Result<std::string> control_endpoint_path(
+    const EndpointConfig& config, EndpointDiagnostic* diagnostic) noexcept;
 Result<std::string> endpoint_path(const EndpointConfig& config) noexcept;
+Result<std::string> endpoint_path(
+    const EndpointConfig& config, EndpointDiagnostic* diagnostic) noexcept;
 
 // Connects to the local control endpoint after checking its namespace owner,
 // permissions, and peer identity. The returned transport owns its socket.
