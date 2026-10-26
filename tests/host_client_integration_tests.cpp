@@ -353,7 +353,11 @@ bool send_all(Socket socket, const std::uint8_t* input, std::size_t size)
         const int count = ::send(socket, reinterpret_cast<const char*>(input + offset),
             static_cast<int>(std::min<std::size_t>(size - offset, INT_MAX)), 0);
 #else
-        const ssize_t count = ::send(socket, input + offset, size - offset, 0);
+        int flags = 0;
+#if defined(MSG_NOSIGNAL)
+        flags |= MSG_NOSIGNAL;
+#endif
+        const ssize_t count = ::send(socket, input + offset, size - offset, flags);
 #endif
         if (count <= 0) return false;
         offset += static_cast<std::size_t>(count);
@@ -421,6 +425,10 @@ struct FakeService final {
     std::atomic<unsigned int> lnb_power_count{0U};
     std::atomic<unsigned int> stop_count{0U};
     std::atomic<unsigned int> release_count{0U};
+    std::atomic<unsigned int> operation_order{0U};
+    std::atomic<unsigned int> stop_order{0U};
+    std::atomic<unsigned int> stream_end_order{0U};
+    std::atomic<unsigned int> release_order{0U};
     bool unsupported_status = false;
     bool refuse_lnb_power = false;
     unsigned int replace_serial_at_list = 0U;
@@ -563,6 +571,7 @@ struct FakeService final {
                                           response, &wire::encode_stop_response);
             if (sent) {
                 saw_stop.store(true);
+                stop_order.store(operation_order.fetch_add(1U) + 1U);
                 stop_changed.notify_all();
             }
             return sent;
@@ -576,7 +585,10 @@ struct FakeService final {
             response.quiesced = true;
             const bool sent = send_record(peer, request.opcode, request.request_id,
                                           response, &wire::encode_release_response);
-            if (sent) saw_release.store(true);
+            if (sent) {
+                saw_release.store(true);
+                release_order.store(operation_order.fetch_add(1U) + 1U);
+            }
             return sent;
         }
         if (request.kind == wire::ControlRequestKind::lnb_power) {
@@ -781,7 +793,12 @@ struct FakeDataServer final {
                     return;
                 }
                 lock.unlock();
-                if (!send_stream_end(peer, make_final(99U))) good.store(false);
+                if (!send_stream_end(peer, make_final(99U))) {
+                    good.store(false);
+                } else {
+                    service.stream_end_order.store(
+                        service.operation_order.fetch_add(1U) + 1U);
+                }
             }
             close_socket(peer);
         });
@@ -809,6 +826,24 @@ struct TestClock final : px4::userland::cli::Px4TsClock {
 
 struct TestSignal final : px4::userland::cli::Px4TsSignal {
     bool stop_requested() const noexcept override { return false; }
+};
+
+struct RequestedTestSignal final : px4::userland::cli::Px4TsSignal {
+    std::atomic<bool> requested{false};
+    bool stop_requested() const noexcept override { return requested.load(); }
+};
+
+struct SignalTimeoutOutput final : px4::userland::cli::Px4TsOutput {
+    RequestedTestSignal& signal;
+    bool request_signal;
+    SignalTimeoutOutput(RequestedTestSignal& value, bool request)
+        : signal(value), request_signal(request) {}
+    Result<void> write(ByteView,
+                       const px4::userland::cli::Px4TsSignal&) noexcept override
+    {
+        if (request_signal) signal.requested.store(true);
+        return Result<void>::failure(Error::TIMEOUT);
+    }
 };
 
 struct TestOutput final : px4::userland::cli::Px4TsOutput {
@@ -1384,6 +1419,67 @@ bool run_ts_lifecycle(bool close_before_stream_end,
     return result && diagnostics.stream_end_valid && diagnostics.packets_written == 1U;
 }
 
+bool run_host_ts_output_timeout_case(bool request_signal)
+{
+    RuntimeTree live_root;
+    if (!live_root.create() || !live_root.create_instance("signal-stop")) return false;
+    Listener control;
+    Listener data;
+    if (!control.bind(live_root.root, "signal-stop", "control.sock") ||
+        !data.bind(live_root.root, "signal-stop", "stream.sock")) return false;
+    FakeService service("signal-stop");
+    FakeControlServer control_server(control, service, 2U);
+    FakeDataServer data_server(data, service, false);
+    control_server.start();
+    data_server.start();
+
+    px4::userland::ipc::posix::RuntimeRootCandidates roots{};
+    if (!add_root(live_root.root, roots)) return false;
+    auto args = test_ts_arguments(1U);
+    args.packet_count_set = false;
+    const px4::userland::cli::TsClientProfile profile{
+        "fake-ts", "test-product", dtv::userland::identity::Product::px4};
+    RequestedTestSignal signal;
+    SignalTimeoutOutput output(signal, request_signal);
+    TestClock clock;
+    px4::userland::cli::Px4TsFailureKind failure{};
+    px4::userland::cli::Px4TsRunDiagnostics diagnostics{};
+    const auto result = px4::userland::cli::test_access::run_wire_with_roots(
+        args, profile, output, clock, signal, roots, &failure, &diagnostics);
+    data_server.join();
+    control_server.join();
+    const bool ordered = service.stop_order.load() < service.stream_end_order.load() &&
+                         service.stream_end_order.load() < service.release_order.load();
+    const bool servers_ok = service.saw_stop.load() && service.saw_release.load() &&
+                            control_server.good.load() &&
+                            (!request_signal || data_server.good.load());
+    const bool passed = request_signal
+        ? result && result.value().signal_stopped && diagnostics.stream_end_valid &&
+              servers_ok && ordered
+        : !result && result.error() == Error::TIMEOUT && !diagnostics.stream_end_valid &&
+              servers_ok;
+    if (!passed) {
+        std::fprintf(stderr,
+            "output timeout cleanup: requested=%d result=%d error=%u "
+            "stream_end=%d stop=%d release=%d data=%d control=%d "
+            "order=%u/%u/%u failure=%u\n",
+            request_signal ? 1 : 0,
+            result ? 1 : 0, result ? 0U : static_cast<unsigned int>(result.error()),
+            diagnostics.stream_end_valid ? 1 : 0, service.saw_stop.load() ? 1 : 0,
+            service.saw_release.load() ? 1 : 0, data_server.good.load() ? 1 : 0,
+            control_server.good.load() ? 1 : 0, service.stop_order.load(),
+            service.stream_end_order.load(), service.release_order.load(),
+            static_cast<unsigned int>(failure));
+    }
+    return passed;
+}
+
+bool test_host_ts_output_timeouts()
+{
+    return run_host_ts_output_timeout_case(true) &&
+           run_host_ts_output_timeout_case(false);
+}
+
 bool test_host_ts_frame_allocation_failure_releases_lease()
 {
     RuntimeTree live_root;
@@ -1571,6 +1667,7 @@ int main()
     const bool lnb_refused = test_host_ctl_lnb_remote_refusal();
     const bool ts = run_ts_lifecycle(false);
     const bool eof = run_ts_lifecycle(true);
+    const bool output_timeouts = test_host_ts_output_timeouts();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
 #else
@@ -1598,6 +1695,8 @@ int main()
     if (lnb_refused) std::puts("fake_server_host_ctl_lnb_remote_refusal=PASS");
     if (ts) std::puts("fake_server_host_ts_record_attach_stream_end_stop_release=PASS");
     if (eof) std::puts("fake_server_host_ts_peer_eof_cleanup=PASS");
+    if (output_timeouts)
+        std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
     if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
@@ -1607,6 +1706,6 @@ int main()
     return ctl && lnb_ctl && ctl_discovery && ctl_ambiguous &&
            ctl_reconnect_identity && ctl_single_usb && ctl_single_usb_reconnect &&
            ctl_multi_usb && ctl_invalid_usb && ctl_security && lnb_unsupported && lnb_refused &&
-           ts && eof && overlong &&
+           ts && eof && output_timeouts && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }
