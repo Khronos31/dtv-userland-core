@@ -377,10 +377,19 @@ Result<RuntimeInstanceDiscovery> discover_runtime_instances(
 Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
                                           Timeout timeout) noexcept
 {
+    return connect(endpoint, timeout, nullptr);
+}
+
+Result<SocketStream> SocketStream::connect(
+    const EndpointConfig& endpoint, Timeout timeout,
+    dtv::userland::host_runtime::EndpointConnectDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr)
+        *diagnostic = dtv::userland::host_runtime::EndpointConnectDiagnostic{};
     if (endpoint.instance == nullptr || endpoint.product_slug == nullptr ||
         endpoint.endpoint_name == nullptr)
         return Result<SocketStream>::failure(Error::INVALID_ARGUMENT);
-    const auto connect_root = [&endpoint, timeout](const char* root) noexcept {
+    const auto connect_root = [&endpoint, timeout, diagnostic](const char* root) noexcept {
         dtv::userland::host_runtime::EndpointConfig config{
             root, endpoint.product_slug, endpoint.instance,
             endpoint.access == EndpointAccess::shared_group ?
@@ -388,7 +397,7 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
                 dtv::userland::host_runtime::EndpointAccess::private_user};
         config.endpoint_name = endpoint.endpoint_name;
         return dtv::userland::host_runtime::connect_endpoint(
-            config, {timeout.milliseconds});
+            config, {timeout.milliseconds}, diagnostic);
     };
     if (endpoint.runtime_directory != nullptr) {
         auto connected = connect_root(endpoint.runtime_directory);
@@ -417,6 +426,7 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
         minimum_path_config);
     if (!minimum_path) return Result<SocketStream>::failure(minimum_path.error());
     bool path_usable = false;
+    dtv::userland::host_runtime::EndpointDiagnostic path_diagnostic{};
     for (std::size_t index = 0U; index < roots.value().count; ++index) {
         const char* root = roots.value().paths[index].data();
         const dtv::userland::host_runtime::EndpointConfig candidate{
@@ -426,14 +436,19 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
                 dtv::userland::host_runtime::EndpointAccess::private_user};
         auto candidate_path_config = candidate;
         candidate_path_config.endpoint_name = endpoint.endpoint_name;
-        if (!dtv::userland::host_runtime::endpoint_path(candidate_path_config))
+        const auto candidate_path = dtv::userland::host_runtime::endpoint_path(
+            candidate_path_config, &path_diagnostic);
+        if (!candidate_path)
             continue;
         path_usable = true;
         const PrivateRootStatus root_status = check_private_root(root, ::geteuid());
         if (root_status == PrivateRootStatus::missing ||
             root_status == PrivateRootStatus::overlong) continue;
-        if (root_status == PrivateRootStatus::refused)
+        if (root_status == PrivateRootStatus::refused) {
+            if (diagnostic != nullptr)
+                diagnostic->stage = dtv::userland::host_runtime::EndpointConnectStage::runtime_namespace;
             return Result<SocketStream>::failure(Error::UNSUPPORTED);
+        }
         auto connected = connect_root(root);
         if (!connected) {
             if (connected.error() == Error::NOT_FOUND ||
@@ -444,6 +459,13 @@ Result<SocketStream> SocketStream::connect(const EndpointConfig& endpoint,
         stream.transport_ = std::move(connected.value());
         return Result<SocketStream>::success(std::move(stream));
     }
+    if (!path_usable && diagnostic != nullptr) {
+        diagnostic->stage = dtv::userland::host_runtime::EndpointConnectStage::endpoint_path;
+        diagnostic->endpoint = path_diagnostic;
+    }
+    if (diagnostic != nullptr && diagnostic->stage ==
+            dtv::userland::host_runtime::EndpointConnectStage::none)
+        diagnostic->stage = dtv::userland::host_runtime::EndpointConnectStage::endpoint;
     return Result<SocketStream>::failure(
         path_usable ? Error::NOT_FOUND : Error::INVALID_ARGUMENT);
 #endif

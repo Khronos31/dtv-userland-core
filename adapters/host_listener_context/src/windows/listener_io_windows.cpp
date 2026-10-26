@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include "detail/listener_io.h"
+#include "dtv/userland/host_listener_context/enclosure_context.h"
 #include <windows/windows_security.h>
 
 #include <algorithm>
@@ -316,7 +317,8 @@ public:
     }
 
     Error reserve_pair(const host_runtime::EndpointConfig& control,
-                       const host_runtime::EndpointConfig& data) noexcept override
+                       const host_runtime::EndpointConfig& data,
+                       ListenerDiagnostic* diagnostic) noexcept override
     {
         if (reserved_ || control.endpoint_name != "control.sock" ||
             data.endpoint_name != "stream.sock" ||
@@ -326,12 +328,31 @@ public:
             return Error::INVALID_ARGUMENT;
         if (control.access != host_runtime::EndpointAccess::private_user) return Error::UNSUPPORTED;
         if (!ensure_winsock()) return Error::INTERNAL;
-        const auto control_result = host_runtime::endpoint_path(control);
-        const auto data_result = host_runtime::endpoint_path(data);
-        if (!control_result || !data_result)
-            return !control_result ? control_result.error() : data_result.error();
+        host_runtime::EndpointDiagnostic endpoint_diagnostic{};
+        const auto control_result = host_runtime::endpoint_path(control,
+                                                                &endpoint_diagnostic);
+        if (!control_result) {
+            if (diagnostic != nullptr) {
+                diagnostic->reason = ListenerDiagnosticReason::endpoint_path;
+                diagnostic->endpoint = endpoint_diagnostic;
+                diagnostic->endpoint_name = control.endpoint_name;
+            }
+            return control_result.error();
+        }
+        const auto data_result = host_runtime::endpoint_path(data,
+                                                             &endpoint_diagnostic);
+        if (!data_result) {
+            if (diagnostic != nullptr) {
+                diagnostic->reason = ListenerDiagnosticReason::endpoint_path;
+                diagnostic->endpoint = endpoint_diagnostic;
+                diagnostic->endpoint_name = data.endpoint_name;
+            }
+            return data_result.error();
+        }
         std::wstring runtime;
         if (!utf8_to_wide(std::string(control.runtime_directory), runtime)) {
+            if (diagnostic != nullptr)
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_encoding;
             return Error::INVALID_ARGUMENT;
         }
         const std::wstring separator = L"\\";
@@ -340,9 +361,21 @@ public:
         std::wstring version_path = product_path + separator + L"v1";
         std::wstring instance_path = version_path + separator;
         instance_path.append(control.instance.begin(), control.instance.end());
-        if (!windows_security::verify_runtime_parent(runtime.c_str()) ||
-            !ensure_private_directory(product_path) || !ensure_private_directory(version_path) ||
-            !ensure_private_directory(instance_path)) return Error::UNSUPPORTED;
+        const auto security_failure = [diagnostic](RuntimeDirectoryLayer layer) noexcept {
+            if (diagnostic != nullptr) {
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+                diagnostic->directory_layer = layer;
+            }
+            return Error::UNSUPPORTED;
+        };
+        if (!windows_security::verify_runtime_parent(runtime.c_str()))
+            return security_failure(RuntimeDirectoryLayer::runtime_root);
+        if (!ensure_private_directory(product_path))
+            return security_failure(RuntimeDirectoryLayer::product);
+        if (!ensure_private_directory(version_path))
+            return security_failure(RuntimeDirectoryLayer::version);
+        if (!ensure_private_directory(instance_path))
+            return security_failure(RuntimeDirectoryLayer::instance);
         control_path_ = control_result.value();
         data_path_ = data_result.value();
         if (!utf8_to_wide(control_path_, control_wide_) ||

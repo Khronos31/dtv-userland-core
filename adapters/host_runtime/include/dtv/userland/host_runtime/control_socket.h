@@ -6,6 +6,7 @@
 #include <dtv/userland/error.h>
 
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <string_view>
@@ -28,15 +29,67 @@ struct EndpointConfig final {
     std::string_view endpoint_name = "control.sock";
 };
 
+enum class EndpointDiagnosticReason : std::uint8_t {
+    none,
+    runtime_directory,
+    product,
+    instance,
+    endpoint_name,
+    path_too_long,
+};
+
+struct EndpointDiagnostic final {
+    EndpointDiagnosticReason reason = EndpointDiagnosticReason::none;
+    std::size_t path_bytes = 0U;
+    std::size_t native_capacity = 0U;
+    std::size_t required_bytes = 0U;
+};
+
+enum class EndpointConnectStage : std::uint8_t {
+    none,
+    endpoint_path,
+    runtime_namespace,
+    endpoint,
+    connect,
+    connect_timeout,
+    peer_identity,
+    transport,
+};
+
+enum class EndpointRole : std::uint8_t {
+    control,
+    stream,
+    other,
+};
+
+struct EndpointConnectDiagnostic final {
+    EndpointConnectStage stage = EndpointConnectStage::none;
+    EndpointRole role = EndpointRole::control;
+    EndpointDiagnostic endpoint{};
+};
+
 Result<std::string> control_endpoint_path(const EndpointConfig& config) noexcept;
+Result<std::string> control_endpoint_path(
+    const EndpointConfig& config, EndpointDiagnostic* diagnostic) noexcept;
 Result<std::string> endpoint_path(const EndpointConfig& config) noexcept;
+Result<std::string> endpoint_path(
+    const EndpointConfig& config, EndpointDiagnostic* diagnostic) noexcept;
 
 // Connects to the local control endpoint after checking its namespace owner,
 // permissions, and peer identity. The returned transport owns its socket.
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
     const EndpointConfig& config, Timeout timeout) noexcept;
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_control(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept;
 Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     const EndpointConfig& config, Timeout timeout) noexcept;
+Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
+    const EndpointConfig& config, Timeout timeout,
+    EndpointConnectDiagnostic* diagnostic) noexcept;
+void print_endpoint_connect_diagnostic(
+    std::FILE* output, const char* tool_name, Error error,
+    const EndpointConnectDiagnostic& diagnostic) noexcept;
 
 }  // namespace dtv::userland::host_runtime
 

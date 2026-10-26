@@ -32,6 +32,32 @@ enum class CloseState : std::uint8_t {
     pending,
 };
 
+enum class ListenerDiagnosticReason : std::uint8_t {
+    none,
+    endpoint_path,
+    runtime_directory_missing,
+    runtime_directory_lookup,
+    runtime_directory_type,
+    runtime_directory_owner,
+    runtime_directory_mode,
+    runtime_directory_security,
+    runtime_directory_encoding,
+};
+
+enum class RuntimeDirectoryLayer : std::uint8_t {
+    runtime_root,
+    product,
+    version,
+    instance,
+};
+
+struct ListenerDiagnostic final {
+    ListenerDiagnosticReason reason = ListenerDiagnosticReason::none;
+    RuntimeDirectoryLayer directory_layer = RuntimeDirectoryLayer::runtime_root;
+    host_runtime::EndpointDiagnostic endpoint{};
+    std::string_view endpoint_name{};
+};
+
 class EnclosureContext final {
 public:
     // Ownership of family and nonce_source transfers to the returned Context.
@@ -46,6 +72,7 @@ public:
     EnclosureContext& operator=(const EnclosureContext&) = delete;
 
     Result<void> reserve_namespace() noexcept;
+    Result<void> reserve_namespace(ListenerDiagnostic* diagnostic) noexcept;
     Result<void> publish() noexcept;
     Result<void> poll_once(Timeout timeout) noexcept;
     // pending keeps the Context owner graph alive; call close() again to

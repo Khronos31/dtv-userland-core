@@ -55,6 +55,9 @@ public:
 
     static Result<SocketStream> connect(const EndpointConfig& endpoint,
                                         Timeout timeout) noexcept;
+    static Result<SocketStream> connect(
+        const EndpointConfig& endpoint, Timeout timeout,
+        dtv::userland::host_runtime::EndpointConnectDiagnostic* diagnostic) noexcept;
     bool valid() const noexcept { return static_cast<bool>(transport_); }
     void close() noexcept;
     Result<std::size_t> read_some(MutableByteView output, Timeout timeout) noexcept;

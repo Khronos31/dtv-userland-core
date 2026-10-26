@@ -5,10 +5,12 @@
 #include "px4/error.h"
 #include "px4/ipc.h"
 #include "px4/posix_ipc.h"
+#include <dtv/userland/host_runtime/control_socket.h>
 #include <dtv/userland/identity.h>
 #include <dtv/userland/records.h>
 
 #include <array>
+#include <cstdio>
 #include <cstdint>
 #include <string>
 #include <string_view>
@@ -125,16 +127,33 @@ struct Px4TsRunResult final {
     bool signal_stopped = false;
 };
 
+enum class Px4TsDiagnosticStage : std::uint8_t {
+    none,
+    endpoint_connect,
+    receiver_selection,
+    recording_setup,
+};
+
 // Best-effort diagnostics for a failed CLI run.  These values are never used
 // for protocol decisions; they only make a daemon/consumer invariant failure
 // actionable without contaminating stdout with non-TS bytes.
 struct Px4TsRunDiagnostics final {
+    Px4TsDiagnosticStage stage = Px4TsDiagnosticStage::none;
+    dtv::userland::host_runtime::EndpointConnectDiagnostic endpoint_connect{};
+    std::uint16_t receiver_count = 0U;
+    std::uint16_t requested_receiver = 0U;
+    bool receiver_explicit = false;
+    ipc::System requested_system = ipc::System::ISDB_T;
     bool stop_counters_valid = false;
     ipc::CountersPayload stop_counters{};
     bool stream_end_valid = false;
     ipc::StreamEndEventPayload stream_end{};
     std::uint64_t packets_written = 0U;
 };
+
+void print_px4_ts_run_diagnostic(
+    std::FILE* output, const char* tool_name, Error error,
+    const Px4TsRunDiagnostics& diagnostics) noexcept;
 
 // Private CLI core. POSIX I/O adapters are supplied by px4-ts.cpp; this class
 // owns the control/data protocol and cleanup ordering and never writes a

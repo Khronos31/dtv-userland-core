@@ -977,6 +977,12 @@ Result<std::unique_ptr<EnclosureContext>> EnclosureContext::assemble(
 
 Result<void> EnclosureContext::reserve_namespace() noexcept
 {
+    return reserve_namespace(nullptr);
+}
+
+Result<void> EnclosureContext::reserve_namespace(ListenerDiagnostic* diagnostic) noexcept
+{
+    if (diagnostic != nullptr) *diagnostic = ListenerDiagnostic{};
     if (!impl_) return Result<void>::failure(Error::NOT_READY);
     (void)pthread_mutex_lock(&impl_->cleanup_mutex);
     if (impl_->close_requested || impl_->namespace_reserved || impl_->poll_active) {
@@ -985,7 +991,7 @@ Result<void> EnclosureContext::reserve_namespace() noexcept
     }
     const auto control = endpoint_config(impl_->config, "control.sock");
     const auto data = endpoint_config(impl_->config, "stream.sock");
-    const Error error = impl_->io->reserve_pair(control, data);
+    const Error error = impl_->io->reserve_pair(control, data, diagnostic);
     if (error == Error::OK) impl_->namespace_reserved = true;
     (void)pthread_mutex_unlock(&impl_->cleanup_mutex);
     return error == Error::OK ? Result<void>::success() : Result<void>::failure(error);
