@@ -63,6 +63,17 @@ jobs:
             $testExit = $LASTEXITCODE
             Write-Output "$label not-ready fixture exit=$testExit"
           }
+      - name: Run original CTest target once on base and head
+        shell: pwsh
+        run: |
+          foreach ($label in @('base', 'head')) {
+            $build = "$env:RUNNER_TEMP\$label\build-diagnostic"
+            $log = "$env:RUNNER_TEMP\$label-integration-target.log"
+            ctest --test-dir $build -C Release -R '^host_client_integration_tests$' --verbose 2>&1 |
+              Tee-Object -FilePath $log
+            $testExit = $LASTEXITCODE
+            Write-Output "$label integration target exit=$testExit"
+          }
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -70,4 +81,6 @@ jobs:
           path: |
             ${{ runner.temp }}\base-not-ready.log
             ${{ runner.temp }}\head-not-ready.log
+            ${{ runner.temp }}\base-integration-target.log
+            ${{ runner.temp }}\head-integration-target.log
           if-no-files-found: warn
