@@ -42,6 +42,11 @@ Result<void> PacketStreamSession::begin_attach_locked(
     final_snapshot = StreamFinalSnapshot{};
     terminal = StreamTerminal::none;
     counters = StreamCounters{};
+    counters.availability = {
+        wire::MeasureState::valid, wire::MeasureState::valid,
+        wire::MeasureState::unsupported, wire::MeasureState::unsupported,
+        wire::MeasureState::unsupported, wire::MeasureState::valid,
+        wire::MeasureState::unsupported, wire::MeasureState::unsupported};
     queue_policy = policy;
     evicted_packets = 0U;
     evicted_overflow = false;

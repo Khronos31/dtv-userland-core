@@ -164,7 +164,8 @@ bool hello(ControlAuthority& authority, ControlServiceSession& session,
            Executor& executor)
 {
     std::array<std::uint8_t, w::kHelloRequestSize> payload{};
-    const w::HelloRequest value{{1U, 0U}, {1U, 0U}, 0U, 0U};
+    const w::HelloRequest value{{w::kVersionMajor, w::kVersionMinor},
+                                {w::kVersionMajor, w::kVersionMinor}, 0U, 0U};
     const auto size = w::encode_hello_request(value, {payload.data(), payload.size()});
     if (!size) return false;
     w::Context context;

@@ -100,7 +100,7 @@ TunerStreamCounters to_legacy(const engine::StreamCounters& counters) noexcept
     return TunerStreamCounters{counters.packets, counters.bytes, counters.sync_errors,
                                counters.tei_packets, counters.continuity_errors,
                                counters.queue_drops, counters.usb_errors,
-                               counters.empty_intervals};
+                               counters.empty_intervals, counters.availability};
 }
 
 engine::StreamCounters to_engine(const TunerStreamCounters& counters) noexcept
@@ -108,7 +108,7 @@ engine::StreamCounters to_engine(const TunerStreamCounters& counters) noexcept
     return engine::StreamCounters{counters.packets, counters.bytes, counters.sync_errors,
                                   counters.tei_packets, counters.continuity_errors,
                                   counters.queue_drops, counters.usb_errors,
-                                  counters.empty_intervals};
+                                  counters.empty_intervals, counters.availability};
 }
 
 std::array<engine::ReceiverId, ipc::kReceiverCount> legacy_receiver_ids() noexcept

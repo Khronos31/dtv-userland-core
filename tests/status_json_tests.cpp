@@ -123,6 +123,32 @@ void test_projection_contract()
 {
     w::ListResponse list;
     w::StatusResponse status = make_status(list);
+    w::ReceiverStatus& receiver = status.receivers.value.items[0U];
+    receiver.stream_statistics.present = true;
+    receiver.stream_statistics.value.entries.count = 5U;
+    receiver.stream_statistics.value.entries.items[0U].id = w::kCounterIdTransmittedPackets;
+    receiver.stream_statistics.value.entries.items[0U].counter.measurement.state =
+        w::MeasureState::valid;
+    receiver.stream_statistics.value.entries.items[0U].counter.measurement.value = 0U;
+    receiver.stream_statistics.value.entries.items[0U].counter.measurement.sampled_at_ns = 7U;
+    receiver.stream_statistics.value.entries.items[1U].id = w::kCounterIdQueueDroppedPackets;
+    receiver.stream_statistics.value.entries.items[1U].counter.measurement.state =
+        w::MeasureState::unknown;
+    receiver.stream_statistics.value.entries.items[1U].counter.measurement.reason =
+        w::UnknownReason::stale;
+    receiver.stream_statistics.value.entries.items[2U].id = w::kCounterIdStreamBytes;
+    receiver.stream_statistics.value.entries.items[2U].counter.measurement.state =
+        w::MeasureState::unsupported;
+    receiver.stream_statistics.value.entries.items[3U].id = w::kCounterIdSyncErrors;
+    receiver.stream_statistics.value.entries.items[3U].counter.measurement.state =
+        w::MeasureState::valid;
+    receiver.stream_statistics.value.entries.items[3U].counter.measurement.value = 3U;
+    receiver.stream_statistics.value.entries.items[3U].counter.measurement.sampled_at_ns = 7U;
+    receiver.stream_statistics.value.entries.items[4U].id = 13U;
+    receiver.stream_statistics.value.entries.items[4U].counter.measurement.state =
+        w::MeasureState::unknown;
+    receiver.stream_statistics.value.entries.items[4U].counter.measurement.reason =
+        w::UnknownReason::not_sampled;
     const std::string json = encode(status, list);
     CHECK(json.find("\"model\":\"PX-Q3U4\"") != std::string::npos);
     CHECK(json.find("model_id") == std::string::npos);
@@ -136,6 +162,16 @@ void test_projection_contract()
     CHECK(json.find("\"sequence\":\"9007199254740993\"") != std::string::npos);
     CHECK(json.find("\"captured_packets\":{\"value\":\"18446744073709551615\"") !=
           std::string::npos);
+    CHECK(json.find("\"transmitted_packets\":{\"value\":\"0\"") !=
+          std::string::npos);
+    CHECK(json.find("\"queue_dropped_packets\":{\"value\":null") !=
+          std::string::npos);
+    CHECK(json.find("\"sync_errors\":{\"value\":\"3\"") !=
+          std::string::npos);
+    CHECK(json.find("\"stream_bytes\"") == std::string::npos);
+    CHECK(json.find("\"queue_dropped_packets\":{\"value\":\"0\"") ==
+          std::string::npos);
+    CHECK(json.find("\"13\"") == std::string::npos);
     CHECK(json.find("serial_state") == std::string::npos);
     CHECK(json.find("uniqueness") == std::string::npos);
     CHECK(json.find("serial_unique") == std::string::npos);

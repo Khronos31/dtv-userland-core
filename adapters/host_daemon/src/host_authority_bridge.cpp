@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "dtv/userland/host_daemon/host_authority_bridge.h"
 
+#include <array>
 #include <limits>
 
 namespace px4::userland::ipc::posix {
@@ -877,21 +878,37 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 event.final.reason = dtv::userland::wire::StreamEndReason::backend_error;
                 break;
             }
-            event.final.statistics.entries.count = 2U;
-            event.final.statistics.entries.items[0U].id =
-                dtv::userland::wire::kCounterIdTransmittedPackets;
-            event.final.statistics.entries.items[1U].id =
-                dtv::userland::wire::kCounterIdQueueDroppedPackets;
-            auto& packets = event.final.statistics.entries.items[0U].counter;
-            packets.measurement.state = dtv::userland::wire::MeasureState::valid;
-            packets.measurement.value = final.value().counters.packets;
-            packets.overflow = packets.measurement.value ==
-                std::numeric_limits<std::uint64_t>::max();
-            auto& drops = event.final.statistics.entries.items[1U].counter;
-            drops.measurement.state = dtv::userland::wire::MeasureState::valid;
-            drops.measurement.value = final.value().counters.queue_drops;
-            drops.overflow = drops.measurement.value ==
-                std::numeric_limits<std::uint64_t>::max();
+            const auto& counters = final.value().counters;
+            const std::array<std::uint64_t, 8U> values = {
+                counters.packets, counters.queue_drops, counters.bytes,
+                counters.sync_errors, counters.tei_packets,
+                counters.continuity_errors, counters.usb_errors,
+                counters.empty_intervals};
+            const std::array<dtv::userland::wire::MeasureState, 8U> availability = {
+                counters.availability[0U], counters.availability[5U],
+                counters.availability[1U], counters.availability[2U],
+                counters.availability[3U], counters.availability[4U],
+                counters.availability[6U], counters.availability[7U]};
+            const std::array<std::uint8_t, 8U> ids = {
+                dtv::userland::wire::kCounterIdTransmittedPackets,
+                dtv::userland::wire::kCounterIdQueueDroppedPackets,
+                dtv::userland::wire::kCounterIdStreamBytes,
+                dtv::userland::wire::kCounterIdSyncErrors,
+                dtv::userland::wire::kCounterIdTeiPackets,
+                dtv::userland::wire::kCounterIdContinuityErrors,
+                dtv::userland::wire::kCounterIdStreamUsbErrors,
+                dtv::userland::wire::kCounterIdEmptyIntervals};
+            event.final.statistics.entries.count =
+                static_cast<std::uint16_t>(ids.size());
+            for (std::size_t i = 0U; i < ids.size(); ++i) {
+                auto& counter = event.final.statistics.entries.items[i];
+                counter.id = ids[i];
+                counter.counter.measurement.state = availability[i];
+                counter.counter.measurement.value = values[i];
+                counter.counter.overflow = availability[i] ==
+                    dtv::userland::wire::MeasureState::valid &&
+                    values[i] == std::numeric_limits<std::uint64_t>::max();
+            }
             data.stream_end.ready = true;
             if (!data.connection_open) {
                 const auto released =

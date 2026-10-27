@@ -1,7 +1,7 @@
-# UDTV 1.0 typed records
+# UDTV 1.1 typed records
 
 `dtv::wire::records` (`include/dtv/userland/records.h`, `src/records.cpp`, part of the
-`dtv_userland_wire` target) is an independently written, bounded codec for the typed UDTV 1.0
+`dtv_userland_wire` target) is an independently written, bounded codec for the typed UDTV 1.1
 records that follow the envelope and the HELLO/ACQUIRE subset. It reuses the envelope, the
 fragment-tolerant `FrameReceiver`, and the existing HELLO request / ACQUIRE codecs unchanged; it
 is not connected to any product client, daemon, or IPC endpoint.
@@ -43,7 +43,8 @@ Decoders require the exact payload size. Within a record:
 - `RESOURCE_LIMIT`: a well-formed record whose encoded size would exceed `kMaxControlPayload`
   (65,536). It is returned before any byte is written and is distinct from `BUFFER_TOO_SMALL`,
   which means the caller's own buffer is too short. With the current caps every legal record fits
-  under the control cap (the fully populated maximum STATUS is 41,756 bytes, including both
+  under the control cap (the fully populated maximum STATUS is 58,780 bytes with 16 entries in
+  each stream counter set, including both
   enclosure observation optionals present); the guard is kept
   for future layouts.
 - Encoders return `INVALID_ARGUMENT` for any invalid value and `BUFFER_TOO_SMALL` for a short
@@ -60,13 +61,25 @@ it is distinct from an observed `false`. `card_inserted` represents an enclosure
 card observation and is not derived by aggregating reader states. External reader observations
 remain in their reader records.
 
-The envelope version remains UDTV 1.0. This record layout is supported only between daemon and
+The envelope version is UDTV 1.1. This record layout is supported only between daemon and
 client components from the same release. The `Model` record in this revision is name-only; its
 bytes differ from the earlier development series at Core `af82b7a`, which encoded both `id` and
 `name`. This does not assert that the complete record layout matches that development series.
 Mixed-release STATUS layouts, including the earlier main layout without the two enclosure
 observation optionals, are unsupported; the decoder retains its exact-size and strict optional-tag
 checks.
+
+## Stream counters
+
+`StreamCounters` carries 2..16 ascending entries. IDs 5 (`transmitted_packets`) and 6
+(`queue_dropped_packets`) are required; IDs 7..32 are optional, while ID 0 and IDs 33..255 are
+rejected. IDs 7..12 are `stream_bytes`, `sync_errors`, `tei_packets`, `continuity_errors`,
+`stream_usb_errors`, and `empty_intervals`; ID 13..32 are reserved for future optional counters.
+Each entry uses the existing `Counter` measurement state: `valid` includes measured zero,
+`unknown` preserves its reason, and optional `unsupported` entries are omitted from JSON and CLI
+presentation. Unknown optional entries are fully validated and skipped by projections; they never
+alias a known field name. The frame envelope is version 1.1, so version 1.0 peers are rejected by
+the exact version check.
 
 ## Validation split
 
@@ -79,7 +92,8 @@ operation is dispatched:
   `validate_topology`, `validate_limits`
 - `validate_measurements` (metric ID set must equal the declared `measurement_mask`; each declared
   metric must be present and `unknown`/`valid`, never `unsupported`)
-- `validate_stream_counters` (exactly ID5 and ID6), `validate_receiver_counters` (subset of ID1..4),
+- `validate_stream_counters` (required IDs 5 and 6, optional IDs 7..32, at most 16 ascending
+  entries), `validate_receiver_counters` (subset of ID1..4),
   including the saturation rule that `overflow=true` requires `value == UINT64_MAX`
 - `validate_stream_final` (reason/error coupling), `validate_receiver_status`,
   `validate_reader_status`, `validate_card_observation`, `validate_card_session_result`,

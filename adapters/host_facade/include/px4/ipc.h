@@ -4,6 +4,7 @@
 
 #include "px4/error.h"
 #include "px4/transport.h"
+#include "dtv/userland/records.h"
 
 #include <array>
 #include <cstddef>
@@ -233,6 +234,15 @@ struct CountersPayload final {
     std::uint64_t queue_drops;
     std::uint64_t usb_errors;
     std::uint64_t empty_intervals;
+    std::array<dtv::userland::wire::MeasureState, 8U> availability{
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown,
+        dtv::userland::wire::MeasureState::unknown};
 };
 
 struct CardStatusResponsePayload final {

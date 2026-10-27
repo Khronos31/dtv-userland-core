@@ -801,13 +801,47 @@ CountersPayload wire_counters(const wire::StreamCounters& counters) noexcept
     CountersPayload result{};
     for (std::size_t index = 0U; index < counters.entries.count; ++index) {
         const auto& entry = counters.entries.items[index];
-        if (entry.counter.measurement.state != wire::MeasureState::valid) continue;
-        if (entry.id == wire::kCounterIdTransmittedPackets)
-            result.packets = entry.counter.measurement.value;
-        else if (entry.id == wire::kCounterIdQueueDroppedPackets)
-            result.queue_drops = entry.counter.measurement.value;
+        std::size_t field = result.availability.size();
+        std::uint64_t* output = nullptr;
+        switch (entry.id) {
+        case wire::kCounterIdTransmittedPackets:
+            field = 0U;
+            output = &result.packets;
+            break;
+        case wire::kCounterIdStreamBytes:
+            field = 1U;
+            output = &result.bytes;
+            break;
+        case wire::kCounterIdSyncErrors:
+            field = 2U;
+            output = &result.sync_errors;
+            break;
+        case wire::kCounterIdTeiPackets:
+            field = 3U;
+            output = &result.tei_packets;
+            break;
+        case wire::kCounterIdContinuityErrors:
+            field = 4U;
+            output = &result.continuity_errors;
+            break;
+        case wire::kCounterIdQueueDroppedPackets:
+            field = 5U;
+            output = &result.queue_drops;
+            break;
+        case wire::kCounterIdStreamUsbErrors:
+            field = 6U;
+            output = &result.usb_errors;
+            break;
+        case wire::kCounterIdEmptyIntervals:
+            field = 7U;
+            output = &result.empty_intervals;
+            break;
+        default: continue;
+        }
+        result.availability[field] = entry.counter.measurement.state;
+        if (entry.counter.measurement.state == wire::MeasureState::valid)
+            *output = entry.counter.measurement.value;
     }
-    result.bytes = result.packets * 188U;
     return result;
 }
 
@@ -1154,6 +1188,13 @@ Error select_receiver(const wire::ListResponse& list, bool explicit_receiver,
 }
 
 }  // namespace
+
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+ipc::CountersPayload test_wire_counters(const wire::StreamCounters& counters) noexcept
+{
+    return wire_counters(counters);
+}
+#endif
 
 static Result<Px4TsRunResult> run_wire_profile(
     const Px4TsArguments& arguments, Px4TsOutput& output, Px4TsClock& clock,

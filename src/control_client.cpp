@@ -316,7 +316,8 @@ void fetch_status_with_required_features(ClientTransport& transport,
     result = StatusFetchResult{};
     const auto fail = [&transport, &result](Error error) noexcept {
         result.error = error;
-        result.snapshot = StatusSnapshot{};
+        result.snapshot.~StatusSnapshot();
+        ::new (static_cast<void*>(&result.snapshot)) StatusSnapshot{};
         transport.close();
     };
     std::unique_ptr<ExchangeWorkspace> workspace(new (std::nothrow) ExchangeWorkspace{});

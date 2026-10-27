@@ -576,7 +576,8 @@ bool lifecycle(bool fail_capture_start = false,
             if (list_control) {
                 w::Frame hello_response;
                 if (write_record(*list_control.value(), w::kOpcodeHello, 1U,
-                        w::HelloRequest{{1U, 0U}, {1U, 0U}, 0U, 0U},
+                        w::HelloRequest{{w::kVersionMajor, w::kVersionMinor},
+                                        {w::kVersionMajor, w::kVersionMinor}, 0U, 0U},
                         &w::encode_hello_request) && read_frame(*list_control.value(),
                         hello_response) && hello_response.header.kind == w::Kind::response) {
                     const auto hello = w::decode_hello_response(hello_response.payload);
