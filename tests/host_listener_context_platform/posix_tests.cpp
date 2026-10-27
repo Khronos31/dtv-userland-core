@@ -249,7 +249,7 @@ bool test_shared_group_boundary() noexcept
 {
     std::string root;
     if (!check(make_root(root), "shared group root")) return false;
-    if (!check(::chmod(root.c_str(), 0770) == 0, "set shared group root mode")) return false;
+    if (!check(::chmod(root.c_str(), 0750) == 0, "set shared group root mode")) return false;
     auto control = config(root, "control.sock", host_runtime::EndpointAccess::shared_group);
     auto data = config(root, "stream.sock", host_runtime::EndpointAccess::shared_group);
     auto io = create_listener_io();
@@ -259,7 +259,8 @@ bool test_shared_group_boundary() noexcept
     std::string control_path;
     struct stat info{};
     const bool mode = path_for(control, control_path) && ::lstat(control_path.c_str(), &info) == 0 &&
-        S_ISSOCK(info.st_mode) && (info.st_mode & 0077) == 0060;
+        S_ISSOCK(info.st_mode) && (info.st_mode & 0077) == 0060 &&
+        info.st_gid == ::getegid();
     if (!check(mode, "shared endpoint group read-write only")) return false;
     (void)io->unpublish_pair(pair);
     (void)io->release_namespace();

@@ -26,7 +26,9 @@
 #include <sddl.h>
 #else
 #include <cerrno>
+#include <cstdlib>
 #include <fcntl.h>
+#include <grp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -198,31 +200,95 @@ Error socket_error(int value) noexcept
 enum class DirectoryCheck : std::uint8_t { ready, missing, refused };
 
 DirectoryCheck secure_directory(const std::string& path, EndpointAccess access,
-                                uid_t owner) noexcept
+                                uid_t owner, gid_t group, struct stat* identity = nullptr) noexcept
 {
     struct stat info{};
     if (::lstat(path.c_str(), &info) != 0)
         return errno == ENOENT ? DirectoryCheck::missing : DirectoryCheck::refused;
-    if (!S_ISDIR(info.st_mode) || info.st_uid != owner || S_ISLNK(info.st_mode))
+    if (!S_ISDIR(info.st_mode) || info.st_uid != owner || S_ISLNK(info.st_mode) ||
+        (access == EndpointAccess::shared_group && info.st_gid != group))
         return DirectoryCheck::refused;
-    const mode_t forbidden = access == EndpointAccess::private_user ? 0077 : 0007;
-    return (info.st_mode & forbidden) == 0
-        ? DirectoryCheck::ready : DirectoryCheck::refused;
+    const bool permitted = access == EndpointAccess::private_user
+        ? (info.st_mode & 0077) == 0
+        : (info.st_mode & 07777) == 0750;
+    if (!permitted) return DirectoryCheck::refused;
+    if (identity != nullptr) *identity = info;
+    return DirectoryCheck::ready;
+}
+
+bool shared_group_member(gid_t group) noexcept
+{
+    if (::getegid() == group) return true;
+    const int count = ::getgroups(0, nullptr);
+    if (count < 0) return false;
+    if (count == 0) return false;
+    auto* groups = static_cast<gid_t*>(std::malloc(static_cast<std::size_t>(count) * sizeof(gid_t)));
+    if (groups == nullptr) return false;
+    const int returned = ::getgroups(count, groups);
+    bool member = false;
+    for (int index = 0; returned >= 0 && index < returned; ++index)
+        member = member || groups[index] == group;
+    std::free(groups);
+    return returned >= 0 && member;
+}
+
+bool secure_shared_root(const std::string& path, uid_t& owner, gid_t& group) noexcept
+{
+    std::string normalized(path);
+    while (normalized.size() > 1U && normalized.back() == '/') normalized.pop_back();
+    struct stat root{};
+    if (normalized.empty() || normalized.front() != '/' ||
+        ::lstat(normalized.c_str(), &root) != 0 || !S_ISDIR(root.st_mode) ||
+        S_ISLNK(root.st_mode) || (root.st_mode & 07777) != 0750) return false;
+    owner = root.st_uid;
+    group = root.st_gid;
+    std::string current;
+    std::size_t offset = 1U;
+    while (offset < normalized.size()) {
+        const std::size_t separator = normalized.find('/', offset);
+        const std::size_t end = separator == std::string::npos ? normalized.size() : separator;
+        const std::string_view component(normalized.data() + offset, end - offset);
+        if (component.empty() || component == "." || component == "..") return false;
+        current.push_back('/');
+        current.append(component.data(), component.size());
+        struct stat info{};
+        if (::lstat(current.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
+            S_ISLNK(info.st_mode) || (info.st_mode & 0022) != 0 ||
+            (info.st_uid != 0 && info.st_uid != owner)) return false;
+        if (end == normalized.size()) {
+            if (info.st_uid != owner || info.st_gid != group ||
+                (info.st_mode & 07777) != 0750) return false;
+        }
+        if (separator == std::string::npos) break;
+        offset = separator + 1U;
+    }
+    return true;
+}
+
+bool same_directory_identity(const struct stat& expected,
+                             const struct stat& actual) noexcept
+{
+    return S_ISDIR(actual.st_mode) && expected.st_dev == actual.st_dev &&
+           expected.st_ino == actual.st_ino && expected.st_uid == actual.st_uid &&
+           expected.st_gid == actual.st_gid && (expected.st_mode & 07777) ==
+           (actual.st_mode & 07777);
 }
 
 enum class EndpointCheck : std::uint8_t { ready, missing, refused };
 
 EndpointCheck secure_endpoint(const std::string& path, EndpointAccess access, uid_t owner,
+                              gid_t group,
                               struct stat& identity) noexcept
 {
     if (::lstat(path.c_str(), &identity) != 0)
         return errno == ENOENT ? EndpointCheck::missing : EndpointCheck::refused;
-    if (!S_ISSOCK(identity.st_mode) || identity.st_uid != owner)
+    if (!S_ISSOCK(identity.st_mode) || identity.st_uid != owner ||
+        (access == EndpointAccess::shared_group && identity.st_gid != group))
         return EndpointCheck::refused;
     if (access == EndpointAccess::private_user)
         return (identity.st_mode & 0077) == 0 ? EndpointCheck::ready :
                                                EndpointCheck::refused;
-    return (identity.st_mode & 0007) == 0 && (identity.st_mode & 0060) == 0060
+    return (identity.st_mode & 07777) == 0660
         ? EndpointCheck::ready : EndpointCheck::refused;
 }
 
@@ -510,7 +576,8 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         }
     }
 #else
-    const uid_t owner = ::geteuid();
+    uid_t owner = ::geteuid();
+    gid_t group = ::getegid();
     std::string parent(path);
     const std::size_t final_separator = parent.rfind('/');
     const std::string instance_dir = parent.substr(0U, final_separator);
@@ -519,10 +586,23 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     const std::size_t version_separator = parent.rfind('/', instance_separator - 1U);
     const std::string product_dir = parent.substr(0U, version_separator);
     const std::string runtime_directory(config.runtime_directory);
+    if (config.access == EndpointAccess::shared_group &&
+        (!secure_shared_root(runtime_directory, owner, group) ||
+         (config.expected_peer_uid >= 0 &&
+          static_cast<std::uint64_t>(config.expected_peer_uid) !=
+              static_cast<std::uint64_t>(owner)) ||
+         (owner != ::geteuid() && !shared_group_member(group)))) {
+        if (diagnostic != nullptr)
+            diagnostic->stage = EndpointConnectStage::runtime_namespace;
+        return Result<std::unique_ptr<wire::TimedClientTransport>>::failure(Error::UNSUPPORTED);
+    }
     const std::array<const std::string*, 4U> directories{
         &runtime_directory, &product_dir, &version_dir, &instance_dir};
-    for (const std::string* directory : directories) {
-        const DirectoryCheck check = secure_directory(*directory, config.access, owner);
+    std::array<struct stat, 4U> directory_identities{};
+    for (std::size_t index = 0U; index < directories.size(); ++index) {
+        const DirectoryCheck check = secure_directory(*directories[index], config.access,
+                                                       owner, group,
+                                                       &directory_identities[index]);
         if (check != DirectoryCheck::ready) {
             if (diagnostic != nullptr)
                 diagnostic->stage = EndpointConnectStage::runtime_namespace;
@@ -532,7 +612,7 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
     }
     struct stat endpoint_before{};
     const EndpointCheck endpoint_check = secure_endpoint(
-        path, config.access, owner, endpoint_before);
+        path, config.access, owner, group, endpoint_before);
     if (endpoint_check != EndpointCheck::ready) {
         if (diagnostic != nullptr)
             diagnostic->stage = EndpointConnectStage::endpoint;
@@ -582,7 +662,16 @@ Result<std::unique_ptr<wire::TimedClientTransport>> connect_endpoint(
         }
     }
     struct stat endpoint_after{};
-    if (secure_endpoint(path, config.access, owner, endpoint_after) != EndpointCheck::ready ||
+    bool namespace_matches = true;
+    for (std::size_t index = 0U; index < directories.size(); ++index) {
+        struct stat after{};
+        namespace_matches = namespace_matches &&
+            secure_directory(*directories[index], config.access, owner, group, &after) ==
+                DirectoryCheck::ready &&
+            same_directory_identity(directory_identities[index], after);
+    }
+    if (!namespace_matches ||
+        secure_endpoint(path, config.access, owner, group, endpoint_after) != EndpointCheck::ready ||
         endpoint_before.st_dev != endpoint_after.st_dev || endpoint_before.st_ino != endpoint_after.st_ino) {
         (void)::close(socket);
         if (diagnostic != nullptr)
