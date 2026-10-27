@@ -8,7 +8,9 @@ int main()
     dtv::userland::MockTransport transport({65535U, 1048576U, 0x84U});
     dtv::userland::Logger logger;
     std::uint8_t payload[dtv::userland::wire::kHelloRequestSize]{};
-    const dtv::userland::wire::HelloRequest hello{{1U, 0U}, {1U, 0U}, 0U, 0U};
+    const dtv::userland::wire::HelloRequest hello{
+        {dtv::userland::wire::kVersionMajor, dtv::userland::wire::kVersionMinor},
+        {dtv::userland::wire::kVersionMajor, dtv::userland::wire::kVersionMinor}, 0U, 0U};
     const auto encoded = dtv::userland::wire::encode_hello_request(
         hello, {payload, sizeof(payload)});
     dtv::userland::wire::Epoch epoch{};

@@ -34,6 +34,32 @@ bool accepts_system_case(const char* value, System expected)
 
 int main()
 {
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+    namespace wire = dtv::userland::wire;
+    using px4::userland::ipc::CountersPayload;
+    wire::StreamCounters stream_counters{};
+    stream_counters.entries.count = 9U;
+    const std::uint8_t ids[] = {5U, 6U, 7U, 8U, 9U, 10U, 11U, 12U, 13U};
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        stream_counters.entries.items[i].id = ids[i];
+        stream_counters.entries.items[i].counter.measurement.state =
+            wire::MeasureState::valid;
+        stream_counters.entries.items[i].counter.measurement.value = i + 1U;
+    }
+    stream_counters.entries.items[0U].counter.measurement.value = 3U;
+    stream_counters.entries.items[1U].counter.measurement.value = 0U;
+    stream_counters.entries.items[1U].counter.measurement.state = wire::MeasureState::unknown;
+    stream_counters.entries.items[2U].counter.measurement.value = 555U;
+    stream_counters.entries.items[6U].counter.measurement.state = wire::MeasureState::unsupported;
+    stream_counters.entries.items[8U].counter.measurement.state = wire::MeasureState::valid;
+    const CountersPayload payload = px4::userland::cli::test_wire_counters(stream_counters);
+    if (payload.packets != 3U || payload.bytes != 555U || payload.queue_drops != 0U ||
+        payload.availability[0U] != wire::MeasureState::valid ||
+        payload.availability[5U] != wire::MeasureState::unknown ||
+        payload.availability[6U] != wire::MeasureState::unsupported ||
+        payload.availability[1U] != wire::MeasureState::valid) return 1;
+#endif
+
     const auto terrestrial = px4::userland::cli::parse_px4_ts_channel("T13");
     const auto satellite = px4::userland::cli::parse_px4_ts_channel("BS01_0");
     const auto invalid = px4::userland::cli::parse_px4_ts_channel("T7");

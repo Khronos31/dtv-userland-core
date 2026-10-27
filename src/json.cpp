@@ -457,7 +457,14 @@ const char* counter_name(std::uint8_t id) noexcept
     case kCounterIdFramingErrors: return "framing_errors";
     case kCounterIdUpstreamLostPackets: return "upstream_lost_packets";
     case kCounterIdTransmittedPackets: return "transmitted_packets";
-    default: return "queue_dropped_packets";
+    case kCounterIdQueueDroppedPackets: return "queue_dropped_packets";
+    case kCounterIdStreamBytes: return "stream_bytes";
+    case kCounterIdSyncErrors: return "sync_errors";
+    case kCounterIdTeiPackets: return "tei_packets";
+    case kCounterIdContinuityErrors: return "continuity_errors";
+    case kCounterIdStreamUsbErrors: return "stream_usb_errors";
+    case kCounterIdEmptyIntervals: return "empty_intervals";
+    default: return nullptr;
     }
 }
 
@@ -465,12 +472,17 @@ template <typename Counters>
 bool counters(Writer& w, const Counters& value) noexcept
 {
     if (!w.ch('{')) return false;
+    bool comma = false;
     for (std::size_t i = 0U; i < value.entries.count; ++i) {
-        const char* name = counter_name(value.entries.items[i].id);
-        if ((i != 0U && !w.ch(',')) || !key(w, name) ||
-            !counter(w, value.entries.items[i].counter)) {
+        const CounterEntry& entry = value.entries.items[i];
+        const char* name = counter_name(entry.id);
+        if (name == nullptr || entry.counter.measurement.state == MeasureState::unsupported) {
+            continue;
+        }
+        if ((comma && !w.ch(',')) || !key(w, name) || !counter(w, entry.counter)) {
             return false;
         }
+        comma = true;
     }
     return w.ch('}');
 }

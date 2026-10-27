@@ -260,7 +260,8 @@ w::Frame frame(std::uint16_t opcode, std::uint32_t id, ByteView payload)
 bool hello(ControlAuthority& authority, ControlServiceSession& session, Executor& executor)
 {
     std::array<std::uint8_t, w::kHelloRequestSize> payload{};
-    const w::HelloRequest request{{1U, 0U}, {1U, 0U}, 0U, 0U};
+    const w::HelloRequest request{{w::kVersionMajor, w::kVersionMinor},
+                                  {w::kVersionMajor, w::kVersionMinor}, 0U, 0U};
     const auto size = w::encode_hello_request(request, {payload.data(), payload.size()});
     if (!size) return false;
     w::Context context;
@@ -937,7 +938,8 @@ bool test_card_dispatch_rejects_unadvertised_reader()
     Executor executor;
     CHECK(authority.open(session) == Error::OK);
     std::array<std::uint8_t, w::kHelloRequestSize> hello_payload{};
-    const w::HelloRequest hello_request{{1U, 0U}, {1U, 0U},
+    const w::HelloRequest hello_request{{w::kVersionMajor, w::kVersionMinor},
+                                        {w::kVersionMajor, w::kVersionMinor},
                                         w::kFeatureCardService, 0U};
     const auto hello_size = w::encode_hello_request(
         hello_request, {hello_payload.data(), hello_payload.size()});

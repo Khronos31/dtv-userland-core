@@ -262,6 +262,15 @@ public:
         counters.packets = 2U;
         counters.bytes = 2U * 188U;
         counters.queue_drops = 3U;
+        counters.availability = {
+            dtv::userland::wire::MeasureState::valid,
+            dtv::userland::wire::MeasureState::valid,
+            dtv::userland::wire::MeasureState::valid,
+            dtv::userland::wire::MeasureState::unknown,
+            dtv::userland::wire::MeasureState::unsupported,
+            dtv::userland::wire::MeasureState::valid,
+            dtv::userland::wire::MeasureState::unsupported,
+            dtv::userland::wire::MeasureState::unknown};
         final = TunerStreamFinalSnapshot{};
         final_released = false;
         return Result<void>::success();
@@ -429,7 +438,9 @@ w::Frame frame(std::uint16_t opcode, std::uint32_t id, ByteView payload)
 bool hello_unwritten(HostAuthorityBridge& bridge, std::uint8_t slot)
 {
     std::array<std::uint8_t, w::kHelloRequestSize> payload{};
-    const auto size = w::encode_hello_request({{1U, 0U}, {1U, 0U}, 0U, 0U},
+    const auto size = w::encode_hello_request(
+        {{w::kVersionMajor, w::kVersionMinor},
+         {w::kVersionMajor, w::kVersionMinor}, 0U, 0U},
         {payload.data(), payload.size()});
     if (!size) return false;
     w::Context context;
@@ -845,7 +856,8 @@ bool test_response_sent_retains_rejected_hello_disconnect()
     if (!slot) return false;
     std::array<std::uint8_t, w::kHelloRequestSize> payload{};
     const auto size = w::encode_hello_request(
-        {{1U, 0U}, {1U, 0U}, w::kFeatureCardService, 0U},
+        {{w::kVersionMajor, w::kVersionMinor},
+         {w::kVersionMajor, w::kVersionMinor}, w::kFeatureCardService, 0U},
         {payload.data(), payload.size()});
     w::Context context;
     w::Snapshot snapshot;
@@ -1573,7 +1585,15 @@ bool test_authority_stream_prepare_commit_stop()
     const auto first_end_counts = bridge.data_counts();
     if (!stream_end.ready || !drained_packet_seen ||
         stream_end.event.final.id != started.value().stream_id ||
+        stream_end.event.final.statistics.entries.count != 8U ||
         stream_end.event.final.statistics.entries.items[0U].counter.measurement.value != 2U ||
+        stream_end.event.final.statistics.entries.items[3U].counter.measurement.state !=
+            w::MeasureState::valid ||
+        stream_end.event.final.statistics.entries.items[3U].counter.measurement.value != 0U ||
+        stream_end.event.final.statistics.entries.items[4U].counter.measurement.state !=
+            w::MeasureState::unknown ||
+        stream_end.event.final.statistics.entries.items[6U].counter.measurement.state !=
+            w::MeasureState::unsupported ||
         !final || !final.value().quiesced || backend.capture_stops != 1U ||
         first_end_counts.active != 0U || first_end_counts.tombstone != 1U) {
         std::cerr << "first STREAM_END mismatch ready=" << stream_end.ready
@@ -2428,7 +2448,8 @@ bool test_stream_owned_disconnect_submit_entry_points()
     if (!control) return false;
     std::array<std::uint8_t, w::kHelloRequestSize> payload{};
     const auto size = w::encode_hello_request(
-        {{1U, 0U}, {1U, 0U}, w::kFeatureCardService, 0U},
+        {{w::kVersionMajor, w::kVersionMinor},
+         {w::kVersionMajor, w::kVersionMinor}, w::kFeatureCardService, 0U},
         {payload.data(), payload.size()});
     w::Context context;
     w::Snapshot snapshot;

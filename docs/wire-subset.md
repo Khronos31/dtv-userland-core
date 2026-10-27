@@ -1,4 +1,4 @@
-# UDTV 1.0 wire subset
+# UDTV 1.1 wire subset
 
 `dtv::wire` (`include/dtv/userland/wire.h`, `src/wire.cpp`) is a new, independently written
 implementation of the first slice of the common UDTV wire. It covers the envelope, a
@@ -14,7 +14,7 @@ or from the wire, so host endianness, padding, and ABI do not leak.
 |---:|---:|---|---|
 | 0 | 4 | magic | ASCII `UDTV`. The legacy `PX4U` and `ASCN` magics are rejected and reported separately as `HeaderStatus::legacy_magic`; their payloads are never interpreted. |
 | 4 | 2 | major | Must be 1. |
-| 6 | 2 | minor | Must be 0. Any other major or minor is `VERSION_MISMATCH`. |
+| 6 | 2 | minor | Must be 1. Any other major or minor is `VERSION_MISMATCH`. |
 | 8 | 2 | opcode | Raw u16. Unknown values are accepted. |
 | 10 | 2 | flags | 0, 1, or 3; anything else is rejected. |
 | 12 | 4 | request_id | See kinds below. |
@@ -104,10 +104,9 @@ that have the right size but are semantically invalid are `INVALID_ARGUMENT`. En
 
 - Versions are compared as (major, minor). The encoder and decoder reject a range with
   min > max as `INVALID_ARGUMENT`.
-- `negotiate_version` returns 1.0 when min <= 1.0 <= max. Otherwise it returns
-  `VERSION_MISMATCH`, and an inverted range is `INVALID_ARGUMENT`. 1.0 is the only version
-  this subset can select. The spec picks the highest minor both sides share within a major;
-  since this implementation supports only 1.0, that minor is always 0.
+- `negotiate_version` returns 1.1 when min <= 1.1 <= max. Otherwise it returns
+  `VERSION_MISMATCH`, and an inverted range is `INVALID_ARGUMENT`. 1.1 is the only version
+  this subset can select. Version 1.0 peers fail the existing exact frame-version check.
 - `required_features` and `optional_features` are carried unchanged, unknown and high bits
   included. The codec does not judge them; feature policy belongs to the dispatcher.
 

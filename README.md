@@ -1,6 +1,6 @@
 # DTV userland common core
 
-本リポジトリは、DTV ユーザーランド製品群で共有する C++17 の移植可能な共通基盤を提供する。レビュー済みの error/result、ロギング、モック転送基盤、および境界付き UDTV 1.0 ワイヤサブセットを備える。デーモン、ハードウェア転送、製品接続、カードの実装そのものではない。
+本リポジトリは、DTV ユーザーランド製品群で共有する C++17 の移植可能な共通基盤を提供する。レビュー済みの error/result、ロギング、モック転送基盤、および境界付き UDTV 1.1 ワイヤサブセットを備える。デーモン、ハードウェア転送、製品接続、カードの実装そのものではない。
 
 ## 提供ライブラリと構成
 
@@ -137,7 +137,7 @@ cmake --build build
 
 ### 型付きワイヤペイロード (`dtv::wire`)
 
-HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベント、カード／トランザクションレコード、ならびに境界付き UDTV 1.0 エンベロープとフレーム処理を提供する。[型付きレコードの仕様](docs/wire-records.md) ではバイト構文と文脈検証を分離しており、呼び出し側はスナップショットを公開する前に検証を行わなければならない。初期のフレーム処理サブセットは [docs/wire-subset.md](docs/wire-subset.md) に記載されている。
+HELLO、ACQUIRE、LIST/STATUS、選局およびストリーム操作、イベント、カード／トランザクションレコード、ならびに境界付き UDTV 1.1 エンベロープとフレーム処理を提供する。[型付きレコードの仕様](docs/wire-records.md) ではバイト構文と文脈検証を分離しており、呼び出し側はスナップショットを公開する前に検証を行わなければならない。初期のフレーム処理サブセットは [docs/wire-subset.md](docs/wire-subset.md) に記載されている。
 接続状態、ディスパッチ、タイマー、ソケット、JSON/CLI 変換、製品エンドポイントの移行は `dtv::wire` の対象外である。オプショナルな `dtv::control` はsocketなしの接続単位protocol gateと、transportを注入するHELLO/LIST/STATUS read-only clientを提供する。実socket・service・engine・capture data pathは含まない。wireは同一release内の内部契約であり、package component exportは安定した公開wire APIを意味しない。現行の製品クライアントやデーモンは新しいcontrol APIに接続されていない。詳細は [control connection](docs/control-connection.md) と [read-only control client](docs/control-client.md) を参照のこと。
 
 ### STATUS JSON 投影 (`dtv::json`)

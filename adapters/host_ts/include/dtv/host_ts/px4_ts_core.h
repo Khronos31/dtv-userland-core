@@ -155,6 +155,10 @@ void print_px4_ts_run_diagnostic(
     std::FILE* output, const char* tool_name, Error error,
     const Px4TsRunDiagnostics& diagnostics) noexcept;
 
+#if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
+ipc::CountersPayload test_wire_counters(const dtv::userland::wire::StreamCounters& counters) noexcept;
+#endif
+
 // Private CLI core. POSIX I/O adapters are supplied by px4-ts.cpp; this class
 // owns the control/data protocol and cleanup ordering and never writes a
 // socket or output stream from a signal handler.

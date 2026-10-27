@@ -2,6 +2,8 @@
 #ifndef DTV_USERLAND_DETAIL_STREAM_SESSION_TYPES_H
 #define DTV_USERLAND_DETAIL_STREAM_SESSION_TYPES_H
 
+#include "dtv/userland/records.h"
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -42,6 +44,11 @@ struct StreamCounters final {
     std::uint64_t queue_drops = 0U;
     std::uint64_t usb_errors = 0U;
     std::uint64_t empty_intervals = 0U;
+    std::array<wire::MeasureState, 8U> availability{
+        wire::MeasureState::unknown, wire::MeasureState::unknown,
+        wire::MeasureState::unknown, wire::MeasureState::unknown,
+        wire::MeasureState::unknown, wire::MeasureState::unknown,
+        wire::MeasureState::unknown, wire::MeasureState::unknown};
 };
 
 struct StreamFinalSnapshot final {

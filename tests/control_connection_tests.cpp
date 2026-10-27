@@ -103,8 +103,8 @@ bool make_raw_request(RequestFrame& out, std::uint16_t opcode, std::uint32_t req
 w::HelloRequest hello_request(std::uint64_t required = 0U, std::uint64_t optional = 0U)
 {
     w::HelloRequest hello;
-    hello.min = w::Version{1U, 0U};
-    hello.max = w::Version{1U, 0U};
+    hello.min = w::Version{w::kVersionMajor, w::kVersionMinor};
+    hello.max = w::Version{w::kVersionMajor, w::kVersionMinor};
     hello.required_features = required;
     hello.optional_features = optional;
     return hello;
@@ -177,7 +177,7 @@ void test_hello_negotiation()
     const auto hello = w::decode_hello_response(reply.payload);
     CHECK(hello);
     if (hello) {
-        CHECK(hello.value().major == 1U && hello.value().minor == 0U);
+        CHECK(hello.value().major == 1U && hello.value().minor == 1U);
         // Only the offered optional bit survives; unknown and unoffered bits drop.
         CHECK(hello.value().features == w::kFeatureStateEvent);
         CHECK(hello.value().epoch == h.server.epoch);

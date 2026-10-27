@@ -9,7 +9,7 @@
 #include <cstddef>
 #include <cstdint>
 
-// UDTV 1.0 wire subset: the common 20-byte envelope, a fragment-tolerant
+// UDTV 1.1 wire subset: the common 20-byte envelope, a fragment-tolerant
 // receiver, and typed HELLO request and ACQUIRE request/response payloads.
 // Every integer is little-endian and is written byte by byte; no struct is
 // copied to or from the wire. See docs/wire-subset.md for scope and limits.
@@ -22,7 +22,7 @@ inline constexpr std::array<std::uint8_t, 4> kLegacyPx4Magic = {'P', 'X', '4', '
 inline constexpr std::array<std::uint8_t, 4> kLegacyAsicenMagic = {'A', 'S', 'C', 'N'};
 
 inline constexpr std::uint16_t kVersionMajor = 1U;
-inline constexpr std::uint16_t kVersionMinor = 0U;
+inline constexpr std::uint16_t kVersionMinor = 1U;
 
 inline constexpr std::size_t kHeaderSize = 20U;
 inline constexpr std::size_t kMaxControlPayload = 65536U;
@@ -108,7 +108,7 @@ std::size_t payload_limit(Kind kind, std::uint16_t opcode) noexcept;
 HeaderStatus check_header(ByteView input, Header* header) noexcept;
 Result<Header> decode_header(ByteView input) noexcept;
 
-// Writes kHeaderSize bytes with version 1.0. The header must pass the same
+// Writes kHeaderSize bytes with version 1.1. The header must pass the same
 // rules decode_header enforces.
 Result<std::size_t> encode_header(const Header& header, MutableByteView output) noexcept;
 

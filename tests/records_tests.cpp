@@ -644,6 +644,11 @@ void test_measurements_and_counters()
     stream.entries.items[2].id = 13U;
     stream.entries.items[2].counter = unknown_counter(w::UnknownReason::not_sampled);
     CHECK(w::validate_stream_counters(stream) == Error::OK);
+    stream.entries.items[2].counter.measurement.reason =
+        static_cast<w::UnknownReason>(0U);
+    CHECK(w::validate_stream_counters(stream) == Error::INVALID_ARGUMENT);
+    stream.entries.items[2].counter = valid_counter(4U, 5U, true);
+    CHECK(w::validate_stream_counters(stream) == Error::INVALID_ARGUMENT);
     stream.entries.items[2].id = 33U;
     CHECK(w::validate_stream_counters(stream) == Error::INVALID_ARGUMENT);
 
@@ -1941,13 +1946,15 @@ void test_max_populated_status()
         receiver.last_stream.value.error.value.code = 9U;
         receiver.last_stream.value.error.value.operation = fill_str<32>('o');
         receiver.last_stream.value.error.value.detail = fill_str<256>('d');
-        receiver.last_stream.value.statistics.entries.count = 2U;
-        receiver.last_stream.value.statistics.entries.items[0].id =
-            w::kCounterIdTransmittedPackets;
+        receiver.last_stream.value.statistics.entries.count = 16U;
+        for (std::size_t c = 0U; c < 16U; ++c) {
+            receiver.last_stream.value.statistics.entries.items[c].id =
+                static_cast<std::uint8_t>(w::kCounterIdTransmittedPackets + c);
+            receiver.last_stream.value.statistics.entries.items[c].counter =
+                valid_counter(c, 5U, false);
+        }
         receiver.last_stream.value.statistics.entries.items[0].counter =
             valid_counter(100U, 5U, false);
-        receiver.last_stream.value.statistics.entries.items[1].id =
-            w::kCounterIdQueueDroppedPackets;
         receiver.last_stream.value.statistics.entries.items[1].counter =
             valid_counter(0U, 5U, false);
         receiver.measurements.entries.count = 3U;
@@ -1971,11 +1978,15 @@ void test_max_populated_status()
                 valid_counter(1000U + c, 5U, false);
         }
         receiver.stream_statistics.present = true;
-        receiver.stream_statistics.value.entries.count = 2U;
-        receiver.stream_statistics.value.entries.items[0].id = w::kCounterIdTransmittedPackets;
+        receiver.stream_statistics.value.entries.count = 16U;
+        for (std::size_t c = 0U; c < 16U; ++c) {
+            receiver.stream_statistics.value.entries.items[c].id =
+                static_cast<std::uint8_t>(w::kCounterIdTransmittedPackets + c);
+            receiver.stream_statistics.value.entries.items[c].counter =
+                valid_counter(c, 5U, false);
+        }
         receiver.stream_statistics.value.entries.items[0].counter =
             valid_counter(0xffffffffffffffffULL, 5U, true);
-        receiver.stream_statistics.value.entries.items[1].id = w::kCounterIdQueueDroppedPackets;
         receiver.stream_statistics.value.entries.items[1].counter = valid_counter(7U, 5U, false);
         receiver.last_error.present = true;
         receiver.last_error.value.code = 7U;
@@ -2004,11 +2015,11 @@ void test_max_populated_status()
     // Independent size computation: the plain sum of the legal field maxima.
     // producer 167 + context 381 + snapshot 16 + scope 9 + enclosure 654 +
     // LNB/CARD optional tags and values 4 + topology 4 + functions (3 + 8*1024) +
-    // receivers (3 + 32*930) +
-    // readers (3 + 8*320) = 41756. Each receiver carries three valid long
+    // receivers (3 + 32*1462) +
+    // readers (3 + 8*320) = 58780. Each receiver carries three valid long
     // measurements (11 + 14 + 14) and long counters, so the signal metric is the
     // valid form, not the two-byte unknown form.
-    const std::size_t expected_size = 41756U;
+    const std::size_t expected_size = 58780U;
     CHECK(expected_size <= w::kMaxControlPayload);
 
     std::vector<std::uint8_t> out(70000);

@@ -88,7 +88,8 @@ std::array<std::uint8_t, w::kHeaderSize> udtv(std::uint16_t opcode, std::uint16_
                                               std::uint32_t request_id,
                                               std::uint32_t payload_length)
 {
-    return raw_header('U', 'D', 'T', 'V', 1U, 0U, opcode, flags, request_id, payload_length);
+    return raw_header('U', 'D', 'T', 'V', w::kVersionMajor, w::kVersionMinor,
+                      opcode, flags, request_id, payload_length);
 }
 
 w::HeaderStatus status_of(const std::array<std::uint8_t, w::kHeaderSize>& bytes)
@@ -100,7 +101,7 @@ w::HeaderStatus status_of(const std::array<std::uint8_t, w::kHeaderSize>& bytes)
 void test_header_vectors()
 {
     // HELLO request, request_id 0x01020304, 24-byte payload.
-    const std::array<std::uint8_t, 20> hello = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> hello = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                 0x00, 0x01, 0x00, 0x00, 0x00, 0x04, 0x03,
                                                 0x02, 0x01, 0x18, 0x00, 0x00, 0x00};
     const auto decoded = w::decode_header(view(hello));
@@ -121,7 +122,7 @@ void test_header_vectors()
     CHECK(equals(out.data(), out.size(), hello));
 
     // ACQUIRE response: flags 0x0001.
-    const std::array<std::uint8_t, 20> response = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> response = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                    0x00, 0x20, 0x00, 0x01, 0x00, 0xff, 0x00,
                                                    0x00, 0x00, 0x18, 0x00, 0x00, 0x00};
     const auto r = w::decode_header(view(response));
@@ -132,7 +133,7 @@ void test_header_vectors()
     CHECK(equals(out.data(), out.size(), response));
 
     // Error response: flags 0x0003.
-    const std::array<std::uint8_t, 20> error = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> error = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                 0x00, 0x20, 0x00, 0x03, 0x00, 0x07, 0x00,
                                                 0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     const auto e = w::decode_header(view(error));
@@ -144,7 +145,7 @@ void test_header_vectors()
 
     // TS_DATA event: flags 0, request_id 0, opcode 0x8040, payload 0x000fffb8
     // (1048504, the TS_DATA cap).
-    const std::array<std::uint8_t, 20> event = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> event = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                 0x00, 0x40, 0x80, 0x00, 0x00, 0x00, 0x00,
                                                 0x00, 0x00, 0xb8, 0xff, 0x0f, 0x00};
     const auto ev = w::decode_header(view(event));
@@ -178,7 +179,8 @@ void test_magic_and_version()
     CHECK(status_of(raw_header(0, 0, 0, 0, 1U, 0U, 1U, 0U, 1U, 0U)) ==
           w::HeaderStatus::bad_magic);
 
-    const std::uint16_t versions[][2] = {{1U, 1U}, {0U, 0U}, {2U, 0U}, {0U, 1U}, {0x0100U, 0U}};
+    const std::uint16_t versions[][2] = {
+        {1U, 0U}, {1U, 2U}, {0U, 0U}, {2U, 0U}, {0U, 1U}, {0x0100U, 0U}};
     for (const auto& v : versions) {
         const auto bytes = raw_header('U', 'D', 'T', 'V', v[0], v[1], 1U, 0U, 1U, 0U);
         CHECK(status_of(bytes) == w::HeaderStatus::unsupported_version);
@@ -293,13 +295,13 @@ void test_flags_and_ids()
     CHECK(out[0] == 0xaaU && out[19] == 0xaaU);
 
     // Valid unknown event and unknown request encode to independently formed bytes.
-    const std::array<std::uint8_t, 20> unknown_event = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> unknown_event = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                         0x00, 0x23, 0x81, 0x00, 0x00, 0x00, 0x00,
                                                         0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     CHECK(w::encode_header(w::Header{w::Kind::event, 0x8123U, 0U, 0U}, mutable_view(out))
               .has_value());
     CHECK(equals(out.data(), out.size(), unknown_event));
-    const std::array<std::uint8_t, 20> unknown_request = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x00,
+    const std::array<std::uint8_t, 20> unknown_request = {'U', 'D', 'T', 'V', 0x01, 0x00, 0x01,
                                                           0x00, 0xff, 0x7f, 0x00, 0x00, 0x09, 0x00,
                                                           0x00, 0x00, 0x00, 0x00, 0x00, 0x00};
     CHECK(w::encode_header(w::Header{w::Kind::request, 0x7fffU, 9U, 0U}, mutable_view(out))
@@ -378,7 +380,7 @@ void test_frames()
 {
     // ACQUIRE response frame, request_id 2, epoch 0x10..0x1f, lease 0x0102030405060708.
     const std::array<std::uint8_t, 44> frame = {
-        'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00, 0x20, 0x00, 0x01,
+        'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00, 0x20, 0x00, 0x01,
         0x00, 0x02, 0x00, 0x00, 0x00, 0x18, 0x00, 0x00, 0x00, 0x10, 0x11,
         0x12, 0x13, 0x14, 0x15, 0x16, 0x17, 0x18, 0x19, 0x1a, 0x1b, 0x1c,
         0x1d, 0x1e, 0x1f, 0x08, 0x07, 0x06, 0x05, 0x04, 0x03, 0x02, 0x01};
@@ -415,7 +417,7 @@ void test_frames()
     CHECK(w::decode_frame(view(v2)).error() == Error::VERSION_MISMATCH);
 
     // Unknown opcode in a valid envelope passes through unchanged.
-    const std::array<std::uint8_t, 23> unknown = {'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00,
+    const std::array<std::uint8_t, 23> unknown = {'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00,
                                                   0xbc, 0x7a, 0x00, 0x00, 0x2a, 0x00, 0x00, 0x00,
                                                   0x03, 0x00, 0x00, 0x00, 'x',  'y',  'z'};
     const auto u = w::decode_frame(view(unknown));
@@ -471,10 +473,10 @@ void test_receiver()
     // Three frames back to back: unknown request with 3 bytes, empty event,
     // request 0x0011 with 1 byte. Payloads are not interpreted by the receiver.
     const std::array<std::uint8_t, 64> stream = {
-        'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00, 0xbc, 0x7a, 0x00, 0x00, 0x2a,
+        'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00, 0xbc, 0x7a, 0x00, 0x00, 0x2a,
         0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 'U',  'D',  'T',
-        'V',  0x01, 0x00, 0x00, 0x00, 0xf0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00, 0x11,
+        'V',  0x01, 0x00, 0x01, 0x00, 0xf0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00, 0x11,
         0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07};
 
     std::array<std::uint8_t, 16> storage{};
@@ -555,8 +557,8 @@ void test_receiver()
         CHECK(receiver.header_status() == w::HeaderStatus::legacy_magic);
         receiver.reset();
         CHECK(receiver.header_status() == w::HeaderStatus::ok);
-        const auto v11 = raw_header('U', 'D', 'T', 'V', 1U, 1U, 1U, 0U, 1U, 0U);
-        CHECK(receiver.feed(view(v11), recorder).error() == Error::VERSION_MISMATCH);
+        const auto v10 = raw_header('U', 'D', 'T', 'V', 1U, 0U, 1U, 0U, 1U, 0U);
+        CHECK(receiver.feed(view(v10), recorder).error() == Error::VERSION_MISMATCH);
         CHECK(recorder.count == 0U);
     }
     {
@@ -603,10 +605,10 @@ void test_receiver_eof()
 {
     // Unknown request (3-byte payload), empty STATE_EVENT, request 0x0011 (1 byte).
     const std::array<std::uint8_t, 64> stream = {
-        'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00, 0xbc, 0x7a, 0x00, 0x00, 0x2a,
+        'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00, 0xbc, 0x7a, 0x00, 0x00, 0x2a,
         0x00, 0x00, 0x00, 0x03, 0x00, 0x00, 0x00, 0x01, 0x02, 0x03, 'U',  'D',  'T',
-        'V',  0x01, 0x00, 0x00, 0x00, 0xf0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
-        0x00, 0x00, 0x00, 0x00, 'U',  'D',  'T',  'V',  0x01, 0x00, 0x00, 0x00, 0x11,
+        'V',  0x01, 0x00, 0x01, 0x00, 0xf0, 0x80, 0x00, 0x00, 0x00, 0x00, 0x00, 0x00,
+        0x00, 0x00, 0x00, 0x00, 'U',  'D',  'T',  'V',  0x01, 0x00, 0x01, 0x00, 0x11,
         0x00, 0x00, 0x00, 0x05, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x07};
     std::array<std::uint8_t, 16> storage{};
     {
@@ -735,9 +737,9 @@ void test_hello()
         bool ok;
     };
     const Case cases[] = {
-        {{1U, 0U}, {1U, 0U}, true},   {{0U, 5U}, {1U, 0U}, true},
+        {{1U, 0U}, {1U, 0U}, false},  {{0U, 5U}, {1U, 0U}, false},
         {{1U, 0U}, {1U, 7U}, true},   {{0U, 0U}, {9U, 9U}, true},
-        {{1U, 1U}, {1U, 5U}, false},  {{2U, 0U}, {2U, 0U}, false},
+        {{1U, 1U}, {1U, 5U}, true},   {{2U, 0U}, {2U, 0U}, false},
         {{0U, 0U}, {0U, 9U}, false},  {{0U, 0xffffU}, {0U, 0xffffU}, false},
     };
     for (const auto& c : cases) {
@@ -746,7 +748,7 @@ void test_hello()
         r.max = c.max;
         const auto v = w::negotiate_version(r);
         if (c.ok) {
-            CHECK(v.has_value() && v.value().major == 1U && v.value().minor == 0U);
+            CHECK(v.has_value() && v.value().major == 1U && v.value().minor == 1U);
         } else {
             CHECK(!v.has_value() && v.error() == Error::VERSION_MISMATCH);
         }
