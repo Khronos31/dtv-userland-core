@@ -56,23 +56,23 @@ jobs:
               -DDTV_USERLAND_BUILD_HOST_CTL=ON `
               -DDTV_USERLAND_BUILD_HOST_TS=ON
             if ($LASTEXITCODE -ne 0) { throw "$label configure exit=$LASTEXITCODE" }
-            cmake --build $build --config Release --target host_client_integration_tests --parallel 2
+            cmake --build $build --config Release --target host_runtime_tests host_client_integration_tests --parallel 2
             if ($LASTEXITCODE -ne 0) { throw "$label build exit=$LASTEXITCODE" }
             $log = "$env:RUNNER_TEMP\$label-not-ready.log"
             & "$build\Release\host_client_integration_tests.exe" not-ready 2>&1 | Tee-Object -FilePath $log
             $testExit = $LASTEXITCODE
             Write-Output "$label not-ready fixture exit=$testExit"
           }
-      - name: Run original CTest target once on base and head
+      - name: Run original two-test CTest condition once on base and head
         shell: pwsh
         run: |
           foreach ($label in @('base', 'head')) {
             $build = "$env:RUNNER_TEMP\$label\build-diagnostic"
-            $log = "$env:RUNNER_TEMP\$label-integration-target.log"
-            ctest --test-dir $build -C Release -R '^host_client_integration_tests$' --verbose 2>&1 |
+            $log = "$env:RUNNER_TEMP\$label-primary-fixtures.log"
+            ctest --test-dir $build -C Release -R '^(host_runtime_tests|host_client_integration_tests)$' --verbose 2>&1 |
               Tee-Object -FilePath $log
             $testExit = $LASTEXITCODE
-            Write-Output "$label integration target exit=$testExit"
+            Write-Output "$label primary fixture pair exit=$testExit"
           }
       - uses: actions/upload-artifact@v4
         if: always()
@@ -81,6 +81,6 @@ jobs:
           path: |
             ${{ runner.temp }}\base-not-ready.log
             ${{ runner.temp }}\head-not-ready.log
-            ${{ runner.temp }}\base-integration-target.log
-            ${{ runner.temp }}\head-integration-target.log
+            ${{ runner.temp }}\base-primary-fixtures.log
+            ${{ runner.temp }}\head-primary-fixtures.log
           if-no-files-found: warn
