@@ -12,6 +12,7 @@
 #include <new>
 #include <poll.h>
 #include <string>
+#include <string_view>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -109,6 +110,49 @@ bool secure_directory(const std::string& path, host_runtime::EndpointAccess acce
         diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
     }
     return allowed;
+}
+
+bool secure_shared_ancestors(const std::string& path, uid_t owner,
+                             ListenerDiagnostic* diagnostic) noexcept
+{
+    std::string normalized(path);
+    while (normalized.size() > 1U && normalized.back() == '/') normalized.pop_back();
+    if (normalized.empty() || normalized.front() != '/') {
+        if (diagnostic != nullptr) {
+            diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+        }
+        return false;
+    }
+    std::string current;
+    std::size_t offset = 1U;
+    while (offset < normalized.size()) {
+        const std::size_t separator = normalized.find('/', offset);
+        const std::size_t end = separator == std::string::npos ? normalized.size() : separator;
+        const std::string_view component(normalized.data() + offset, end - offset);
+        if (component.empty() || component == "." || component == "..") {
+            if (diagnostic != nullptr) {
+                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+            }
+            return false;
+        }
+        current.push_back('/');
+        current.append(component.data(), component.size());
+        struct stat info{};
+        if (::lstat(current.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
+            S_ISLNK(info.st_mode) || (info.st_mode & 0022) != 0 ||
+            (info.st_uid != 0 && info.st_uid != owner)) {
+            if (diagnostic != nullptr) {
+                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+            }
+            return false;
+        }
+        if (separator == std::string::npos) break;
+        offset = separator + 1U;
+    }
+    return true;
 }
 
 bool ensure_directory(const std::string& path, host_runtime::EndpointAccess access,
@@ -241,6 +285,10 @@ public:
         const std::string runtime(control.runtime_directory);
         if (!secure_directory(runtime, control.access, owner, group, diagnostic,
                               RuntimeDirectoryLayer::runtime_root)) {
+            return Error::UNSUPPORTED;
+        }
+        if (control.access == host_runtime::EndpointAccess::shared_group &&
+            !secure_shared_ancestors(runtime, owner, diagnostic)) {
             return Error::UNSUPPORTED;
         }
         std::string product_directory = runtime;

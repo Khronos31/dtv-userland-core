@@ -12,6 +12,7 @@
 #include <vector>
 
 #include <fcntl.h>
+#include <pwd.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
@@ -41,6 +42,15 @@ bool make_root(std::string& output) noexcept
     if (created == nullptr) return false;
     output = created;
     return true;
+}
+
+bool make_shared_root(std::string& output) noexcept
+{
+    const struct passwd* account = ::getpwuid(::geteuid());
+    if (account == nullptr || account->pw_dir == nullptr) return false;
+    output = std::string(account->pw_dir) + "/.dtv-listener-shared-XXXXXX";
+    char* created = ::mkdtemp(output.data());
+    return created != nullptr && ::chmod(output.c_str(), 0750) == 0;
 }
 
 host_runtime::EndpointConfig config(const std::string& root, const char* name,
@@ -248,14 +258,16 @@ bool test_stale_and_foreign_rollback() noexcept
 bool test_shared_group_boundary() noexcept
 {
     std::string root;
-    if (!check(make_root(root), "shared group root")) return false;
-    if (!check(::chmod(root.c_str(), 0750) == 0, "set shared group root mode")) return false;
+    if (!check(make_shared_root(root), "shared group root")) return false;
     auto control = config(root, "control.sock", host_runtime::EndpointAccess::shared_group);
     auto data = config(root, "stream.sock", host_runtime::EndpointAccess::shared_group);
     auto io = create_listener_io();
+    ListenerDiagnostic diagnostic{};
     ListenerPair pair{};
-    if (!check(io->reserve_pair(control, data) == Error::OK &&
-               io->publish_pair(pair) == Error::OK, "allow safe shared-group namespace")) return false;
+    if (!check(io->reserve_pair(control, data, &diagnostic) == Error::OK,
+               "reserve safe shared-group namespace")) return false;
+    if (!check(io->publish_pair(pair) == Error::OK,
+               "publish safe shared-group namespace")) return false;
     std::string control_path;
     struct stat info{};
     const bool mode = path_for(control, control_path) && ::lstat(control_path.c_str(), &info) == 0 &&
@@ -266,16 +278,66 @@ bool test_shared_group_boundary() noexcept
     (void)io->release_namespace();
     std::filesystem::remove_all(root);
 
-    if (!check(make_root(root) && ::chmod(root.c_str(), 0777) == 0, "unsafe group root")) return false;
-    control = config(root, "control.sock", host_runtime::EndpointAccess::shared_group);
-    data = config(root, "stream.sock", host_runtime::EndpointAccess::shared_group);
+    if (!check(make_shared_root(root), "unsafe ancestor fixture root")) return false;
+    const std::string unsafe_ancestor = root + "/writable";
+    const std::string unsafe_runtime = unsafe_ancestor + "/runtime";
+    if (!check(::mkdir(unsafe_ancestor.c_str(), 0700) == 0 &&
+               ::mkdir(unsafe_runtime.c_str(), 0750) == 0 &&
+               ::chmod(unsafe_runtime.c_str(), 0750) == 0 &&
+               ::chmod(unsafe_ancestor.c_str(), 0770) == 0,
+               "create group-writable runtime ancestor")) return false;
+    control = config(unsafe_runtime, "control.sock", host_runtime::EndpointAccess::shared_group);
+    data = config(unsafe_runtime, "stream.sock", host_runtime::EndpointAccess::shared_group);
     io = create_listener_io();
-    ListenerDiagnostic diagnostic{};
+    diagnostic = ListenerDiagnostic{};
     const Error denied = io->reserve_pair(control, data, &diagnostic);
     std::filesystem::remove_all(root);
-    if (!check(denied == Error::UNSUPPORTED, "reject world-accessible shared-group root") ||
-        !check(diagnostic.reason == ListenerDiagnosticReason::runtime_directory_mode,
-               "report actual runtime mode refusal")) return false;
+    if (!check(denied == Error::UNSUPPORTED, "reject group-writable shared-group ancestor"))
+        return false;
+    if (!check(diagnostic.reason == ListenerDiagnosticReason::runtime_directory_security,
+               "report unsafe ancestor refusal")) return false;
+
+    if (!check(make_shared_root(root), "symlink ancestor fixture root")) return false;
+    const std::string actual_parent = root + "/actual";
+    const std::string actual_runtime = actual_parent + "/runtime";
+    const std::string linked_parent = root + "/linked";
+    if (!check(::mkdir(actual_parent.c_str(), 0700) == 0 &&
+               ::mkdir(actual_runtime.c_str(), 0750) == 0 &&
+               ::chmod(actual_runtime.c_str(), 0750) == 0 &&
+               ::symlink(actual_parent.c_str(), linked_parent.c_str()) == 0,
+               "create symlinked runtime ancestor")) return false;
+    const std::string linked_runtime = linked_parent + "/runtime";
+    control = config(linked_runtime, "control.sock", host_runtime::EndpointAccess::shared_group);
+    data = config(linked_runtime, "stream.sock", host_runtime::EndpointAccess::shared_group);
+    io = create_listener_io();
+    diagnostic = ListenerDiagnostic{};
+    const Error symlink_denied = io->reserve_pair(control, data, &diagnostic);
+    std::filesystem::remove_all(root);
+    if (!check(symlink_denied == Error::UNSUPPORTED &&
+               diagnostic.reason == ListenerDiagnosticReason::runtime_directory_security,
+               "reject symlinked shared-group ancestor")) return false;
+
+    if (::geteuid() == 0) {
+        if (!check(make_shared_root(root), "foreign ancestor fixture root")) return false;
+        const std::string foreign_parent = root + "/foreign";
+        const std::string foreign_runtime = foreign_parent + "/runtime";
+        if (!check(::mkdir(foreign_parent.c_str(), 0700) == 0 &&
+                   ::mkdir(foreign_runtime.c_str(), 0750) == 0 &&
+                   ::chmod(foreign_runtime.c_str(), 0750) == 0 &&
+                   ::chown(foreign_parent.c_str(), 65534, 65534) == 0,
+                   "create foreign-owned runtime ancestor")) return false;
+        control = config(foreign_runtime, "control.sock",
+                         host_runtime::EndpointAccess::shared_group);
+        data = config(foreign_runtime, "stream.sock",
+                      host_runtime::EndpointAccess::shared_group);
+        io = create_listener_io();
+        diagnostic = ListenerDiagnostic{};
+        const Error owner_denied = io->reserve_pair(control, data, &diagnostic);
+        std::filesystem::remove_all(root);
+        if (!check(owner_denied == Error::UNSUPPORTED &&
+                   diagnostic.reason == ListenerDiagnosticReason::runtime_directory_security,
+                   "reject foreign-owned shared-group ancestor")) return false;
+    }
 
     if (!check(make_root(root), "owner fixture root")) return false;
     if (::geteuid() == 0) {
