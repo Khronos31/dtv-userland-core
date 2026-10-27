@@ -1,0 +1,73 @@
+name: Diagnose Windows not-ready discovery fixture
+
+on:
+  push:
+    branches:
+      - codex/diagnose-not-ready-windows-20261027
+    paths:
+      - '.github/workflows/diagnose-not-ready-windows.yml'
+      - 'tests/host_client_integration_tests.cpp'
+
+permissions:
+  contents: read
+
+jobs:
+  compare-base-and-head:
+    runs-on: windows-2022
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Prepare fixed base and repaired head worktrees
+        shell: pwsh
+        run: |
+          git worktree add "$env:RUNNER_TEMP\base" 230d550994444909f06fdaa914ea3e26654a4cdc
+          if ($LASTEXITCODE -ne 0) { throw "base worktree exit=$LASTEXITCODE" }
+          git worktree add "$env:RUNNER_TEMP\head" e0ea58acd1abfda69fde0bf5c7c34f3e87aa65c4
+          if ($LASTEXITCODE -ne 0) { throw "head worktree exit=$LASTEXITCODE" }
+          git diff e0ea58acd1abfda69fde0bf5c7c34f3e87aa65c4 -- tests/host_client_integration_tests.cpp > "$env:RUNNER_TEMP\diagnostic-test.patch"
+          if ($LASTEXITCODE -ne 0) { throw "diagnostic patch generation exit=$LASTEXITCODE" }
+          git -C "$env:RUNNER_TEMP\base" apply "$env:RUNNER_TEMP\diagnostic-test.patch"
+          if ($LASTEXITCODE -ne 0) { throw "base diagnostic patch exit=$LASTEXITCODE" }
+          git -C "$env:RUNNER_TEMP\head" apply "$env:RUNNER_TEMP\diagnostic-test.patch"
+          if ($LASTEXITCODE -ne 0) { throw "head diagnostic patch exit=$LASTEXITCODE" }
+      - name: Configure and run only not-ready fixture on base and head
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          foreach ($label in @('base', 'head')) {
+            $source = "$env:RUNNER_TEMP\$label"
+            $build = "$source\build-diagnostic"
+            cmake -S $source -B $build -A x64 `
+              -DDTV_USERLAND_BUILD_TESTING=ON `
+              -DDTV_USERLAND_BUILD_RECEIVER=ON `
+              -DDTV_USERLAND_BUILD_CARD=ON `
+              -DDTV_USERLAND_BUILD_CAPTURE=ON `
+              -DDTV_USERLAND_BUILD_CONTROL=ON `
+              -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON `
+              -DDTV_USERLAND_BUILD_AUTHORITY=ON `
+              -DDTV_USERLAND_BUILD_HOST_TUNER=ON `
+              -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON `
+              -DDTV_USERLAND_BUILD_HOST_WORKERS=ON `
+              -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON `
+              -DDTV_USERLAND_BUILD_HOST_FACADE=ON `
+              -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON `
+              -DDTV_USERLAND_BUILD_HOST_CTL=ON `
+              -DDTV_USERLAND_BUILD_HOST_TS=ON
+            if ($LASTEXITCODE -ne 0) { throw "$label configure exit=$LASTEXITCODE" }
+            cmake --build $build --config Release --target host_client_integration_tests --parallel 2
+            if ($LASTEXITCODE -ne 0) { throw "$label build exit=$LASTEXITCODE" }
+            $log = "$env:RUNNER_TEMP\$label-not-ready.log"
+            & "$build\Release\host_client_integration_tests.exe" not-ready 2>&1 | Tee-Object -FilePath $log
+            $testExit = $LASTEXITCODE
+            Write-Output "$label not-ready fixture exit=$testExit"
+          }
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: windows-not-ready-base-head-diagnostic
+          path: |
+            ${{ runner.temp }}\base-not-ready.log
+            ${{ runner.temp }}\head-not-ready.log
+          if-no-files-found: warn

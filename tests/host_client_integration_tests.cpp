@@ -1970,22 +1970,44 @@ bool test_unsupported_candidate_then_live_instance()
 
 bool test_not_ready_candidate_then_live_instance()
 {
+    const auto started = std::chrono::steady_clock::now();
     RuntimeTree not_ready_root;
     RuntimeTree live_root;
     if (!not_ready_root.create() || !not_ready_root.create_instance("not-ready") ||
-        !live_root.create() || !live_root.create_instance("live-after-not-ready"))
+        !live_root.create() || !live_root.create_instance("live-after-not-ready")) {
+        std::fputs("not-ready-diag stage=tree-setup failed\n", stderr);
         return false;
+    }
     Listener not_ready_control;
     Listener control;
     Listener data;
     if (!not_ready_control.bind(not_ready_root.root, "not-ready", "control.sock", false) ||
         !control.bind(live_root.root, "live-after-not-ready", "control.sock") ||
-        !data.bind(live_root.root, "live-after-not-ready", "stream.sock")) return false;
+        !data.bind(live_root.root, "live-after-not-ready", "stream.sock")) {
+        std::fputs("not-ready-diag stage=listener-bind failed\n", stderr);
+        return false;
+    }
+    std::fprintf(stderr,
+        "not-ready-diag stage=endpoints not_ready_bound=%u not_ready_listening=0 not_ready_path_len=%zu live_control_bound=%u live_data_bound=%u\n",
+        not_ready_control.socket != kInvalidSocket ? 1U : 0U,
+        not_ready_control.path.size(), control.socket != kInvalidSocket ? 1U : 0U,
+        data.socket != kInvalidSocket ? 1U : 0U);
     const dtv::userland::host_runtime::EndpointConfig not_ready_endpoint{
         not_ready_root.root, "test-product", "not-ready"};
+    const auto probe_started = std::chrono::steady_clock::now();
     const auto not_ready_probe = dtv::userland::host_runtime::connect_control(
         not_ready_endpoint, {1000U});
-    if (not_ready_probe || not_ready_probe.error() != Error::NOT_READY) return false;
+    const auto probe_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - probe_started).count();
+    const auto probe_error = not_ready_probe ? 0U :
+        static_cast<unsigned int>(not_ready_probe.error());
+    std::fprintf(stderr,
+        "not-ready-diag stage=initial-probe timeout_ms=1000 success=%u error=%u elapsed_ms=%lld\n",
+        not_ready_probe ? 1U : 0U, probe_error, static_cast<long long>(probe_elapsed));
+    if (not_ready_probe || not_ready_probe.error() != Error::NOT_READY) {
+        std::fputs("not-ready-diag assertion=initial-probe expected-NOT_READY failed\n", stderr);
+        return false;
+    }
     FakeService service("live-after-not-ready");
     FakeControlServer control_server(control, service, 2U);
     FakeDataServer data_server(data, service, false);
@@ -1993,21 +2015,43 @@ bool test_not_ready_candidate_then_live_instance()
     data_server.start();
 
     px4::userland::ipc::posix::RuntimeRootCandidates roots{};
-    if (!add_root(not_ready_root.root, roots) || !add_root(live_root.root, roots))
+    if (!add_root(not_ready_root.root, roots) || !add_root(live_root.root, roots)) {
+        std::fputs("not-ready-diag stage=add-roots failed\n", stderr);
         return false;
+    }
     const auto args = test_ts_arguments(1U);
     const px4::userland::cli::TsClientProfile profile{
         "fake-ts", "test-product", dtv::userland::identity::Product::px4};
     TestOutput output;
     TestClock clock;
     TestSignal signal;
+    const auto run_started = std::chrono::steady_clock::now();
     const auto result = px4::userland::cli::test_access::run_wire_with_roots(
         args, profile, output, clock, signal, roots, nullptr, nullptr);
+    const auto run_elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(
+        std::chrono::steady_clock::now() - run_started).count();
     data_server.join();
     control_server.join();
-    return result && output.bytes.size() == wire::kTsPacketSize &&
-           control_server.good.load() && data_server.good.load() &&
-           service.saw_stop.load() && service.saw_release.load();
+    const bool output_ok = output.bytes.size() == wire::kTsPacketSize;
+    const bool control_ok = control_server.good.load();
+    const bool data_ok = data_server.good.load();
+    const bool stopped = service.saw_stop.load();
+    const bool released = service.saw_release.load();
+    std::fprintf(stderr,
+        "not-ready-diag stage=live-run success=%u error=%u elapsed_ms=%lld output_bytes=%zu control_ok=%u data_ok=%u stop=%u release=%u status_count=%u list_count=%u total_elapsed_ms=%lld\n",
+        result ? 1U : 0U, result ? 0U : static_cast<unsigned int>(result.error()),
+        static_cast<long long>(run_elapsed), output.bytes.size(), control_ok ? 1U : 0U,
+        data_ok ? 1U : 0U, stopped ? 1U : 0U, released ? 1U : 0U,
+        service.status_count.load(), service.list_count.load(),
+        static_cast<long long>(std::chrono::duration_cast<std::chrono::milliseconds>(
+            std::chrono::steady_clock::now() - started).count()));
+    if (!result) std::fputs("not-ready-diag assertion=run-wire failed\n", stderr);
+    if (!output_ok) std::fputs("not-ready-diag assertion=single-packet failed\n", stderr);
+    if (!control_ok) std::fputs("not-ready-diag assertion=control-server-good failed\n", stderr);
+    if (!data_ok) std::fputs("not-ready-diag assertion=data-server-good failed\n", stderr);
+    if (!stopped) std::fputs("not-ready-diag assertion=service-stop failed\n", stderr);
+    if (!released) std::fputs("not-ready-diag assertion=service-release failed\n", stderr);
+    return result && output_ok && control_ok && data_ok && stopped && released;
 }
 
 bool test_security_refusal_stops_search()
@@ -2059,12 +2103,21 @@ bool test_security_refusal_stops_search()
 
 }  // namespace
 
-int main()
+int main(int argc, char** argv)
 {
 #if defined(_WIN32)
     WSADATA data{};
     if (::WSAStartup(MAKEWORD(2, 2), &data) != 0) return 1;
 #endif
+    if (argc > 1 && std::strcmp(argv[1], "not-ready") == 0) {
+        const bool not_ready = test_not_ready_candidate_then_live_instance();
+#if defined(_WIN32)
+        (void)::WSACleanup();
+#endif
+        std::puts(not_ready ? "runtime_discovery_not_ready_then_live=PASS" :
+                              "runtime_discovery_not_ready_then_live=FAIL");
+        return not_ready ? 0 : 1;
+    }
     const bool ctl = test_host_ctl_real_server();
     const bool ctl_endpoint_path = test_host_ctl_endpoint_path_diagnostic();
 #if !defined(_WIN32)
