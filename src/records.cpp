@@ -1730,7 +1730,7 @@ Error validate_stream_counters(const StreamCounters& value) noexcept
     if (!syntax_ok(value)) {
         return Error::INVALID_ARGUMENT;
     }
-    if (value.entries.count != 2U) {
+    if (value.entries.count < 2U || value.entries.count > 16U) {
         return Error::INVALID_ARGUMENT;
     }
     if (value.entries.items[0].id != kCounterIdTransmittedPackets ||
@@ -1738,7 +1738,13 @@ Error validate_stream_counters(const StreamCounters& value) noexcept
         return Error::INVALID_ARGUMENT;
     }
     for (std::size_t i = 0U; i < value.entries.count; ++i) {
-        if (value.entries.items[i].counter.measurement.state == MeasureState::unsupported) {
+        const std::uint8_t id = value.entries.items[i].id;
+        if (id < kCounterIdTransmittedPackets || id > kCounterIdMaxStream ||
+            (i != 0U && id <= value.entries.items[i - 1U].id)) {
+            return Error::INVALID_ARGUMENT;
+        }
+        if (i < 2U && value.entries.items[i].counter.measurement.state ==
+                           MeasureState::unsupported) {
             return Error::INVALID_ARGUMENT;
         }
         if (validate_counter(value.entries.items[i].counter) != Error::OK) {
@@ -2093,18 +2099,9 @@ Error check_metric_time(const MetricEntry& entry, std::uint64_t observed) noexce
     return check_sampled_time(entry.integer.sampled_at_ns, observed);
 }
 
-Error check_counter_set_time(const BArray<CounterEntry, 2>& entries, std::uint64_t observed) noexcept
-{
-    for (std::size_t i = 0U; i < entries.count; ++i) {
-        const Error error = check_measurement_time(entries.items[i].counter.measurement, observed);
-        if (error != Error::OK) {
-            return error;
-        }
-    }
-    return Error::OK;
-}
-
-Error check_counter_set_time(const BArray<CounterEntry, 4>& entries, std::uint64_t observed) noexcept
+template <std::size_t N>
+Error check_counter_set_time(const BArray<CounterEntry, N>& entries,
+                             std::uint64_t observed) noexcept
 {
     for (std::size_t i = 0U; i < entries.count; ++i) {
         const Error error = check_measurement_time(entries.items[i].counter.measurement, observed);

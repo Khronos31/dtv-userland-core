@@ -80,6 +80,13 @@ inline constexpr std::uint8_t kCounterIdFramingErrors = 3U;
 inline constexpr std::uint8_t kCounterIdUpstreamLostPackets = 4U;
 inline constexpr std::uint8_t kCounterIdTransmittedPackets = 5U;
 inline constexpr std::uint8_t kCounterIdQueueDroppedPackets = 6U;
+inline constexpr std::uint8_t kCounterIdStreamBytes = 7U;
+inline constexpr std::uint8_t kCounterIdSyncErrors = 8U;
+inline constexpr std::uint8_t kCounterIdTeiPackets = 9U;
+inline constexpr std::uint8_t kCounterIdContinuityErrors = 10U;
+inline constexpr std::uint8_t kCounterIdStreamUsbErrors = 11U;
+inline constexpr std::uint8_t kCounterIdEmptyIntervals = 12U;
+inline constexpr std::uint8_t kCounterIdMaxStream = 32U;
 
 // Scalar enums (wire-record-layout.md section 2). Unknown values are rejected
 // by the codecs; a future minor may widen them.
@@ -368,7 +375,7 @@ struct CounterEntry final {
 };
 
 struct StreamCounters final {
-    BArray<CounterEntry, 2> entries;
+    BArray<CounterEntry, 16> entries;
 };
 
 struct ReceiverCounters final {
@@ -775,8 +782,9 @@ Error validate_limits(const Limits& value, std::size_t public_receiver_count) no
 // The metric ID set must equal the declared capabilities measurement_mask; every
 // declared metric must be present and unknown or valid, never unsupported.
 Error validate_measurements(const Measurements& value, std::uint8_t measurement_mask) noexcept;
-// StreamCounters must contain exactly ID5 transmitted_packets and ID6
-// queue_dropped_packets, ascending, each unknown or valid.
+// StreamCounters contains required IDs 5 and 6 plus optional IDs 7..32,
+// ascending. Required counters are unknown or valid; optional counters may also
+// be unsupported.
 Error validate_stream_counters(const StreamCounters& value) noexcept;
 // ReceiverCounters is a subset of ID1..4, ascending, each unknown or valid.
 Error validate_receiver_counters(const ReceiverCounters& value) noexcept;
