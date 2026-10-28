@@ -12,6 +12,7 @@
 #include <new>
 #include <poll.h>
 #include <string>
+#include <string_view>
 #include <sys/file.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -55,22 +56,24 @@ struct PathIdentity final {
     decltype(std::declval<struct stat>().st_dev) device = 0;
     decltype(std::declval<struct stat>().st_ino) inode = 0;
     uid_t owner = 0;
+    gid_t group = 0;
     bool valid = false;
 };
 
 PathIdentity identity_of(const struct stat& info) noexcept
 {
-    return PathIdentity{info.st_dev, info.st_ino, info.st_uid, true};
+    return PathIdentity{info.st_dev, info.st_ino, info.st_uid, info.st_gid, true};
 }
 
 bool same_identity(const PathIdentity& expected, const struct stat& actual) noexcept
 {
     return expected.valid && expected.device == actual.st_dev &&
-           expected.inode == actual.st_ino && expected.owner == actual.st_uid;
+           expected.inode == actual.st_ino && expected.owner == actual.st_uid &&
+           expected.group == actual.st_gid;
 }
 
 bool secure_directory(const std::string& path, host_runtime::EndpointAccess access,
-                      uid_t owner, ListenerDiagnostic* diagnostic = nullptr,
+                      uid_t owner, gid_t group, ListenerDiagnostic* diagnostic = nullptr,
                       RuntimeDirectoryLayer layer = RuntimeDirectoryLayer::runtime_root) noexcept
 {
     struct stat info{};
@@ -90,7 +93,8 @@ bool secure_directory(const std::string& path, host_runtime::EndpointAccess acce
         }
         return false;
     }
-    if (info.st_uid != owner) {
+    if (info.st_uid != owner || (access == host_runtime::EndpointAccess::shared_group &&
+                                 info.st_gid != group)) {
         if (diagnostic != nullptr) {
             diagnostic->directory_layer = layer;
             diagnostic->reason = ListenerDiagnosticReason::runtime_directory_owner;
@@ -99,7 +103,8 @@ bool secure_directory(const std::string& path, host_runtime::EndpointAccess acce
     }
     const bool allowed = access == host_runtime::EndpointAccess::private_user
         ? (info.st_mode & 0077) == 0
-        : (info.st_mode & 0007) == 0 && (info.st_mode & 0070) == 0070;
+        : (info.st_mode & 07777) == 0750 && (info.st_mode & 0077) == 0050 &&
+          (info.st_mode & 0700) == 0700;
     if (!allowed && diagnostic != nullptr) {
         diagnostic->directory_layer = layer;
         diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
@@ -107,13 +112,56 @@ bool secure_directory(const std::string& path, host_runtime::EndpointAccess acce
     return allowed;
 }
 
+bool secure_shared_ancestors(const std::string& path, uid_t owner,
+                             ListenerDiagnostic* diagnostic) noexcept
+{
+    std::string normalized(path);
+    while (normalized.size() > 1U && normalized.back() == '/') normalized.pop_back();
+    if (normalized.empty() || normalized.front() != '/') {
+        if (diagnostic != nullptr) {
+            diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+        }
+        return false;
+    }
+    std::string current;
+    std::size_t offset = 1U;
+    while (offset < normalized.size()) {
+        const std::size_t separator = normalized.find('/', offset);
+        const std::size_t end = separator == std::string::npos ? normalized.size() : separator;
+        const std::string_view component(normalized.data() + offset, end - offset);
+        if (component.empty() || component == "." || component == "..") {
+            if (diagnostic != nullptr) {
+                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+            }
+            return false;
+        }
+        current.push_back('/');
+        current.append(component.data(), component.size());
+        struct stat info{};
+        if (::lstat(current.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
+            S_ISLNK(info.st_mode) || (info.st_mode & 0022) != 0 ||
+            (info.st_uid != 0 && info.st_uid != owner)) {
+            if (diagnostic != nullptr) {
+                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
+            }
+            return false;
+        }
+        if (separator == std::string::npos) break;
+        offset = separator + 1U;
+    }
+    return true;
+}
+
 bool ensure_directory(const std::string& path, host_runtime::EndpointAccess access,
-                      uid_t owner, ListenerDiagnostic* diagnostic,
+                      uid_t owner, gid_t group, ListenerDiagnostic* diagnostic,
                       RuntimeDirectoryLayer layer) noexcept
 {
     if (diagnostic != nullptr) diagnostic->directory_layer = layer;
     const bool created = ::mkdir(path.c_str(),
-        access == host_runtime::EndpointAccess::private_user ? 0700 : 0770) == 0;
+        access == host_runtime::EndpointAccess::private_user ? 0700 : 0750) == 0;
     if (!created && errno != EEXIST) {
         if (diagnostic != nullptr) {
             diagnostic->reason = errno == EACCES || errno == EPERM
@@ -124,12 +172,12 @@ bool ensure_directory(const std::string& path, host_runtime::EndpointAccess acce
         return false;
     }
     if (created && access == host_runtime::EndpointAccess::shared_group &&
-        ::chmod(path.c_str(), 0770) != 0) {
+        ::chmod(path.c_str(), 0750) != 0) {
         if (diagnostic != nullptr)
             diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
         return false;
     }
-    return secure_directory(path, access, owner, diagnostic, layer);
+    return secure_directory(path, access, owner, group, diagnostic, layer);
 }
 
 bool stale_socket(const std::string& path, uid_t owner) noexcept
@@ -233,9 +281,14 @@ public:
         }
 
         const uid_t owner = ::geteuid();
+        const gid_t group = ::getegid();
         const std::string runtime(control.runtime_directory);
-        if (!secure_directory(runtime, control.access, owner, diagnostic,
+        if (!secure_directory(runtime, control.access, owner, group, diagnostic,
                               RuntimeDirectoryLayer::runtime_root)) {
+            return Error::UNSUPPORTED;
+        }
+        if (control.access == host_runtime::EndpointAccess::shared_group &&
+            !secure_shared_ancestors(runtime, owner, diagnostic)) {
             return Error::UNSUPPORTED;
         }
         std::string product_directory = runtime;
@@ -244,11 +297,11 @@ public:
         const std::string version_directory = product_directory + "/v1";
         const std::string instance_directory = version_directory + "/" +
             std::string(control.instance.data(), control.instance.size());
-        if (!ensure_directory(product_directory, control.access, owner, diagnostic,
+        if (!ensure_directory(product_directory, control.access, owner, group, diagnostic,
                               RuntimeDirectoryLayer::product) ||
-            !ensure_directory(version_directory, control.access, owner, diagnostic,
+            !ensure_directory(version_directory, control.access, owner, group, diagnostic,
                               RuntimeDirectoryLayer::version) ||
-            !ensure_directory(instance_directory, control.access, owner, diagnostic,
+            !ensure_directory(instance_directory, control.access, owner, group, diagnostic,
                               RuntimeDirectoryLayer::instance)) {
             return errno == EACCES || errno == EPERM ? Error::UNSUPPORTED : Error::INTERNAL;
         }
@@ -273,6 +326,7 @@ public:
         data_path_ = data_result.value();
         access_ = control.access;
         owner_ = owner;
+        group_ = group;
         lease_fd_ = lock;
         reserved_ = true;
         return Error::OK;
@@ -532,7 +586,8 @@ private:
         }
         struct stat info{};
         if (::lstat(path.c_str(), &info) != 0 || !S_ISSOCK(info.st_mode) ||
-            info.st_uid != owner_) {
+            info.st_uid != owner_ ||
+            (access_ == host_runtime::EndpointAccess::shared_group && info.st_gid != group_)) {
             const int error = errno == 0 ? EACCES : errno;
             (void)::close(descriptor);
             errno = error;
@@ -549,7 +604,11 @@ private:
             return -1;
         }
         if (::lstat(path.c_str(), &info) != 0 || !S_ISSOCK(info.st_mode) ||
-            info.st_uid != owner_ || (info.st_mode & (access_ == host_runtime::EndpointAccess::private_user ? 0077 : 0007)) != 0) {
+            info.st_uid != owner_ ||
+            (access_ == host_runtime::EndpointAccess::shared_group && info.st_gid != group_) ||
+            (access_ == host_runtime::EndpointAccess::private_user
+                 ? (info.st_mode & 0077) != 0
+                 : (info.st_mode & 07777) != 0660)) {
             const int error = errno == 0 ? EACCES : errno;
             remove_owned_path(path, identity);
             identity = {};
@@ -609,6 +668,7 @@ private:
     ListenerPair pair_{};
     host_runtime::EndpointAccess access_ = host_runtime::EndpointAccess::private_user;
     uid_t owner_ = 0;
+    gid_t group_ = 0;
     int control_listener_ = -1;
     int data_listener_ = -1;
     int lease_fd_ = -1;

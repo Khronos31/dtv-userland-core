@@ -17,10 +17,12 @@
 #include "px4/posix_tuner_nonce.h"
 #include <csignal>
 #include <cstdlib>
+#include <grp.h>
 #include <poll.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
 #include <sys/un.h>
+#include <sys/wait.h>
 #include <unistd.h>
 #endif
 
@@ -748,6 +750,138 @@ bool socket_transport_test()
     return ok;
 }
 
+bool shared_group_distinct_uid_test()
+{
+    if (::geteuid() != 0) {
+        std::puts("posix_shared_group_distinct_uid=UNVERIFIED (requires root test process)");
+        return true;
+    }
+    std::array<char, 64U> temporary{};
+    const char pattern[] = "/run/dtv-shared-group-XXXXXX";
+    std::memcpy(temporary.data(), pattern, sizeof(pattern));
+    char* root_value = ::mkdtemp(temporary.data());
+    if (root_value == nullptr) return false;
+    const std::string root(root_value);
+    const std::string product = root + "/px4-userland";
+    const std::string version = product + "/v1";
+    const std::string instance = version + "/fixture";
+    bool ok = ::chmod(root.c_str(), 0750) == 0 &&
+        ::mkdir(product.c_str(), 0750) == 0 && ::chmod(product.c_str(), 0750) == 0 &&
+        ::mkdir(version.c_str(), 0750) == 0 && ::chmod(version.c_str(), 0750) == 0 &&
+        ::mkdir(instance.c_str(), 0750) == 0 && ::chmod(instance.c_str(), 0750) == 0;
+    dtv::userland::host_runtime::EndpointConfig config{
+        root, "px4-userland", "fixture",
+        dtv::userland::host_runtime::EndpointAccess::shared_group};
+    const auto path = dtv::userland::host_runtime::control_endpoint_path(config);
+    int server = -1;
+    if (ok && path) {
+        server = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        ok = server >= 0 && path.value().size() < sizeof(address.sun_path);
+        if (ok) {
+            std::memcpy(address.sun_path, path.value().c_str(), path.value().size() + 1U);
+            ok = ::bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
+                 ::chmod(path.value().c_str(), 0660) == 0 && ::listen(server, 4) == 0;
+        }
+    } else {
+        ok = false;
+    }
+
+    if (ok) {
+        const pid_t child = ::fork();
+        if (child == 0) {
+            const gid_t group = ::getegid();
+            if (::setgroups(1U, &group) != 0 || ::setgid(65534U) != 0 ||
+                ::setuid(65534U) != 0) _exit(10);
+            auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
+            if (!transport) _exit(11);
+            const std::uint8_t byte = 0x5aU;
+            const auto written = transport.value()->write_all(
+                dtv::userland::ByteView{&byte, 1U}, {1000U});
+            _exit(written ? 0 : 12);
+        }
+        int peer = -1;
+        if (child > 0) peer = ::accept(server, nullptr, nullptr);
+        bool accepted_peer = false;
+#if defined(SO_PEERCRED)
+        struct ucred credentials{};
+        socklen_t credentials_length = sizeof(credentials);
+        accepted_peer = peer >= 0 &&
+            ::getsockopt(peer, SOL_SOCKET, SO_PEERCRED, &credentials,
+                         &credentials_length) == 0 &&
+            credentials_length == sizeof(credentials) && credentials.uid == 65534U;
+#elif defined(__APPLE__) || defined(__FreeBSD__)
+        uid_t peer_uid = 0;
+        gid_t peer_gid = 0;
+        accepted_peer = peer >= 0 && ::getpeereid(peer, &peer_uid, &peer_gid) == 0 &&
+                        peer_uid == 65534U;
+#endif
+        std::uint8_t byte = 0U;
+        const bool received = peer >= 0 && ::recv(peer, &byte, sizeof(byte), 0) == 1 &&
+                              byte == 0x5aU;
+        if (peer >= 0) (void)::close(peer);
+        int status = 0;
+        const bool exited = child > 0 && ::waitpid(child, &status, 0) == child;
+        ok = accepted_peer && received && exited && WIFEXITED(status) &&
+             WEXITSTATUS(status) == 0;
+        if (ok) std::puts("posix_shared_group_real_uid_supplementary_group_peer_uid=PASS");
+    }
+    if (ok) {
+        const pid_t child = ::fork();
+        if (child == 0) {
+            if (::setgroups(0U, nullptr) != 0 || ::setgid(65534U) != 0 ||
+                ::setuid(65534U) != 0) _exit(20);
+            const auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
+            _exit(transport ? 21 : 0);
+        }
+        int status = 0;
+        ok = child > 0 && ::waitpid(child, &status, 0) == child &&
+             WIFEXITED(status) && WEXITSTATUS(status) == 0;
+        if (ok) std::puts("posix_shared_group_unrelated_uid_rejected=PASS");
+    }
+    if (ok) {
+        const std::string symlink_path = root + "-symlink";
+        ok = ::symlink(root.c_str(), symlink_path.c_str()) == 0;
+        auto symlink_config = config;
+        symlink_config.runtime_directory = symlink_path;
+        ok = ok && !dtv::userland::host_runtime::connect_control(symlink_config, {1000U});
+        (void)::unlink(symlink_path.c_str());
+        if (ok) std::puts("posix_shared_group_symlink_root_rejected=PASS");
+    }
+    if (ok && path) {
+        const std::string saved_path = path.value() + ".saved";
+        ok = ::chown(path.value().c_str(), 65534U, ::getegid()) == 0 &&
+             !dtv::userland::host_runtime::connect_control(config, {1000U}) &&
+             ::chown(path.value().c_str(), ::geteuid(), ::getegid()) == 0 &&
+             ::chown(path.value().c_str(), ::geteuid(), 65534U) == 0 &&
+             !dtv::userland::host_runtime::connect_control(config, {1000U}) &&
+             ::chown(path.value().c_str(), ::geteuid(), ::getegid()) == 0;
+        if (ok) std::puts("posix_shared_group_endpoint_owner_gid_rejected=PASS");
+        ok = ok && ::chmod(path.value().c_str(), 0666) == 0 &&
+             !dtv::userland::host_runtime::connect_control(config, {1000U}) &&
+             ::chmod(path.value().c_str(), 0660) == 0;
+        if (ok) std::puts("posix_shared_group_endpoint_world_access_rejected=PASS");
+        ok = ok && ::rename(path.value().c_str(), saved_path.c_str()) == 0 &&
+             ::symlink(saved_path.c_str(), path.value().c_str()) == 0 &&
+             !dtv::userland::host_runtime::connect_control(config, {1000U}) &&
+             ::unlink(path.value().c_str()) == 0 &&
+             ::rename(saved_path.c_str(), path.value().c_str()) == 0;
+        if (ok) std::puts("posix_shared_group_endpoint_replacement_rejected=PASS");
+        ok = ok && ::chmod(root.c_str(), 0770) == 0 &&
+             !dtv::userland::host_runtime::connect_control(config, {1000U}) &&
+             ::chmod(root.c_str(), 0750) == 0;
+        if (ok) std::puts("posix_shared_group_writable_root_rejected=PASS");
+    }
+    if (server >= 0) (void)::close(server);
+    if (path) (void)::unlink(path.value().c_str());
+    (void)::rmdir(instance.c_str());
+    (void)::rmdir(version.c_str());
+    (void)::rmdir(product.c_str());
+    (void)::rmdir(root.c_str());
+    return ok;
+}
+
 bool endpoint_connect_diagnostic_text_test()
 {
     FILE* output = std::tmpfile();
@@ -814,6 +948,10 @@ int main()
         return 1;
     }
 #if !defined(_WIN32)
+    if (!shared_group_distinct_uid_test()) {
+        std::fputs("POSIX shared-group distinct-UID fixture failed\n", stderr);
+        return 1;
+    }
     if (!endpoint_connect_diagnostic_text_test()) {
         std::fputs("endpoint connect diagnostic text fixture failed\n", stderr);
         return 1;
