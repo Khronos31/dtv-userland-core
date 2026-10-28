@@ -162,6 +162,7 @@ Error HostAuthorityBridge::close_session(std::uint8_t index) noexcept
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
     slot.state = SlotState::tombstone;
     slot.close_pending = true;
+    authority_owner_.authority().cancel_pending_admission(*slot.session);
     close_owned_streams(index);
     advance();
     return Error::OK;

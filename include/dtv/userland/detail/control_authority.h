@@ -218,6 +218,7 @@ public:
                                                 ControlAuthorityExecutor& executor) noexcept;
     std::uint32_t admission_wait_limit_ms(std::uint64_t now_ms,
                                          std::uint32_t max_wait_ms) const noexcept;
+    void cancel_pending_admission(ControlServiceSession& session) noexcept;
     AuthorityJob close(ControlServiceSession& session) noexcept;
     AuthorityReply complete(const AuthorityCompletion& completion) noexcept;
     AuthorityReply complete(const SessionKey& key, Error result) noexcept;

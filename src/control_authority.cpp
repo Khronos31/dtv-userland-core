@@ -395,6 +395,15 @@ std::uint32_t ControlAuthority::admission_wait_limit_ms(
     return static_cast<std::uint32_t>(wait_ms);
 }
 
+void ControlAuthority::cancel_pending_admission(
+    ControlServiceSession& session) noexcept
+{
+    if (&session.authority_ != this || !session.pending_admission_) return;
+    remove_admission(session);
+    session.pending_admission_ = false;
+    session.pending_ = false;
+}
+
 AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
                                            const wire::ControlRequest& request,
                                            const wire::Context& context,
