@@ -162,6 +162,7 @@ Error HostAuthorityBridge::close_session(std::uint8_t index) noexcept
     if (slot.state != SlotState::active || !slot.session) return Error::NOT_FOUND;
     slot.state = SlotState::tombstone;
     slot.close_pending = true;
+    authority_owner_.authority().cancel_pending_admission(*slot.session);
     close_owned_streams(index);
     advance();
     return Error::OK;
@@ -1340,6 +1341,11 @@ Error HostAuthorityBridge::begin_shutdown(IngressStop stop_other_ingress,
 
 Error HostAuthorityBridge::poll() noexcept
 {
+    return poll(tuner_service_.monotonic_ms());
+}
+
+Error HostAuthorityBridge::poll(std::uint64_t now_ms) noexcept
+{
     if (workers_.error() != Error::OK) enter_fatal();
     workers_.drain_wake();
     for (std::size_t lane = 0U; lane < 3U; ++lane) {
@@ -1358,8 +1364,27 @@ Error HostAuthorityBridge::poll() noexcept
             if (legacy && legacy_completion_sink_ == nullptr) break;
         }
     }
+    const auto admission = authority_owner_.authority().retry_pending_admission(
+        now_ms, *this);
+    if (admission.reply_ready && admission.session != nullptr) {
+        const std::size_t index = find_slot(admission.session->client_id());
+        if (!slots_ || index == kHostAuthoritySessionCapacity ||
+            slots_[index].state != SlotState::active ||
+            !slots_[index].session.has_value() || slots_[index].response_ready) {
+            enter_fatal();
+        } else {
+            slots_[index].response = admission.reply;
+            slots_[index].response_ready = true;
+        }
+    }
     advance();
     return stopped_ ? shutdown_result() : Error::OK;
+}
+
+std::uint32_t HostAuthorityBridge::admission_wait_limit_ms(
+    std::uint64_t now_ms, std::uint32_t max_wait_ms) const noexcept
+{
+    return authority_owner_.authority().admission_wait_limit_ms(now_ms, max_wait_ms);
 }
 
 void HostAuthorityBridge::advance() noexcept

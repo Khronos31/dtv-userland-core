@@ -602,7 +602,10 @@ bool test_registry_contention_and_gated_callbacks()
         Result<AcquireResult> second = Result<AcquireResult>::failure(Error::INTERNAL);
         std::thread accepter([&]() { second = engine.acquire(2U, kSatellite); });
         R2_CHECK(f.backend.supports_gate.wait_entered());
-        R2_CHECK(failed(engine.try_admit_tune(1U, terrestrial(1U), 0U), Error::BUSY));
+        TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+        R2_CHECK(failed(engine.try_admit_tune_detailed(
+                            1U, terrestrial(1U), 0U, failure), Error::BUSY) &&
+                 failure == TuneAdmissionFailure::registry_contention);
         f.backend.supports_gate.open();
         accepter.join();
         R2_CHECK(second);
@@ -633,6 +636,20 @@ bool test_registry_contention_and_gated_callbacks()
         tokens.gate.open();
         accepter.join();
         R2_CHECK(other);
+    }
+    {
+        Fixture f;
+        ReceiverEngine engine(f.backend, f.ids.data(), f.ids.size(), f.tokens, f.clock);
+        R2_CHECK(configure_strict(engine));
+        const auto lease = engine.acquire(1U, kTerrestrial);
+        R2_CHECK(lease);
+        const auto admitted = engine.try_admit_tune(1U, terrestrial(lease.value().lease_id), 0U);
+        R2_CHECK(admitted);
+        TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+        R2_CHECK(failed(engine.try_admit_tune_detailed(
+                            1U, terrestrial(lease.value().lease_id), 0U, failure),
+                        Error::BUSY) && failure == TuneAdmissionFailure::rejected);
+        R2_CHECK(engine.abort_unstarted_tune(admitted.value(), Error::BUSY));
     }
     return true;
 }

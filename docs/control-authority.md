@@ -27,6 +27,26 @@ that drain. The session's response storage is `kHeaderSize +
 kMaxControlPayload` bytes; bounded tune/PID request storage remains with the
 session instead of being copied into worker closures.
 
+When `try_admit_tune_detailed()` reports only registry-mutex contention,
+`ControlAuthority` retains the original TUNE request in a fixed FIFO with
+round-robin retries. The queue holds at most `kReceiverEngineCapacity`
+sessions; each session can retain only its one outstanding request. The
+next contended request is rejected with the existing RESOURCE_LIMIT error
+when that queue is full. The
+event-loop owner calls `retry_pending_admission(now_ms, executor)` once per
+poll turn, using the Engine's monotonic clock domain. Each call makes at most
+one nonblocking admission attempt. A continued mutex contention moves that
+session to the FIFO tail; other BUSY causes return immediately.
+
+The retained request keeps its original `accepted_at_ms` and request ID. If
+its existing TUNE budget has elapsed when a retry turn checks it, the authority
+returns the existing TIMEOUT result without creating a ticket or advancing a
+revision. A successful retry creates and publishes one ticket. A close
+observed by the server removes the session from the queue before disconnect
+cleanup, so a later poll cannot admit that request. The server does not know
+an independent client's local deadline before it observes a close; this
+facility does not add such a guarantee or a client retry.
+
 The injected `ControlAuthorityExecutor` is a nonblocking publication seam. A
 `AuthorityJob` owns its `SessionKey` and admitted tune ticket or acquire,
 independent LNB power, release, rollback, and disconnect values by value; it

@@ -17,6 +17,10 @@ public:
                            validate_tune = nullptr) noexcept;
 
     dtv::userland::detail::ControlAuthority& authority() noexcept { return authority_; }
+    const dtv::userland::detail::ControlAuthority& authority() const noexcept
+    {
+        return authority_;
+    }
 
 private:
     dtv::userland::detail::ControlAuthority authority_;

@@ -8,6 +8,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -25,8 +26,47 @@ namespace w = dtv::userland::wire;
 namespace detail = dtv::userland::host_listener_context::detail;
 const char* protocol_failure_stage = "start";
 
+class NonceGate final {
+public:
+    void arm()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        entered_ = false;
+        blocked_ = true;
+    }
+    bool wait_entered()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return changed_.wait_for(lock, std::chrono::seconds(5),
+            [this] { return entered_; });
+    }
+    void open()
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        blocked_ = false;
+        changed_.notify_all();
+    }
+    void wait()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        if (!blocked_) return;
+        entered_ = true;
+        changed_.notify_all();
+        changed_.wait(lock, [this] { return !blocked_; });
+    }
+private:
+    std::mutex mutex_;
+    std::condition_variable changed_;
+    bool entered_ = false;
+    bool blocked_ = false;
+};
+
 class Backend final : public TunerServiceBackend {
 public:
+    explicit Backend(std::shared_ptr<std::array<std::atomic<std::size_t>, 8U>> tune_calls)
+        : tune_calls_(std::move(tune_calls))
+    {
+    }
     std::uint8_t receiver_count() const noexcept override { return 8U; }
     Result<void> open_receiver(std::uint8_t) noexcept override
     {
@@ -38,8 +78,9 @@ public:
         return Result<void>::success();
     }
     Result<TunerHzProgramming> tune_terrestrial_hz(
-        std::uint8_t, std::uint64_t, std::uint32_t) noexcept override
+        std::uint8_t receiver, std::uint64_t, std::uint32_t) noexcept override
     {
+        (*tune_calls_)[receiver].fetch_add(1U, std::memory_order_relaxed);
         return Result<TunerHzProgramming>::success({});
     }
     Result<void> tune_satellite(std::uint8_t, std::uint32_t,
@@ -55,7 +96,8 @@ public:
                                       ipc::System system) const noexcept override
     {
         TunerStrictProfile profile;
-        if (receiver == 2U && system == ipc::System::ISDB_T) {
+        if ((receiver == 2U || receiver == 3U || receiver == 4U || receiver == 6U) &&
+            system == ipc::System::ISDB_T) {
             profile.native_hz = true;
             profile.min_hz = 400000000U;
             profile.max_hz = 800000000U;
@@ -84,20 +126,38 @@ public:
     {
         return Result<void>::success();
     }
+private:
+    std::shared_ptr<std::array<std::atomic<std::size_t>, 8U>> tune_calls_;
 };
 
 class Nonce final : public TunerNonceSource {
 public:
+    explicit Nonce(std::shared_ptr<NonceGate> gate = {}) : gate_(std::move(gate)) {}
     Result<std::array<std::uint8_t, ipc::kNonceLength>> generate() noexcept override
     {
-        return Result<std::array<std::uint8_t, ipc::kNonceLength>>::success({{1U}});
+        if (gate_) gate_->wait();
+        std::array<std::uint8_t, ipc::kNonceLength> value{};
+        value[0U] = next_.fetch_add(1U, std::memory_order_relaxed);
+        return Result<std::array<std::uint8_t, ipc::kNonceLength>>::success(value);
     }
+private:
+    std::shared_ptr<NonceGate> gate_;
+    std::atomic<std::uint8_t> next_{1U};
 };
 
 class Clock final : public TunerServiceTime {
 public:
-    std::uint64_t monotonic_ms() noexcept override { return 1U; }
+    explicit Clock(std::shared_ptr<std::atomic<std::uint64_t>> now)
+        : now_(std::move(now))
+    {
+    }
+    std::uint64_t monotonic_ms() noexcept override
+    {
+        return now_->load(std::memory_order_acquire);
+    }
     void sleep_ms(std::uint32_t) noexcept override {}
+private:
+    std::shared_ptr<std::atomic<std::uint64_t>> now_;
 };
 
 class Stream final : public TunerStreamControl {
@@ -198,8 +258,11 @@ private:
 class Family final : public host_runtime::EnclosureFamily {
 public:
     explicit Family(std::shared_ptr<std::atomic<bool>> shutdown,
-                    std::shared_ptr<std::atomic<bool>> destroyed)
-        : shutdown_(std::move(shutdown)), destroyed_(std::move(destroyed))
+                    std::shared_ptr<std::atomic<bool>> destroyed,
+                    std::shared_ptr<std::atomic<std::uint64_t>> now,
+                    std::shared_ptr<std::array<std::atomic<std::size_t>, 8U>> tune_calls)
+        : shutdown_(std::move(shutdown)), destroyed_(std::move(destroyed)),
+          backend_(std::move(tune_calls)), clock_(std::move(now))
     {
     }
     ~Family() noexcept override
@@ -358,15 +421,89 @@ bool exchange_frame(FakeListenerIoControl& io, EnclosureContext& context,
     return wait_frame(io, context, connection, output_offset, response, opcode);
 }
 
+ContextConfig multi_receiver_config()
+{
+    ContextConfig value = config();
+    auto& receivers = value.canonical_list.receivers.value;
+    receivers.count = 4U;
+    const std::array<std::uint8_t, 4U> ids{{2U, 3U, 4U, 6U}};
+    for (std::size_t i = 0U; i < ids.size(); ++i) {
+        receivers.items[i] = receivers.items[0U];
+        receivers.items[i].id = ids[i];
+        receivers.items[i].binding.value.local_id = static_cast<std::uint8_t>(i);
+    }
+    return value;
+}
+
+std::vector<std::uint8_t> acquire_request(std::uint32_t request_id,
+                                         std::uint8_t receiver)
+{
+    std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+    const auto size = w::encode_acquire_request({config().server.epoch, receiver},
+        {payload.data(), payload.size()});
+    return size ? request_frame(w::kOpcodeAcquire, request_id,
+        {payload.data(), size.value()}) : std::vector<std::uint8_t>{};
+}
+
+std::vector<std::uint8_t> tune_request(std::uint32_t request_id,
+                                      std::uint64_t lease_id,
+                                      std::uint32_t timeout_ms)
+{
+    w::TuneRequest tune;
+    tune.epoch = config().server.epoch;
+    tune.lease_id = lease_id;
+    tune.system = w::System::isdb_t;
+    tune.frequency_hz = 473142857U;
+    tune.timeout_ms = timeout_ms;
+    std::array<std::uint8_t, w::kMaxControlPayload> payload{};
+    const auto size = w::encode_tune_request(tune, {payload.data(), payload.size()});
+    return size ? request_frame(w::kOpcodeTune, request_id,
+        {payload.data(), size.value()}) : std::vector<std::uint8_t>{};
+}
+
+bool response_frame(const std::vector<std::uint8_t>& bytes, std::uint16_t opcode,
+                    w::Frame& decoded)
+{
+    const auto result = w::decode_frame({bytes.data(), bytes.size()});
+    if (!result || result.value().header.kind != w::Kind::response ||
+        result.value().header.opcode != opcode) return false;
+    decoded = result.value();
+    return true;
+}
+
+std::unique_ptr<EnclosureContext> make_context(
+    const std::shared_ptr<std::atomic<bool>>& shutdown,
+    const std::shared_ptr<std::atomic<bool>>& destroyed,
+    const ContextConfig& context_config,
+    const std::shared_ptr<std::atomic<std::uint64_t>>& now,
+    const std::shared_ptr<std::array<std::atomic<std::size_t>, 8U>>& tune_calls,
+    const std::shared_ptr<NonceGate>& gate);
+
 std::unique_ptr<EnclosureContext> make_context(
     const std::shared_ptr<std::atomic<bool>>& shutdown,
     const std::shared_ptr<std::atomic<bool>>& destroyed =
         std::make_shared<std::atomic<bool>>(false))
 {
+    auto now = std::make_shared<std::atomic<std::uint64_t>>(1U);
+    auto tune_calls = std::make_shared<std::array<std::atomic<std::size_t>, 8U>>();
+    for (auto& count : *tune_calls) count.store(0U, std::memory_order_relaxed);
+    auto gate = std::make_shared<NonceGate>();
+    return make_context(shutdown, destroyed, config(), now, tune_calls, gate);
+}
+
+std::unique_ptr<EnclosureContext> make_context(
+    const std::shared_ptr<std::atomic<bool>>& shutdown,
+    const std::shared_ptr<std::atomic<bool>>& destroyed,
+    const ContextConfig& context_config,
+    const std::shared_ptr<std::atomic<std::uint64_t>>& now,
+    const std::shared_ptr<std::array<std::atomic<std::size_t>, 8U>>& tune_calls,
+    const std::shared_ptr<NonceGate>& gate)
+{
     std::unique_ptr<host_runtime::EnclosureFamily> family(
-        new Family(shutdown, destroyed));
+        new Family(shutdown, destroyed, now, tune_calls));
     auto assembled = EnclosureContext::assemble(
-        std::move(family), std::unique_ptr<TunerNonceSource>(new Nonce()), config());
+        std::move(family), std::unique_ptr<TunerNonceSource>(new Nonce(gate)),
+        context_config);
     if (!assembled) return {};
     if (!assembled.value()->reserve_namespace() || !assembled.value()->publish()) return {};
     return std::move(assembled.value());
@@ -595,6 +732,208 @@ bool control_and_stream_protocol()
     return closed && closed.value() == CloseState::quiesced;
 }
 
+bool pending_admission_retries_through_poll_for_each_session()
+{
+    FakeListenerIoControl io;
+    set_fake_listener_io_control(&io);
+    auto shutdown = std::make_shared<std::atomic<bool>>(false);
+    auto destroyed = std::make_shared<std::atomic<bool>>(false);
+    auto now = std::make_shared<std::atomic<std::uint64_t>>(100U);
+    auto tune_calls = std::make_shared<std::array<std::atomic<std::size_t>, 8U>>();
+    for (auto& count : *tune_calls) count.store(0U, std::memory_order_relaxed);
+    auto gate = std::make_shared<NonceGate>();
+    auto context = make_context(shutdown, destroyed, multi_receiver_config(), now,
+                                tune_calls, gate);
+    if (!context) {
+        set_fake_listener_io_control(nullptr);
+        return false;
+    }
+    const auto first = io.connect(detail::ListenerKind::control);
+    const auto second = io.connect(detail::ListenerKind::control);
+    const auto blocker = io.connect(detail::ListenerKind::control);
+    bool passed = static_cast<bool>(context->poll_once(Timeout{0U}));
+    std::array<std::size_t, 3U> offsets{};
+    std::vector<std::uint8_t> response;
+    const auto hello = hello_frame();
+    const std::vector<std::uint8_t> hello_request(hello.begin(), hello.end());
+    passed = passed && exchange_frame(io, *context, first, offsets[0U], hello_request,
+                                     response, w::kOpcodeHello) &&
+        exchange_frame(io, *context, second, offsets[1U], hello_request,
+                       response, w::kOpcodeHello) &&
+        exchange_frame(io, *context, blocker, offsets[2U], hello_request,
+                       response, w::kOpcodeHello);
+
+    std::array<std::uint64_t, 2U> leases{};
+    const std::array<detail::ConnectionToken, 2U> owners{{first, second}};
+    const std::array<std::uint8_t, 2U> receivers{{2U, 3U}};
+    for (std::size_t i = 0U; passed && i < owners.size(); ++i) {
+        const auto request = acquire_request(2U, receivers[i]);
+        passed = exchange_frame(io, *context, owners[i], offsets[i], request,
+                                response, w::kOpcodeAcquire);
+        w::Frame decoded{};
+        if (passed) passed = response_frame(response, w::kOpcodeAcquire, decoded);
+        if (passed) {
+            const auto acquired = w::decode_acquire_response(decoded.payload);
+            passed = static_cast<bool>(acquired);
+            if (passed) leases[i] = acquired.value().lease_id;
+        }
+    }
+
+    if (passed) {
+        gate->arm();
+        const auto request = acquire_request(2U, 4U);
+        io.send(blocker, {request.data(), request.size()});
+        passed = static_cast<bool>(context->poll_once(Timeout{0U})) && gate->wait_entered();
+    }
+    if (passed) {
+        const auto first_tune = tune_request(3U, leases[0U], 1000U);
+        const auto second_tune = tune_request(3U, leases[1U], 1000U);
+        io.send(first, {first_tune.data(), first_tune.size()});
+        io.send(second, {second_tune.data(), second_tune.size()});
+        passed = static_cast<bool>(context->poll_once(Timeout{0U}));
+    }
+    gate->open();
+    w::Frame first_result{};
+    w::Frame second_result{};
+    w::Frame blocker_result{};
+    if (passed) passed = wait_frame(io, *context, first, offsets[0U], response,
+                                    w::kOpcodeTune) &&
+        response_frame(response, w::kOpcodeTune, first_result);
+    if (passed) passed = wait_frame(io, *context, second, offsets[1U], response,
+                                    w::kOpcodeTune) &&
+        response_frame(response, w::kOpcodeTune, second_result);
+    if (passed) passed = wait_frame(io, *context, blocker, offsets[2U], response,
+                                    w::kOpcodeAcquire) &&
+        response_frame(response, w::kOpcodeAcquire, blocker_result);
+    if (passed) {
+        const auto first_tuned = w::decode_tune_result(first_result.payload);
+        const auto second_tuned = w::decode_tune_result(second_result.payload);
+        const auto acquired = w::decode_acquire_response(blocker_result.payload);
+        passed = first_tuned && second_tuned && acquired &&
+            (*tune_calls)[2U].load(std::memory_order_relaxed) == 1U &&
+            (*tune_calls)[3U].load(std::memory_order_relaxed) == 1U;
+    }
+    const auto closed = context->close(Timeout{5000U});
+    passed = passed && closed && closed.value() == CloseState::quiesced &&
+        shutdown->load(std::memory_order_acquire);
+    context.reset();
+    set_fake_listener_io_control(nullptr);
+    return passed;
+}
+
+bool pending_admission_deadline_and_observed_close()
+{
+    FakeListenerIoControl io;
+    set_fake_listener_io_control(&io);
+    auto shutdown = std::make_shared<std::atomic<bool>>(false);
+    auto destroyed = std::make_shared<std::atomic<bool>>(false);
+    auto now = std::make_shared<std::atomic<std::uint64_t>>(100U);
+    auto tune_calls = std::make_shared<std::array<std::atomic<std::size_t>, 8U>>();
+    for (auto& count : *tune_calls) count.store(0U, std::memory_order_relaxed);
+    auto gate = std::make_shared<NonceGate>();
+    auto context = make_context(shutdown, destroyed, multi_receiver_config(), now,
+                                tune_calls, gate);
+    if (!context) {
+        set_fake_listener_io_control(nullptr);
+        return false;
+    }
+    const auto timed = io.connect(detail::ListenerKind::control);
+    const auto closed_owner = io.connect(detail::ListenerKind::control);
+    const auto blocker = io.connect(detail::ListenerKind::control);
+    bool passed = static_cast<bool>(context->poll_once(Timeout{0U}));
+    const char* failure_stage = "accept";
+    std::array<std::size_t, 3U> offsets{};
+    std::vector<std::uint8_t> response;
+    const auto hello = hello_frame();
+    const std::vector<std::uint8_t> hello_request(hello.begin(), hello.end());
+    passed = passed && exchange_frame(io, *context, timed, offsets[0U], hello_request,
+                                     response, w::kOpcodeHello) &&
+        exchange_frame(io, *context, closed_owner, offsets[1U], hello_request,
+                       response, w::kOpcodeHello) &&
+        exchange_frame(io, *context, blocker, offsets[2U], hello_request,
+                       response, w::kOpcodeHello);
+    std::array<std::uint64_t, 2U> leases{};
+    const std::array<detail::ConnectionToken, 2U> owners{{timed, closed_owner}};
+    const std::array<std::uint8_t, 2U> receivers{{2U, 3U}};
+    for (std::size_t i = 0U; passed && i < owners.size(); ++i) {
+        const auto request = acquire_request(2U, receivers[i]);
+        passed = exchange_frame(io, *context, owners[i], offsets[i], request,
+                                response, w::kOpcodeAcquire);
+        w::Frame decoded{};
+        if (passed) passed = response_frame(response, w::kOpcodeAcquire, decoded);
+        if (passed) {
+            const auto acquired = w::decode_acquire_response(decoded.payload);
+            passed = static_cast<bool>(acquired);
+            if (passed) leases[i] = acquired.value().lease_id;
+        }
+    }
+    if (passed) {
+        failure_stage = "blocked acquire";
+        gate->arm();
+        const auto request = acquire_request(2U, 4U);
+        io.send(blocker, {request.data(), request.size()});
+        passed = static_cast<bool>(context->poll_once(Timeout{0U})) && gate->wait_entered();
+    }
+    if (passed) {
+        failure_stage = "pending tunes";
+        const auto timed_tune = tune_request(3U, leases[0U], 20U);
+        const auto closing_tune = tune_request(3U, leases[1U], 1000U);
+        io.send(timed, {timed_tune.data(), timed_tune.size()});
+        io.send(closed_owner, {closing_tune.data(), closing_tune.size()});
+        passed = static_cast<bool>(context->poll_once(Timeout{0U}));
+    }
+    if (passed) {
+        failure_stage = "deadline wait cap";
+        passed = static_cast<bool>(context->poll_once(Timeout{100U})) &&
+            io.last_poll_timeout_ms() == 20U;
+    }
+    if (passed) {
+        failure_stage = "deadline poll";
+        now->store(120U, std::memory_order_release);
+        const auto deadline_poll = context->poll_once(Timeout{100U});
+        passed = static_cast<bool>(deadline_poll);
+    }
+    w::Frame timed_result{};
+    if (passed) {
+        failure_stage = "deadline result";
+        passed = wait_frame(io, *context, timed, offsets[0U], response,
+                            w::kOpcodeTune);
+        const auto decoded = w::decode_frame({response.data(), response.size()});
+        passed = passed && decoded && decoded.value().header.kind == w::Kind::error_response &&
+            decoded.value().header.opcode == w::kOpcodeTune;
+        if (passed) timed_result = decoded.value();
+    }
+    if (passed) {
+        const auto error = w::decode_error_response(timed_result.payload);
+        passed = error && error.value().error.code ==
+            static_cast<std::uint32_t>(Error::TIMEOUT);
+    }
+    if (passed) {
+        failure_stage = "observed close";
+        gate->open();
+        io.disconnect(closed_owner);
+        const auto close_poll = context->poll_once(Timeout{0U});
+        passed = static_cast<bool>(close_poll) &&
+            io.closed(closed_owner);
+    }
+    gate->open();
+    if (passed) {
+        failure_stage = "close cleanup";
+        passed = wait_frame(io, *context, blocker, offsets[2U], response,
+                            w::kOpcodeAcquire) &&
+            (*tune_calls)[2U].load(std::memory_order_relaxed) == 0U &&
+            (*tune_calls)[3U].load(std::memory_order_relaxed) == 0U;
+    }
+    const auto closed = context->close(Timeout{5000U});
+    passed = passed && closed && closed.value() == CloseState::quiesced &&
+        shutdown->load(std::memory_order_acquire);
+    context.reset();
+    set_fake_listener_io_control(nullptr);
+    if (!passed) std::fprintf(stderr, "pending admission failure at %s; poll timeout=%u\n",
+        failure_stage, io.last_poll_timeout_ms());
+    return passed;
+}
+
 bool close_handoff_and_pending_owner()
 {
     FakeListenerIoControl io;
@@ -731,6 +1070,14 @@ int main()
     if (!control_and_stream_protocol()) {
         std::fprintf(stderr, "FAIL: control_and_stream_protocol at %s\n",
                      protocol_failure_stage);
+        return 1;
+    }
+    if (!pending_admission_retries_through_poll_for_each_session()) {
+        std::fprintf(stderr, "FAIL: pending_admission_retries_through_poll_for_each_session\n");
+        return 1;
+    }
+    if (!pending_admission_deadline_and_observed_close()) {
+        std::fprintf(stderr, "FAIL: pending_admission_deadline_and_observed_close\n");
         return 1;
     }
     if (!close_handoff_and_pending_owner()) {

@@ -151,6 +151,10 @@ struct AdmittedTune final {
     std::uint64_t requested_hz = 0U;
 };
 
+enum class TuneAdmissionFailure : std::uint8_t {
+    none, registry_contention, rejected
+};
+
 struct AcquireResult final {
     std::uint64_t lease_id = 0U;
     ReceiverToken token{};
@@ -385,6 +389,14 @@ public:
     Result<AdmittedTune> try_admit_tune(std::uint64_t client_id,
                                         const HzTuneRequest& request,
                                         std::uint64_t accepted_at_ms) noexcept;
+    Result<AdmittedTune> try_admit_tune_detailed(std::uint64_t client_id,
+                                                 const TuneRequest& request,
+                                                 std::uint64_t accepted_at_ms,
+                                                 TuneAdmissionFailure& failure) noexcept;
+    Result<AdmittedTune> try_admit_tune_detailed(std::uint64_t client_id,
+                                                 const HzTuneRequest& request,
+                                                 std::uint64_t accepted_at_ms,
+                                                 TuneAdmissionFailure& failure) noexcept;
     // Executes one admitted ticket with the shared tune algorithm and the
     // admitted end-to-end budget.  It rechecks ticket identity, revision and
     // cancellation before the hardware stages and at the final commit.
@@ -596,7 +608,8 @@ private:
                                     const TuneRequest& request,
                                     std::uint64_t accepted_at_ms,
                                     bool exact_hz,
-                                    std::uint64_t requested_hz) noexcept;
+                                    std::uint64_t requested_hz,
+                                    TuneAdmissionFailure* failure = nullptr) noexcept;
     bool ticket_current_locked(const AdmittedTune& ticket) const noexcept;
     // True when this exact ticket owns the slot: a matching pending ticket, or
     // the operation this ticket started (same lease instance and revision).

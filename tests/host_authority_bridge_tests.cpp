@@ -236,8 +236,40 @@ class Nonce final : public TunerNonceSource {
 public:
     Result<std::array<std::uint8_t, ipc::kNonceLength>> generate() noexcept override
     {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (blocked) {
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [this] { return released; });
+            blocked = false;
+        }
         return Result<std::array<std::uint8_t, ipc::kNonceLength>>::success({{1U}});
     }
+    void block_next() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        blocked = true;
+        entered = false;
+        released = false;
+    }
+    bool wait_entered() noexcept
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        return condition.wait_for(lock, std::chrono::seconds(5),
+            [this] { return entered; });
+    }
+    void release() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        released = true;
+        condition.notify_all();
+    }
+private:
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool blocked = false;
+    bool entered = false;
+    bool released = false;
 };
 
 class Time final : public TunerServiceTime {
@@ -277,6 +309,16 @@ public:
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
     {
+        {
+            std::unique_lock<std::mutex> gate_lock(detach_gate_mutex);
+            if (detach_blocked) {
+                detach_entered = true;
+                detach_gate_condition.notify_all();
+                detach_gate_condition.wait(gate_lock,
+                    [this] { return detach_released; });
+                detach_blocked = false;
+            }
+        }
         std::lock_guard<std::mutex> lock(mutex);
         if (!attached) {
             final.counters = counters;
@@ -328,6 +370,25 @@ public:
             attached ? TunerStreamTerminal::none : TunerStreamTerminal::stopped});
     }
     bool final_released = false;
+    void block_detach() noexcept
+    {
+        std::lock_guard<std::mutex> lock(detach_gate_mutex);
+        detach_blocked = true;
+        detach_entered = false;
+        detach_released = false;
+    }
+    bool wait_detach_entered() noexcept
+    {
+        std::unique_lock<std::mutex> lock(detach_gate_mutex);
+        return detach_gate_condition.wait_for(lock, std::chrono::seconds(5),
+            [this] { return detach_entered; });
+    }
+    void release_detach() noexcept
+    {
+        std::lock_guard<std::mutex> lock(detach_gate_mutex);
+        detach_released = true;
+        detach_gate_condition.notify_all();
+    }
     bool is_attached() const noexcept
     {
         std::lock_guard<std::mutex> lock(mutex);
@@ -346,6 +407,11 @@ private:
     TunerAttachment identity{};
     TunerStreamCounters counters{};
     TunerStreamFinalSnapshot final{};
+    std::mutex detach_gate_mutex;
+    std::condition_variable detach_gate_condition;
+    bool detach_blocked = false;
+    bool detach_entered = false;
+    bool detach_released = false;
     bool attached = false;
     unsigned packets_remaining = 0U;
     bool missing_final_when_unattached_ = false;
@@ -688,6 +754,103 @@ struct ActiveStreamFixture final {
                bridge->data_attach_response_sent(data, true) == Error::OK;
     }
 };
+
+bool test_close_cancels_pending_tune_with_owned_stream()
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start()) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) return false;
+
+    const auto acquiring = fixture.bridge->open_session();
+    const auto other = fixture.bridge->open_session();
+    if (!acquiring || !other || !hello(*fixture.bridge, acquiring.value())) return false;
+    const auto before = fixture.tuner.engine_status();
+    if (!before) return false;
+
+    fixture.nonce.block_next();
+    std::array<std::uint8_t, w::kAcquireRequestSize> acquire_payload{};
+    const auto acquire_size = w::encode_acquire_request({fixture.list.epoch, 3U},
+        {acquire_payload.data(), acquire_payload.size()});
+    if (!acquire_size) return false;
+    w::Context acquire_context;
+    acquire_context.state = w::ContextState::ready;
+    w::Snapshot acquire_snapshot;
+    const auto acquire_reply = fixture.bridge->accept(acquiring.value(),
+        frame(w::kOpcodeAcquire, 2U,
+              {acquire_payload.data(), acquire_size.value()}),
+        acquire_context, acquire_snapshot, 0U);
+    if (!acquire_reply.queued || !fixture.nonce.wait_entered()) return false;
+
+    std::array<std::uint8_t, 128U> tune_payload{};
+    w::TuneRequest tune_request;
+    tune_request.epoch = fixture.list.epoch;
+    tune_request.lease_id = fixture.lease;
+    tune_request.system = w::System::isdb_t;
+    tune_request.frequency_hz = 473142857U;
+    tune_request.timeout_ms = 100U;
+    const auto tune_size = w::encode_tune_request(tune_request,
+        {tune_payload.data(), tune_payload.size()});
+    if (!tune_size) return false;
+    w::Context tune_context;
+    tune_context.epoch = fixture.list.epoch;
+    tune_context.state = w::ContextState::ready;
+    w::Snapshot tune_snapshot;
+    const auto pending = fixture.bridge->accept(fixture.control,
+        frame(w::kOpcodeTune, 4U, {tune_payload.data(), tune_size.value()}),
+        tune_context, tune_snapshot, 0U);
+    if (!pending.queued ||
+        fixture.bridge->admission_wait_limit_ms(0U, 1000U) != 100U) return false;
+
+    fixture.stream.block_detach();
+    Error close_result = Error::INTERNAL;
+    std::thread closer([&] {
+        close_result = fixture.bridge->close_session(fixture.control);
+    });
+    fixture.nonce.release();
+    closer.join();
+    const bool admission_cancelled =
+        fixture.bridge->admission_wait_limit_ms(0U, 1000U) == 1000U;
+    const bool cleanup_blocked = fixture.stream.wait_detach_entered();
+    const Error polled = fixture.bridge->poll();
+    const bool other_alive = hello(*fixture.bridge, other.value());
+    const auto after = fixture.tuner.engine_status();
+    const bool tune_unchanged = after &&
+        before.value().tune_metadata[2U].revision ==
+            after.value().tune_metadata[2U].revision;
+
+    const Error shutdown = fixture.bridge->begin_shutdown();
+    const bool fatal = shutdown == Error::INTERNAL;
+    fixture.stream.release_detach();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() && std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto stopped = fixture.workers->stop_and_join();
+    fixture.bridge->close_session_for_test(fixture.control);
+    fixture.bridge->close_session_for_test(acquiring.value());
+    fixture.bridge->close_session_for_test(other.value());
+    const bool passed = close_result == Error::OK && admission_cancelled &&
+        cleanup_blocked &&
+        polled == Error::OK && !fatal && shutdown == Error::OK &&
+        other_alive && tune_unchanged &&
+        fixture.bridge->data_counts().free == kHostAuthoritySessionCapacity &&
+        stopped;
+    if (!passed)
+        std::cerr << "pending tune close fatal=" << fatal
+                  << " other-alive=" << other_alive
+                  << " tune-unchanged=" << tune_unchanged
+                  << " cleanup-blocked=" << cleanup_blocked
+                  << " admission-cancelled=" << admission_cancelled
+                  << " poll=" << static_cast<unsigned>(polled)
+                  << " close=" << static_cast<unsigned>(close_result)
+                  << " close-pending="
+                  << fixture.bridge->close_pending_for_test(fixture.control)
+                  << " pending-queued=" << pending.queued
+                  << "\n";
+    return passed;
+}
 
 bool test_attached_missing_final_stays_fatal()
 {
@@ -3257,6 +3420,8 @@ int main(int argc, char** argv)
         if (selected == "m1") passed = test_cleanup_requires_quiesced_terminal();
         else if (selected == "failed-attach")
             passed = test_failed_attach_prepare_is_reported_to_data_owner();
+        else if (selected == "close-pending")
+            passed = test_close_cancels_pending_tune_with_owned_stream();
         else if (selected == "m8") passed = test_prepare_attach_rejects_old_generation();
         else if (selected == "b1") passed = test_finish_control_close_waits_for_owned_stream();
         else if (selected == "n4") passed = test_accept_preserves_close_pending_before_poll();
@@ -3266,6 +3431,7 @@ int main(int argc, char** argv)
         return 0;
     }
     if (!test_cleanup_requires_quiesced_terminal() ||
+        !test_close_cancels_pending_tune_with_owned_stream() ||
         !test_prepare_attach_rejects_old_generation() ||
         !test_finish_control_close_waits_for_owned_stream() ||
         !test_accept_preserves_close_pending_before_poll() ||

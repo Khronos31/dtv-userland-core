@@ -594,19 +594,33 @@ Result<AdmittedTune> ReceiverEngine::try_admit_tune(std::uint64_t client_id,
                                                     const TuneRequest& request,
                                                     std::uint64_t accepted_at_ms) noexcept
 {
-    return admit_tune(client_id, request, accepted_at_ms, false, 0U);
+    TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+    return try_admit_tune_detailed(client_id, request, accepted_at_ms, failure);
+}
+
+Result<AdmittedTune> ReceiverEngine::try_admit_tune_detailed(
+    std::uint64_t client_id, const TuneRequest& request,
+    std::uint64_t accepted_at_ms, TuneAdmissionFailure& failure) noexcept
+{
+    failure = TuneAdmissionFailure::none;
+    return admit_tune(client_id, request, accepted_at_ms, false, 0U, &failure);
 }
 
 Result<AdmittedTune> ReceiverEngine::admit_tune(std::uint64_t client_id,
                                                  const TuneRequest& request,
                                                  std::uint64_t accepted_at_ms,
                                                  bool exact_hz,
-                                                 std::uint64_t requested_hz) noexcept
+                                                 std::uint64_t requested_hz,
+                                                 TuneAdmissionFailure* failure) noexcept
 {
+    if (failure != nullptr) *failure = TuneAdmissionFailure::rejected;
     if (!strict_enabled_ || !valid_client(client_id))
         return Result<AdmittedTune>::failure(Error::NOT_READY);
     std::unique_lock<std::mutex> lock(mutex_, std::try_to_lock);
-    if (!lock.owns_lock()) return Result<AdmittedTune>::failure(Error::BUSY);
+    if (!lock.owns_lock()) {
+        if (failure != nullptr) *failure = TuneAdmissionFailure::registry_contention;
+        return Result<AdmittedTune>::failure(Error::BUSY);
+    }
 
     const int index = find_lease_locked(client_id, request.lease_id);
     if (index < 0) return Result<AdmittedTune>::failure(Error::NOT_FOUND);
@@ -651,12 +665,21 @@ Result<AdmittedTune> ReceiverEngine::admit_tune(std::uint64_t client_id,
         accepted_at_ms, request};
     pending_[slot].ticket.exact_hz = exact_hz;
     pending_[slot].ticket.requested_hz = requested_hz;
+    if (failure != nullptr) *failure = TuneAdmissionFailure::none;
     return Result<AdmittedTune>::success(pending_[slot].ticket);
 }
 
 Result<AdmittedTune> ReceiverEngine::try_admit_tune(
     std::uint64_t client_id, const HzTuneRequest& request,
     std::uint64_t accepted_at_ms) noexcept
+{
+    TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+    return try_admit_tune_detailed(client_id, request, accepted_at_ms, failure);
+}
+
+Result<AdmittedTune> ReceiverEngine::try_admit_tune_detailed(
+    std::uint64_t client_id, const HzTuneRequest& request,
+    std::uint64_t accepted_at_ms, TuneAdmissionFailure& failure) noexcept
 {
     TuneRequest admitted{};
     admitted.lease_id = request.lease_id;
@@ -667,8 +690,9 @@ Result<AdmittedTune> ReceiverEngine::try_admit_tune(
     admitted.timeout_ms = request.timeout_ms;
     admitted.validation = request.validation;
 
+    failure = TuneAdmissionFailure::none;
     return admit_tune(client_id, admitted, accepted_at_ms, true,
-                      request.requested_hz);
+                      request.requested_hz, &failure);
 }
 
 Result<void> ReceiverEngine::execute_admitted_tune(const AdmittedTune& ticket) noexcept

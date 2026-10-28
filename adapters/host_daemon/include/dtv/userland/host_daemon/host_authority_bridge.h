@@ -127,6 +127,9 @@ public:
 
     // Drains all worker completions and advances cleanup/stop ownership once.
     Error poll() noexcept;
+    Error poll(std::uint64_t now_ms) noexcept;
+    std::uint32_t admission_wait_limit_ms(std::uint64_t now_ms,
+                                         std::uint32_t max_wait_ms) const noexcept;
     Error begin_shutdown(IngressStop stop_other_ingress = nullptr,
                          void* context = nullptr) noexcept;
     bool stopped() const noexcept { return stopped_; }
