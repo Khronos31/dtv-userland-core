@@ -490,6 +490,24 @@ w::ListResponse make_list()
     return list;
 }
 
+dtv::userland::detail::FunctionPresenceSnapshot presence_snapshot(
+    const w::ListResponse& list)
+{
+    dtv::userland::detail::FunctionPresenceSnapshot snapshot;
+    snapshot.epoch = list.epoch;
+    snapshot.sequence = 1U;
+    snapshot.functions.count = list.functions.count;
+    for (std::size_t i = 0U; i < list.functions.count; ++i) {
+        auto& observation = snapshot.functions.items[i];
+        observation.function = list.functions.items[i];
+        if (observation.function.present) {
+            observation.connection_generation.present = true;
+            observation.connection_generation.value = 1U;
+        }
+    }
+    return snapshot;
+}
+
 w::Frame frame(std::uint16_t opcode, std::uint32_t id, ByteView payload)
 {
     w::Frame value;
@@ -704,7 +722,8 @@ struct ActiveStreamFixture final {
     std::uint64_t stream_id = 0U;
     dtv::userland::detail::ReceiverToken attach_token{};
 
-    bool start(const ControlWorkerStartupOptions* options = nullptr)
+    bool start(const ControlWorkerStartupOptions* options = nullptr,
+               bool enable_presence_cache = false, bool start_stream = true)
     {
         if (!tuner.configure_strict_capabilities() ||
             !tuner.configure_stream_contract(
@@ -719,11 +738,15 @@ struct ActiveStreamFixture final {
         bridge = std::make_unique<HostAuthorityBridge>(tuner, *workers, server, list);
         if (bridge->configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
             return false;
+        if (enable_presence_cache &&
+            bridge->configure_presence_for_test(presence_snapshot(list)) != Error::OK)
+            return false;
         const auto opened = bridge->open_session();
         if (!opened || !hello(*bridge, opened.value())) return false;
         control = opened.value();
         if (!acquire(*bridge, control, 2U, lease) ||
             !tune(*bridge, control, list.epoch, lease)) return false;
+        if (!start_stream) return true;
         const auto status = tuner.engine_status();
         if (!status) return false;
         const auto started = bridge->start_stream(control, lease,
@@ -850,6 +873,106 @@ bool test_close_cancels_pending_tune_with_owned_stream()
                   << " pending-queued=" << pending.queued
                   << "\n";
     return passed;
+}
+
+bool run_invalidated_admission_bridge_close(bool reject_cleanup)
+{
+    ActiveStreamFixture fixture;
+    ControlWorkerStartupOptions options;
+    options.reject_next_authority_cleanup_submit = reject_cleanup;
+    if (!fixture.start(&options, true, false)) {
+        std::cerr << "admission-close fixture start failed\n";
+        return false;
+    }
+
+    fixture.nonce.block_next();
+    Result<TunerAcquireResult> blocked =
+        Result<TunerAcquireResult>::failure(Error::INTERNAL);
+    std::thread holder([&] { blocked = fixture.tuner.acquire(99U, 4U); });
+    struct GateGuard final {
+        Nonce& nonce;
+        std::thread& holder;
+        ~GateGuard() { nonce.release(); if (holder.joinable()) holder.join(); }
+    } gate_guard{fixture.nonce, holder};
+    if (!fixture.nonce.wait_entered()) {
+        std::cerr << "admission-close nonce gate did not enter\n";
+        return false;
+    }
+
+    w::TuneRequest request;
+    request.epoch = fixture.list.epoch;
+    request.lease_id = fixture.lease;
+    request.system = w::System::isdb_t;
+    request.frequency_hz = 473142857U;
+    request.timeout_ms = 1000U;
+    std::array<std::uint8_t, 128U> payload{};
+    const auto size = w::encode_tune_request(request, {payload.data(), payload.size()});
+    if (!size) return false;
+    w::Context context;
+    context.epoch = fixture.list.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto pending = fixture.bridge->accept(fixture.control,
+        frame(w::kOpcodeTune, 4U, {payload.data(), size.value()}), context, snapshot, 0U);
+    if (!pending.queued ||
+        fixture.bridge->admission_wait_limit_ms(0U, 1000U) != 1000U ||
+        fixture.bridge->invalidate_presence_for_test() != Error::OK) {
+        std::cerr << "admission-close TUNE did not become pending\n";
+        return false;
+    }
+
+    fixture.nonce.release();
+    holder.join();
+    if (!blocked) {
+        std::cerr << "admission-close contention acquire failed\n";
+        return false;
+    }
+    const Error first_poll = fixture.bridge->poll();
+    const auto first_counts = fixture.bridge->counts();
+    const bool slot_closed = first_poll == Error::OK && first_counts.active == 0U &&
+        first_counts.tombstone == 1U &&
+        !fixture.bridge->session_connected_for_test(fixture.control) &&
+        fixture.bridge->client_id(fixture.control) != 0U;
+    const bool cleanup_retained = fixture.bridge->retained_disconnect_for_test(
+        fixture.control, fixture.bridge->client_id(fixture.control));
+    const bool retry_deferred = reject_cleanup && cleanup_retained;
+    const bool submit_succeeded = !reject_cleanup && !cleanup_retained;
+
+    bool freed = false;
+    if (slot_closed) freed = wait_free(*fixture.bridge, fixture.control);
+    const auto after_close = fixture.tuner.engine_status();
+    const bool receiver_lease_cleared = after_close && !after_close.value().leased[2U];
+    const bool stream_closed = !fixture.stream.is_attached() &&
+        !fixture.bridge->stream_owned_for_test(fixture.control, fixture.stream_id);
+
+    (void)fixture.tuner.disconnect_client(99U);
+    if (!freed && fixture.bridge->counts().active != 0U)
+        (void)fixture.bridge->close_session(fixture.control);
+    const Error shutdown = fixture.bridge->begin_shutdown();
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() && std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool stopped = static_cast<bool>(fixture.workers->stop_and_join());
+    const bool passed = slot_closed && (retry_deferred || submit_succeeded) && freed &&
+        receiver_lease_cleared && stream_closed && shutdown == Error::OK && stopped;
+    if (!passed)
+        std::cerr << "admission-close rejected=" << reject_cleanup
+                  << " slot-closed=" << slot_closed << " retry-deferred=" << retry_deferred
+                  << " submit-succeeded=" << submit_succeeded << " freed=" << freed
+                  << " lease-cleared=" << receiver_lease_cleared
+                  << " stream-closed=" << stream_closed
+                  << " shutdown=" << static_cast<unsigned>(shutdown)
+                  << " stopped=" << stopped << "\n";
+    return passed;
+}
+
+bool test_invalidated_admission_bridge_close()
+{
+    const bool submitted = run_invalidated_admission_bridge_close(false);
+    const bool rejected = run_invalidated_admission_bridge_close(true);
+    return submitted && rejected;
 }
 
 bool test_attached_missing_final_stays_fatal()
@@ -3426,6 +3549,8 @@ int main(int argc, char** argv)
         else if (selected == "b1") passed = test_finish_control_close_waits_for_owned_stream();
         else if (selected == "n4") passed = test_accept_preserves_close_pending_before_poll();
         else if (selected == "n5") passed = test_response_sent_retains_rejected_hello_disconnect();
+        else if (selected == "admission-close")
+            passed = test_invalidated_admission_bridge_close();
         else return 2;
         if (!passed) return 1;
         return 0;
@@ -3435,7 +3560,8 @@ int main(int argc, char** argv)
         !test_prepare_attach_rejects_old_generation() ||
         !test_finish_control_close_waits_for_owned_stream() ||
         !test_accept_preserves_close_pending_before_poll() ||
-        !test_response_sent_retains_rejected_hello_disconnect()) {
+        !test_response_sent_retains_rejected_hello_disconnect() ||
+        !test_invalidated_admission_bridge_close()) {
         std::cerr << "stream guard direct-observation fixture failed\n";
         return 1;
     }
