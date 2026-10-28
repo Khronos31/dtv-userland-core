@@ -744,6 +744,107 @@ bool test_presence_cache_projection_and_epoch_rules()
     return true;
 }
 
+bool test_presence_epoch_closes_pending_and_unpublished_responses()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 3U> ids{{17U, 18U, 19U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const std::array<ReceiverCapability, 3U> capabilities{{
+        ReceiverCapability{17U, true, false, true},
+        ReceiverCapability{18U, true, false, true},
+        ReceiverCapability{19U, true, false, true}}};
+    CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+    const auto list = make_list(ids.data(), ids.size());
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    w::Context context;
+    context.epoch = server.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    std::array<std::uint8_t, 128U> payload{};
+
+    ControlAuthority pending_authority(server, list, engine);
+    CHECK(pending_authority.enable_presence_cache() == Error::OK);
+    CHECK(pending_authority.update_presence(presence_snapshot(list, 1U)) == Error::OK);
+    ControlServiceSession pending_session(pending_authority);
+    Executor pending_executor;
+    CHECK(pending_authority.open(pending_session) == Error::OK);
+    CHECK(hello(pending_authority, pending_session, pending_executor));
+    const std::uint64_t lease = acquired_lease(acquire(
+        pending_authority, engine, pending_session, pending_executor, 2U, 17U));
+    CHECK(lease != 0U);
+    CHECK(send_full(pending_authority, pending_session, pending_executor) == Error::OK);
+
+    tokens.arm();
+    Result<AcquireResult> gated_acquire = Result<AcquireResult>::failure(Error::INTERNAL);
+    std::thread holder([&] { gated_acquire = engine.acquire(99U, 19U); });
+    struct GateGuard final {
+        Tokens& tokens;
+        std::thread& holder;
+        ~GateGuard() { tokens.open(); if (holder.joinable()) holder.join(); }
+    } gate_guard{tokens, holder};
+    tokens.wait_entered();
+    CHECK(tune(pending_authority, pending_session, pending_executor, server, context,
+               snapshot, 3U, lease, 473142857U, 1000U, clock.now).queued);
+    CHECK(pending_executor.count == 0U);
+    CHECK(pending_authority.invalidate_presence_epoch() == Error::OK);
+    tokens.open();
+    holder.join();
+    const auto invalidated_pending = pending_authority.retry_pending_admission(
+        clock.now, pending_executor);
+    const bool pending_closed = invalidated_pending.attempted &&
+        !invalidated_pending.reply_ready &&
+        invalidated_pending.reply.action == w::InboundAction::close &&
+        !pending_session.connected() &&
+        pending_executor.count == 1U &&
+        pending_executor.jobs[0U].kind == AuthorityJobKind::disconnect &&
+        backend.hz_calls == 0;
+    if (!pending_closed && pending_session.connected())
+        (void)pending_authority.close(pending_session);
+    while (pending_executor.count != 0U) {
+        const AuthorityJob job = pending_executor.pop();
+        if (job.kind == AuthorityJobKind::disconnect)
+            (void)ControlAuthority::execute_job(engine, job);
+    }
+    CHECK(gated_acquire && engine.disconnect_client(99U));
+
+    ControlAuthority response_authority(server, list, engine);
+    CHECK(response_authority.enable_presence_cache() == Error::OK);
+    CHECK(response_authority.update_presence(presence_snapshot(list, 1U)) == Error::OK);
+    ControlServiceSession response_session(response_authority);
+    Executor response_executor;
+    CHECK(response_authority.open(response_session) == Error::OK);
+    CHECK(hello(response_authority, response_session, response_executor));
+    const auto list_size = w::encode_list_request({server.epoch},
+        {payload.data(), payload.size()});
+    CHECK(list_size);
+    const auto generated = response_authority.accept(response_session,
+        frame(w::kOpcodeList, 2U, {payload.data(), list_size.value()}), context,
+        snapshot, 0U, response_executor);
+    CHECK(generated.action == w::InboundAction::respond && response_session.connected() &&
+          response_authority.response_owner_check(response_session) == Error::OK);
+    CHECK(response_authority.invalidate_presence_epoch() == Error::OK);
+    const bool owner_blocked = response_authority.response_owner_check(response_session) ==
+                               Error::NOT_READY;
+    const Error sent = response_authority.response_sent(response_session, true,
+                                                        response_executor, nullptr);
+    const bool response_closed = sent == Error::OK && !response_session.connected() &&
+        response_executor.count == 1U &&
+        response_executor.jobs[0U].kind == AuthorityJobKind::disconnect;
+    if (response_session.connected()) (void)response_authority.close(response_session);
+    while (response_executor.count != 0U) {
+        const AuthorityJob job = response_executor.pop();
+        if (job.kind == AuthorityJobKind::disconnect)
+            (void)ControlAuthority::execute_job(engine, job);
+    }
+    CHECK(pending_closed && owner_blocked && response_closed &&
+          response_authority.response_owner_check(response_session) == Error::NOT_FOUND);
+    return true;
+}
+
 bool test_authority_release_preserves_legacy_engine_lease()
 {
     Backend backend;
@@ -1676,6 +1777,7 @@ bool test_deferred_admission_deadline_and_observed_close()
 int main()
 {
     if (!test_presence_cache_projection_and_epoch_rules()) return 1;
+    if (!test_presence_epoch_closes_pending_and_unpublished_responses()) return 1;
     if (!test_projection_lease_tune_and_gate()) return 1;
     if (!test_authority_release_preserves_legacy_engine_lease()) return 1;
     if (!test_rejected_queue_aborts_and_late_completion_drops()) return 1;

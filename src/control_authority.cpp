@@ -320,6 +320,17 @@ Error ControlAuthority::invalidate_presence_epoch() noexcept
     return Error::OK;
 }
 
+Error ControlAuthority::response_owner_check(
+    const ControlServiceSession& session) const noexcept
+{
+    if (&session.authority_ != this || !session.connected() ||
+        find_session(session.client_id_) != &session)
+        return Error::NOT_FOUND;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_)
+        return Error::NOT_READY;
+    return Error::OK;
+}
+
 Error ControlAuthority::configure_stream_contract(std::uint64_t engine_epoch,
                                                   std::uint64_t arm_budget_ms) noexcept
 {
@@ -484,6 +495,12 @@ AuthorityPollResult ControlAuthority::retry_pending_admission(
 
     result.attempted = true;
     result.session = session;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_) {
+        result.reply.action = wire::InboundAction::close;
+        result.reply.cleanup = close_cleanup(*session);
+        if (!executor.submit(result.reply.cleanup)) result.reply.cleanup_required = true;
+        return result;
+    }
     const wire::ControlRequest& request = session->connection_request_;
     const std::uint64_t accepted_at_ms = session->pending_admission_accepted_at_ms_;
     if (now_ms >= accepted_at_ms &&
@@ -1339,6 +1356,12 @@ Error ControlAuthority::response_sent(ControlServiceSession& session, bool compl
         return Error::INVALID_ARGUMENT;
     if (!session.connected() || find_session(session.client_id_) != &session)
         return Error::NOT_FOUND;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_) {
+        const AuthorityJob job = close(session);
+        if (executor.submit(job)) return Error::OK;
+        if (rejected_cleanup != nullptr) *rejected_cleanup = job;
+        return Error::RESOURCE_LIMIT;
+    }
     if (complete_frame) {
         if (session.close_after_reply_) {
             const AuthorityJob job = close(session);

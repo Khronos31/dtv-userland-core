@@ -222,6 +222,9 @@ public:
     Error enable_presence_cache() noexcept;
     Error update_presence(const FunctionPresenceSnapshot& snapshot) noexcept;
     Error invalidate_presence_epoch() noexcept;
+    // The event-loop owner checks before writing; on failure it discards the
+    // frame and closes the session. response_sent() is called only after send.
+    Error response_owner_check(const ControlServiceSession& session) const noexcept;
     Error configure_stream_contract(std::uint64_t engine_epoch,
                                    std::uint64_t arm_budget_ms) noexcept;
     AuthorityReply accept(ControlServiceSession& session, const wire::Frame& frame,
