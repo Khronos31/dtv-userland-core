@@ -1275,8 +1275,14 @@ bool test_deferred_admission_fairness_and_session_order()
         CHECK(poll.attempted && !poll.reply_ready && poll.session == expected &&
               poll.reply.queued && executor.count == 1U);
         const AuthorityJob job = executor.pop();
+        const std::uint64_t expected_lease = expected == &first ? first_lease
+            : expected == &second ? second_lease : third_lease;
         CHECK(job.kind == AuthorityJobKind::tune && job.key.client_id == expected->client_id() &&
-              job.key.request_id == 3U);
+              job.key.request_id == 3U && job.tune.lease_id == expected_lease &&
+              job.tune.accepted_at_ms == clock.now &&
+              job.tune.requested_hz == 473142857U +
+                  static_cast<std::uint64_t>(expected == &first ? 0U
+                      : expected == &second ? 1U : 2U));
         const auto completion = ControlAuthority::execute_job_value(engine, job);
         CHECK(completion.error == Error::OK &&
               backend.hz_calls.load() == ++expected_hz_calls);
