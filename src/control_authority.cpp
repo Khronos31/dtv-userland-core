@@ -88,6 +88,62 @@ bool same_producer(const wire::Producer& left, const wire::Producer& right) noex
     return true;
 }
 
+template <std::size_t N>
+bool same_text(const wire::WString<N>& left, const wire::WString<N>& right) noexcept
+{
+    if (left.length != right.length || left.length > N) return false;
+    for (std::size_t i = 0U; i < left.length; ++i)
+        if (left.bytes[i] != right.bytes[i]) return false;
+    return true;
+}
+
+template <typename T>
+bool same_optional(const wire::Optional<T>& left,
+                   const wire::Optional<T>& right) noexcept
+{
+    return left.present == right.present &&
+           (!left.present || left.value == right.value);
+}
+
+template <std::size_t N>
+bool same_optional_text(const wire::Optional<wire::WString<N>>& left,
+                        const wire::Optional<wire::WString<N>>& right) noexcept
+{
+    return left.present == right.present &&
+           (!left.present || same_text(left.value, right.value));
+}
+
+bool same_error(const wire::ErrorRecord& left,
+                const wire::ErrorRecord& right) noexcept
+{
+    return left.code == right.code && same_text(left.operation, right.operation) &&
+           same_text(left.detail, right.detail);
+}
+
+bool same_optional_error(const wire::Optional<wire::ErrorRecord>& left,
+                         const wire::Optional<wire::ErrorRecord>& right) noexcept
+{
+    return left.present == right.present &&
+           (!left.present || same_error(left.value, right.value));
+}
+
+bool same_function_identity(const wire::UsbFunction& left,
+                            const wire::UsbFunction& right) noexcept
+{
+    return left.id == right.id && left.vid == right.vid && left.pid == right.pid &&
+           left.mode == right.mode &&
+           same_optional_text(left.location.usb_path, right.location.usb_path) &&
+           same_optional(left.location.bus, right.location.bus) &&
+           same_optional(left.location.address, right.location.address) &&
+           left.serial_state == right.serial_state &&
+           same_optional_text(left.serial, right.serial) &&
+           left.model.present == right.model.present &&
+           (!left.model.present || same_text(left.model.value.name,
+                                             right.model.value.name)) &&
+           left.identification_reason == right.identification_reason &&
+           same_optional_error(left.last_error, right.last_error);
+}
+
 const wire::ReceiverDescriptor* receiver_descriptor(const wire::ListResponse& list,
                                                       std::uint64_t id) noexcept
 {
@@ -166,16 +222,112 @@ ControlServiceSession* ControlAuthority::find_session(std::uint64_t client_id) c
 
 Error ControlAuthority::open(ControlServiceSession& session) noexcept
 {
-    if (!valid_ || &session.authority_ != this || session.connected() || session.next_ != nullptr ||
+    if (!valid_ || (presence_cache_enabled_ &&
+        (!presence_cache_ready_ || presence_epoch_invalidated_)) ||
+        &session.authority_ != this || session.connected() || session.next_ != nullptr ||
         session.used_)
         return Error::INVALID_ARGUMENT;
     const auto client_id = client_ids_.next();
     if (!client_id) return Error::INVALID_ARGUMENT;
     session.client_id_ = client_id.value();
+    session_opened_ = true;
     session.closed_ = false;
     session.used_ = true;
     session.next_ = sessions_;
     sessions_ = &session;
+    return Error::OK;
+}
+
+Error ControlAuthority::enable_presence_cache() noexcept
+{
+    if (!valid_ || presence_cache_enabled_ || session_opened_)
+        return Error::INVALID_ARGUMENT;
+    if (canonical_.receivers.present) {
+        for (std::size_t i = 0U; i < canonical_.receivers.value.count; ++i) {
+            const auto& receiver = canonical_.receivers.value.items[i];
+            if (!receiver.binding.present) return Error::UNSUPPORTED;
+            bool found = false;
+            for (std::size_t j = 0U; j < canonical_.functions.count; ++j)
+                found = found || canonical_.functions.items[j].id ==
+                    receiver.binding.value.function_id;
+            if (!found) return Error::INVALID_ARGUMENT;
+        }
+    }
+    presence_cache_enabled_ = true;
+    return Error::OK;
+}
+
+Error ControlAuthority::update_presence(
+    const FunctionPresenceSnapshot& snapshot) noexcept
+{
+    if (!presence_cache_enabled_ || presence_epoch_invalidated_)
+        return Error::INVALID_ARGUMENT;
+    const auto reject = [this]() noexcept {
+        if (presence_cache_ready_) presence_epoch_invalidated_ = true;
+        return Error::INVALID_ARGUMENT;
+    };
+    if (snapshot.epoch != server_.epoch ||
+        snapshot.functions.count != canonical_.functions.count ||
+        (presence_cache_ready_ && snapshot.sequence <= presence_sequence_))
+        return reject();
+
+    std::array<bool, wire::kMaxFunctions> seen{};
+    for (std::size_t i = 0U; i < snapshot.functions.count; ++i) {
+        const auto& observed = snapshot.functions.items[i];
+        std::size_t slot = canonical_.functions.count;
+        for (std::size_t j = 0U; j < canonical_.functions.count; ++j) {
+            if (canonical_.functions.items[j].id == observed.function.id) {
+                slot = j;
+                break;
+            }
+        }
+        if (slot == canonical_.functions.count || seen[slot] ||
+            !same_function_identity(canonical_.functions.items[slot], observed.function) ||
+            (observed.function.present != observed.connection_generation.present) ||
+            (presence_cache_ready_ && !canonical_.functions.items[slot].present &&
+             observed.function.present) ||
+            (presence_cache_ready_ && canonical_.functions.items[slot].present &&
+             observed.function.present &&
+             (!presence_generations_[slot].present ||
+              presence_generations_[slot].value !=
+                  observed.connection_generation.value)))
+            return reject();
+        seen[slot] = true;
+    }
+    for (std::size_t i = 0U; i < canonical_.functions.count; ++i)
+        if (!seen[i]) return reject();
+
+    for (std::size_t i = 0U; i < snapshot.functions.count; ++i) {
+        const auto& observed = snapshot.functions.items[i];
+        for (std::size_t j = 0U; j < canonical_.functions.count; ++j) {
+            auto& current = canonical_.functions.items[j];
+            if (current.id != observed.function.id) continue;
+            current.present = observed.function.present;
+            if (observed.connection_generation.present)
+                presence_generations_[j] = observed.connection_generation;
+        }
+    }
+    presence_sequence_ = snapshot.sequence;
+    presence_cache_ready_ = true;
+    return Error::OK;
+}
+
+Error ControlAuthority::invalidate_presence_epoch() noexcept
+{
+    if (!presence_cache_enabled_ || !presence_cache_ready_ || presence_epoch_invalidated_)
+        return Error::NOT_READY;
+    presence_epoch_invalidated_ = true;
+    return Error::OK;
+}
+
+Error ControlAuthority::response_owner_check(
+    const ControlServiceSession& session) const noexcept
+{
+    if (&session.authority_ != this || !session.connected() ||
+        find_session(session.client_id_) != &session)
+        return Error::NOT_FOUND;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_)
+        return Error::NOT_READY;
     return Error::OK;
 }
 
@@ -302,6 +454,13 @@ AuthorityReply ControlAuthority::accept(ControlServiceSession& session,
                                         ControlAuthorityExecutor& executor) noexcept
 {
     if (!session.connected() || find_session(session.client_id_) != &session) return {};
+    if (presence_cache_enabled_ && presence_epoch_invalidated_) {
+        AuthorityReply result;
+        result.action = wire::InboundAction::close;
+        result.cleanup = close_cleanup(session);
+        if (!executor.submit(result.cleanup)) result.cleanup_required = true;
+        return result;
+    }
     wire::Inbound inbound = session.connection_.accept(frame, session.connection_request_,
         MutableByteView{session.response_.data(), session.response_.size()});
     if (inbound.action == wire::InboundAction::close) {
@@ -336,6 +495,13 @@ AuthorityPollResult ControlAuthority::retry_pending_admission(
 
     result.attempted = true;
     result.session = session;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_) {
+        result.reply.action = wire::InboundAction::close;
+        result.close_required = true;
+        result.reply.cleanup = close_cleanup(*session);
+        if (!executor.submit(result.reply.cleanup)) result.reply.cleanup_required = true;
+        return result;
+    }
     const wire::ControlRequest& request = session->connection_request_;
     const std::uint64_t accepted_at_ms = session->pending_admission_accepted_at_ms_;
     if (now_ms >= accepted_at_ms &&
@@ -437,6 +603,28 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
             if (!engine_status) projected = engine_status.error();
             else projected = project_receiver_engine_status(canonical_, engine_status.value(),
                                                               status);
+            if (projected == Error::OK && presence_cache_enabled_) {
+                for (std::size_t i = 0U; i < status.receivers.value.count; ++i) {
+                    auto& receiver = status.receivers.value.items[i];
+                    if (!receiver.descriptor.binding.present) {
+                        projected = Error::UNSUPPORTED;
+                        break;
+                    }
+                    bool found = false;
+                    for (std::size_t j = 0U; j < canonical_.functions.count; ++j) {
+                        const auto& function = canonical_.functions.items[j];
+                        if (function.id != receiver.descriptor.binding.value.function_id)
+                            continue;
+                        receiver.present = function.present;
+                        found = true;
+                        break;
+                    }
+                    if (!found) {
+                        projected = Error::INVALID_ARGUMENT;
+                        break;
+                    }
+                }
+            }
         }
         if (projected != Error::OK)
             return error_reply(session, request.opcode, request.request_id,
@@ -873,6 +1061,15 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
         session->pending_request_id_ != key.request_id ||
         session->pending_kind_ != completion.kind)
         return {};
+    if (presence_cache_enabled_ && presence_epoch_invalidated_ && !session->closed_) {
+        AuthorityReply reply;
+        reply.action = wire::InboundAction::close;
+        reply.cleanup = completion.kind == AuthorityJobKind::acquire ||
+            completion.kind == AuthorityJobKind::rollback_release
+            ? disconnect_job(*session) : close_cleanup(*session);
+        reply.cleanup_required = true;
+        return reply;
+    }
     const Error result = completion.error;
     if (completion.kind == AuthorityJobKind::acquire) {
         if (session->closed_) {
@@ -1162,6 +1359,12 @@ Error ControlAuthority::response_sent(ControlServiceSession& session, bool compl
         return Error::INVALID_ARGUMENT;
     if (!session.connected() || find_session(session.client_id_) != &session)
         return Error::NOT_FOUND;
+    if (presence_cache_enabled_ && presence_epoch_invalidated_) {
+        const AuthorityJob job = close(session);
+        if (executor.submit(job)) return Error::OK;
+        if (rejected_cleanup != nullptr) *rejected_cleanup = job;
+        return Error::RESOURCE_LIMIT;
+    }
     if (complete_frame) {
         if (session.close_after_reply_) {
             const AuthorityJob job = close(session);

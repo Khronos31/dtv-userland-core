@@ -177,6 +177,17 @@ public:
                value.cleanup.kind == dtv::userland::detail::AuthorityJobKind::disconnect &&
                value.cleanup.key.client_id == client && value.cleanup.client_id == client;
     }
+    Error configure_presence_for_test(
+        const dtv::userland::detail::FunctionPresenceSnapshot& snapshot) noexcept
+    {
+        auto& authority = authority_owner_.authority();
+        const Error enabled = authority.enable_presence_cache();
+        return enabled == Error::OK ? authority.update_presence(snapshot) : enabled;
+    }
+    Error invalidate_presence_for_test() noexcept
+    {
+        return authority_owner_.authority().invalidate_presence_epoch();
+    }
     void force_next_terminal_unquiesced_for_test() noexcept
     {
         force_next_terminal_unquiesced_ = true;
@@ -264,6 +275,8 @@ private:
                         std::size_t slot) noexcept;
     void retain_cleanup(const dtv::userland::detail::AuthorityCleanup& job,
                         std::size_t slot) noexcept;
+    void close_slot(std::size_t slot,
+                    const dtv::userland::detail::AuthorityReply& reply) noexcept;
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;

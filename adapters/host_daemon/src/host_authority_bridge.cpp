@@ -9,6 +9,7 @@ namespace {
 
 using dtv::userland::detail::AuthorityJob;
 using dtv::userland::detail::AuthorityJobKind;
+using dtv::userland::detail::AuthorityReply;
 using dtv::userland::detail::ControlServiceSession;
 
 std::uint8_t job_receiver(const AuthorityJob& job) noexcept
@@ -92,23 +93,30 @@ dtv::userland::detail::AuthorityReply HostAuthorityBridge::accept(
                 enter_fatal();
         }
     }
-    if (reply.action == dtv::userland::wire::InboundAction::close) {
-        slot.state = SlotState::tombstone;
-#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
-        close_pending_before_accept_ = slot.close_pending;
-        accept_preserved_close_pending_ = false;
-#endif
-        slot.close_pending = slot.close_pending || (reply.cleanup_required &&
-            reply.cleanup.kind == AuthorityJobKind::disconnect);
-#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
-        accept_preserved_close_pending_ = close_pending_before_accept_ &&
-                                         slot.close_pending;
-#endif
-        if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
-        if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
-        if (slot.close_pending) close_owned_streams(index);
-    }
+    if (reply.action == dtv::userland::wire::InboundAction::close)
+        close_slot(index, reply);
     return reply;
+}
+
+void HostAuthorityBridge::close_slot(std::size_t index,
+                                     const AuthorityReply& reply) noexcept
+{
+    if (!slots_ || index >= kHostAuthoritySessionCapacity) return;
+    Slot& slot = slots_[index];
+    slot.state = SlotState::tombstone;
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+    close_pending_before_accept_ = slot.close_pending;
+    accept_preserved_close_pending_ = false;
+#endif
+    slot.close_pending = slot.close_pending || (reply.cleanup_required &&
+        reply.cleanup.kind == AuthorityJobKind::disconnect);
+#if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
+    accept_preserved_close_pending_ = close_pending_before_accept_ &&
+                                     slot.close_pending;
+#endif
+    if (slot.session && slot.session->client_id() == 0U) slot.session.reset();
+    if (reply.cleanup_required) retain_cleanup(reply.cleanup, index);
+    if (slot.close_pending) close_owned_streams(index);
 }
 
 Error HostAuthorityBridge::response_sent(std::uint8_t index,
@@ -1025,6 +1033,14 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
     }
 
     const auto reply = authority_owner_.authority().complete(value);
+    if (reply.action == dtv::userland::wire::InboundAction::close) {
+        if (reply.cleanup_required &&
+            reply.cleanup.kind == AuthorityJobKind::disconnect && slot.session &&
+            slot.session->client_id() != 0U)
+            slot.deferred_session = true;
+        close_slot(index, reply);
+        return;
+    }
     if (reply.action == dtv::userland::wire::InboundAction::respond) {
         slot.response = reply;
         slot.response_ready = true;
@@ -1366,7 +1382,24 @@ Error HostAuthorityBridge::poll(std::uint64_t now_ms) noexcept
     }
     const auto admission = authority_owner_.authority().retry_pending_admission(
         now_ms, *this);
-    if (admission.reply_ready && admission.session != nullptr) {
+    bool admission_closed = false;
+    if (admission.close_required && admission.session != nullptr &&
+        admission.reply.action == dtv::userland::wire::InboundAction::close) {
+        std::size_t index = kHostAuthoritySessionCapacity;
+        for (std::size_t i = 0U; slots_ && i < kHostAuthoritySessionCapacity; ++i) {
+            if (slots_[i].session && &*slots_[i].session == admission.session) {
+                index = i;
+                break;
+            }
+        }
+        if (index == kHostAuthoritySessionCapacity ||
+            slots_[index].state != SlotState::active) {
+            enter_fatal();
+        } else {
+            close_slot(index, admission.reply);
+            admission_closed = true;
+        }
+    } else if (admission.reply_ready && admission.session != nullptr) {
         const std::size_t index = find_slot(admission.session->client_id());
         if (!slots_ || index == kHostAuthoritySessionCapacity ||
             slots_[index].state != SlotState::active ||
@@ -1377,7 +1410,7 @@ Error HostAuthorityBridge::poll(std::uint64_t now_ms) noexcept
             slots_[index].response_ready = true;
         }
     }
-    advance();
+    if (!admission_closed) advance();
     return stopped_ ? shutdown_result() : Error::OK;
 }
 

@@ -144,6 +144,20 @@ struct AuthorityPollResult final {
     // wire response from a retained request or a newly published worker job.
     bool attempted = false;
     bool reply_ready = false;
+    bool close_required = false;
+};
+
+struct FunctionPresenceObservation final {
+    // Identity fields must be from the observer's confirmed mapping.
+    wire::UsbFunction function;
+    // Required only while present; do not derive it from VID/PID or location.
+    wire::Optional<std::uint64_t> connection_generation;
+};
+
+struct FunctionPresenceSnapshot final {
+    wire::Uuid epoch{};
+    std::uint64_t sequence = 0U;
+    wire::BArray<FunctionPresenceObservation, wire::kMaxFunctions> functions;
 };
 
 class ControlServiceSession final {
@@ -205,6 +219,13 @@ public:
     const wire::ServerHello& server() const noexcept { return server_; }
     const wire::ListResponse& canonical_list() const noexcept { return canonical_; }
     Error open(ControlServiceSession& session) noexcept;
+    // Enable before opening sessions; updates and requests share the event-loop owner.
+    Error enable_presence_cache() noexcept;
+    Error update_presence(const FunctionPresenceSnapshot& snapshot) noexcept;
+    Error invalidate_presence_epoch() noexcept;
+    // The event-loop owner checks before writing; on failure it discards the
+    // frame and closes the session. response_sent() is called only after send.
+    Error response_owner_check(const ControlServiceSession& session) const noexcept;
     Error configure_stream_contract(std::uint64_t engine_epoch,
                                    std::uint64_t arm_budget_ms) noexcept;
     AuthorityReply accept(ControlServiceSession& session, const wire::Frame& frame,
@@ -265,8 +286,15 @@ private:
     std::array<ControlServiceSession*, kReceiverEngineCapacity> admission_queue_{};
     std::size_t admission_queue_head_ = 0U;
     std::size_t admission_queue_count_ = 0U;
+    std::uint64_t presence_sequence_ = 0U;
+    std::array<wire::Optional<std::uint64_t>, wire::kMaxFunctions>
+        presence_generations_{};
     ClientIdAllocator client_ids_{kAuthorityClientIdFirst, UINT64_MAX};
     bool valid_ = false;
+    bool presence_cache_enabled_ = false;
+    bool presence_cache_ready_ = false;
+    bool presence_epoch_invalidated_ = false;
+    bool session_opened_ = false;
     std::uint64_t stream_engine_epoch_ = 0U;
     std::uint64_t stream_arm_budget_ms_ = 0U;
 };
