@@ -3525,6 +3525,144 @@ bool test_deferred_acquire_tombstone_and_progress()
     return bridge.stopped() && bridge.shutdown_result() == Error::OK;
 }
 
+bool run_invalidated_inflight_acquire_cleanup(bool rollback_release)
+{
+    struct Fixture final {
+        Backend backend;
+        Nonce nonce;
+        Time time;
+        TunerService tuner{backend, nonce, time};
+        CardBackend card_backend;
+        CardSession card_session;
+        CardService card{card_backend, card_session};
+        std::unique_ptr<ControlWorkerLanes> workers{};
+        std::unique_ptr<HostAuthorityBridge> bridge{};
+        w::ListResponse list{make_list()};
+        std::uint8_t control = 0U;
+
+        bool start(bool mismatch_acquire_receiver)
+        {
+            if (!tuner.configure_strict_capabilities()) return false;
+            ControlWorkerStartupOptions options;
+            options.mismatch_next_authority_acquire_receiver = mismatch_acquire_receiver;
+            auto created = ControlWorkerLanes::create_for_test(card, tuner, options);
+            if (!created) return false;
+            workers = std::move(created.value());
+            const w::ServerHello server{list.epoch, list.producer, 0U};
+            bridge = std::make_unique<HostAuthorityBridge>(tuner, *workers,
+                                                           server, list);
+            if (bridge->configure_presence_for_test(presence_snapshot(list)) != Error::OK)
+                return false;
+            const auto opened = bridge->open_session();
+            if (!opened || !hello(*bridge, opened.value())) return false;
+            control = opened.value();
+            return true;
+        }
+    };
+    auto* fixture = new Fixture;
+    struct GateGuard final {
+        Backend& backend;
+        bool active = true;
+        void release() noexcept
+        {
+            if (!active) return;
+            backend.release_open();
+            backend.release_close();
+            active = false;
+        }
+        ~GateGuard() { release(); }
+    } gate_guard{fixture->backend};
+
+    if (rollback_release) fixture->backend.block_close(3U);
+    else fixture->backend.block_open(3U);
+    if (!fixture->start(rollback_release)) {
+        std::cerr << "invalidated in-flight acquire fixture start failed\n";
+        return false;
+    }
+    std::array<std::uint8_t, w::kAcquireRequestSize> payload{};
+    const auto size = w::encode_acquire_request({fixture->list.epoch, 3U},
+        {payload.data(), payload.size()});
+    if (!size) return false;
+    w::Context context;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto queued = fixture->bridge->accept(fixture->control,
+        frame(w::kOpcodeAcquire, 2U, {payload.data(), size.value()}),
+        context, snapshot, 0U);
+    bool worker_entered = queued.queued;
+    if (worker_entered && rollback_release) {
+        const auto gate_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!fixture->backend.close_started() &&
+               std::chrono::steady_clock::now() < gate_until) {
+            (void)fixture->bridge->poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        worker_entered = fixture->backend.close_started();
+    } else if (worker_entered) {
+        worker_entered = fixture->backend.wait_open();
+    }
+    if (!worker_entered ||
+        fixture->bridge->invalidate_presence_for_test() != Error::OK) {
+        std::cerr << "invalidated in-flight acquire worker did not reach gate\n";
+        return false;
+    }
+
+    if (rollback_release) fixture->backend.release_close();
+    else fixture->backend.release_open();
+    bool slot_released = false;
+    bool receiver_unleased = false;
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < until) {
+        (void)fixture->bridge->poll();
+        const auto counts = fixture->bridge->counts();
+        const auto engine = fixture->tuner.engine_status();
+        slot_released = counts.free == kHostAuthoritySessionCapacity &&
+            counts.active == 0U && counts.tombstone == 0U &&
+            fixture->bridge->client_id(fixture->control) == 0U;
+        receiver_unleased = engine && !engine.value().leased[3U];
+        if (slot_released && receiver_unleased) break;
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto response = fixture->bridge->take_response(fixture->control);
+    const bool no_response = response.action != w::InboundAction::respond;
+    if (!slot_released || !receiver_unleased || !no_response) {
+        const auto counts = fixture->bridge->counts();
+        const auto engine = fixture->tuner.engine_status();
+        std::cerr << "invalidated in-flight acquire rollback=" << rollback_release
+                  << " free/active/tombstone=" << counts.free << "/" << counts.active
+                  << "/" << counts.tombstone << " client="
+                  << fixture->bridge->client_id(fixture->control) << " leased="
+                  << (engine && engine.value().leased[3U])
+                  << " response=" << static_cast<unsigned>(response.action) << "\n";
+        return false;
+    }
+
+    if (fixture->bridge->begin_shutdown() != Error::OK) return false;
+    const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture->bridge->stopped() &&
+           std::chrono::steady_clock::now() < stop_until) {
+        (void)fixture->bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool stopped = fixture->bridge->stopped() &&
+        fixture->bridge->shutdown_result() == Error::OK &&
+        static_cast<bool>(fixture->workers->stop_and_join());
+    if (!stopped) return false;
+    gate_guard.release();
+    delete fixture;
+    return true;
+}
+
+bool test_invalidated_inflight_acquire_cleanup()
+{
+    return run_invalidated_inflight_acquire_cleanup(false);
+}
+
+bool test_invalidated_inflight_rollback_cleanup()
+{
+    return run_invalidated_inflight_acquire_cleanup(true);
+}
+
 bool test_fatal_late_acquire_is_not_finalized_early()
 {
     // A fatal unresolved session intentionally retains every owner through
@@ -3665,6 +3803,10 @@ int main(int argc, char** argv)
             passed = test_invalidated_admission_bridge_close();
         else if (selected == "admission-contention")
             passed = test_registry_contention_keeps_pending_admission_open();
+        else if (selected == "invalidated-inflight-acquire")
+            passed = test_invalidated_inflight_acquire_cleanup();
+        else if (selected == "invalidated-inflight-rollback")
+            passed = test_invalidated_inflight_rollback_cleanup();
         else return 2;
         if (!passed) return 1;
         return 0;
@@ -3742,6 +3884,11 @@ int main(int argc, char** argv)
     }
     if (!test_deferred_acquire_tombstone_and_progress()) {
         std::cerr << "deferred ACQUIRE fixture failed\n";
+        return 1;
+    }
+    if (!test_invalidated_inflight_acquire_cleanup() ||
+        !test_invalidated_inflight_rollback_cleanup()) {
+        std::cerr << "invalidated in-flight acquire cleanup fixture failed\n";
         return 1;
     }
     if (!test_fatal_late_acquire_is_not_finalized_early()) {

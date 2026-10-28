@@ -1033,6 +1033,14 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
     }
 
     const auto reply = authority_owner_.authority().complete(value);
+    if (reply.action == dtv::userland::wire::InboundAction::close) {
+        if (reply.cleanup_required &&
+            reply.cleanup.kind == AuthorityJobKind::disconnect && slot.session &&
+            slot.session->client_id() != 0U)
+            slot.deferred_session = true;
+        close_slot(index, reply);
+        return;
+    }
     if (reply.action == dtv::userland::wire::InboundAction::respond) {
         slot.response = reply;
         slot.response_ready = true;

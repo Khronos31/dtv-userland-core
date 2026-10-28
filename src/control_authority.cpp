@@ -1064,7 +1064,9 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
     if (presence_cache_enabled_ && presence_epoch_invalidated_ && !session->closed_) {
         AuthorityReply reply;
         reply.action = wire::InboundAction::close;
-        reply.cleanup = close_cleanup(*session);
+        reply.cleanup = completion.kind == AuthorityJobKind::acquire ||
+            completion.kind == AuthorityJobKind::rollback_release
+            ? disconnect_job(*session) : close_cleanup(*session);
         reply.cleanup_required = true;
         return reply;
     }
