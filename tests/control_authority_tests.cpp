@@ -276,6 +276,24 @@ w::ListResponse make_list(const ReceiverId* ids, std::size_t count)
     return list;
 }
 
+FunctionPresenceSnapshot presence_snapshot(const w::ListResponse& list,
+                                            std::uint64_t sequence)
+{
+    FunctionPresenceSnapshot snapshot;
+    snapshot.epoch = list.epoch;
+    snapshot.sequence = sequence;
+    snapshot.functions.count = list.functions.count;
+    for (std::size_t i = 0U; i < list.functions.count; ++i) {
+        snapshot.functions.items[i].function = list.functions.items[i];
+        if (list.functions.items[i].present) {
+            snapshot.functions.items[i].connection_generation.present = true;
+            snapshot.functions.items[i].connection_generation.value =
+                100U + list.functions.items[i].id;
+        }
+    }
+    return snapshot;
+}
+
 w::Frame frame(std::uint16_t opcode, std::uint32_t id, ByteView payload)
 {
     w::Frame result;
@@ -486,6 +504,243 @@ bool test_projection_lease_tune_and_gate()
     CHECK(send_full(authority, first, executor) == Error::OK);
     (void)authority.close(first);
     (void)authority.close(second);
+    return true;
+}
+
+bool test_presence_cache_projection_and_epoch_rules()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 2U> ids{{17U, 18U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const std::array<ReceiverCapability, 2U> caps{{
+        ReceiverCapability{17U, true, false, true},
+        ReceiverCapability{18U, true, false, true}}};
+    CHECK(engine.configure_strict_capabilities(caps.data(), caps.size()));
+    auto list = make_list(ids.data(), ids.size());
+    list.topology.expected_function_count.value = 2U;
+    list.functions.count = 2U;
+    list.functions.items[1U] = list.functions.items[0U];
+    list.functions.items[1U].id = 2U;
+    list.functions.items[1U].vid = 0x2345U;
+    list.receivers.value.items[1U].binding.value.function_id = 2U;
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    ControlAuthority authority(server, list, engine);
+    CHECK(authority.enable_presence_cache() == Error::OK);
+    ControlServiceSession session(authority);
+    ControlServiceSession premature(authority);
+    CHECK(authority.open(premature) == Error::INVALID_ARGUMENT);
+
+    auto initial = presence_snapshot(list, 1U);
+    initial.functions.count = 1U;
+    CHECK(authority.update_presence(initial) == Error::INVALID_ARGUMENT);
+    CHECK(authority.open(premature) == Error::INVALID_ARGUMENT);
+    initial = presence_snapshot(list, 1U);
+    initial.functions.items[0U].function.id = 99U;
+    CHECK(authority.update_presence(initial) == Error::INVALID_ARGUMENT);
+    initial = presence_snapshot(list, 1U);
+    initial.functions.items[1U].function.id = initial.functions.items[0U].function.id;
+    CHECK(authority.update_presence(initial) == Error::INVALID_ARGUMENT);
+    initial = presence_snapshot(list, 1U);
+    initial.epoch[0U] ^= 0xffU;
+    CHECK(authority.update_presence(initial) == Error::INVALID_ARGUMENT);
+    initial = presence_snapshot(list, 1U);
+    initial.functions.items[0U].connection_generation.present = false;
+    CHECK(authority.update_presence(initial) == Error::INVALID_ARGUMENT);
+    initial = presence_snapshot(list, 1U);
+    CHECK(authority.update_presence(initial) == Error::OK);
+    CHECK(authority.open(session) == Error::OK);
+    Executor executor;
+    CHECK(hello(authority, session, executor));
+
+    w::Context context;
+    context.epoch = server.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot control_snapshot;
+    control_snapshot.sequence = 1U;
+    std::array<std::uint8_t, 128U> payload{};
+    auto list_size = w::encode_list_request({server.epoch},
+        {payload.data(), payload.size()});
+    CHECK(list_size);
+    auto listed = authority.accept(session,
+        frame(w::kOpcodeList, 2U, {payload.data(), list_size.value()}), context,
+        control_snapshot, 0U, executor);
+    CHECK(listed.action == w::InboundAction::respond);
+    auto header = w::decode_header({listed.frame.data, w::kHeaderSize});
+    CHECK(header);
+    auto listed_value = w::decode_list_response(
+        {listed.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(listed_value && listed_value.value().functions.count == 2U &&
+          listed_value.value().functions.items[0U].present &&
+          listed_value.value().functions.items[1U].present);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    w::StatusRequest status_request;
+    status_request.epoch = server.epoch;
+    status_request.scope.kind = w::ScopeKind::enclosure;
+    auto status_size = w::encode_status_request(status_request,
+        {payload.data(), payload.size()});
+    CHECK(status_size);
+    auto status_reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 3U, {payload.data(), status_size.value()}), context,
+        control_snapshot, 0U, executor);
+    CHECK(status_reply.action == w::InboundAction::respond);
+    header = w::decode_header({status_reply.frame.data, w::kHeaderSize});
+    CHECK(header);
+    auto status_value = w::decode_status_response(
+        {status_reply.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(status_value && status_value.value().functions.present &&
+          status_value.value().functions.value.items[0U].present &&
+          status_value.value().functions.value.items[1U].present &&
+          status_value.value().receivers.value.items[0U].present &&
+          status_value.value().receivers.value.items[1U].present);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    auto removed = presence_snapshot(list, 2U);
+    removed.functions.items[1U].function.present = false;
+    removed.functions.items[1U].connection_generation.present = false;
+    CHECK(authority.update_presence(removed) == Error::OK);
+    listed = authority.accept(session,
+        frame(w::kOpcodeList, 4U, {payload.data(), list_size.value()}), context,
+        control_snapshot, 0U, executor);
+    CHECK(listed.action == w::InboundAction::respond);
+    header = w::decode_header({listed.frame.data, w::kHeaderSize});
+    CHECK(header);
+    listed_value = w::decode_list_response(
+        {listed.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(listed_value && listed_value.value().functions.items[0U].present &&
+          !listed_value.value().functions.items[1U].present);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+    status_reply = authority.accept(session,
+        frame(w::kOpcodeStatus, 5U, {payload.data(), status_size.value()}), context,
+        control_snapshot, 0U, executor);
+    CHECK(status_reply.action == w::InboundAction::respond);
+    header = w::decode_header({status_reply.frame.data, w::kHeaderSize});
+    CHECK(header);
+    status_value = w::decode_status_response(
+        {status_reply.frame.data + w::kHeaderSize, header.value().payload_length});
+    CHECK(status_value && status_value.value().functions.value.items[0U].present &&
+          !status_value.value().functions.value.items[1U].present &&
+          status_value.value().receivers.value.items[0U].present &&
+          !status_value.value().receivers.value.items[1U].present);
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    removed.sequence = 3U;
+    removed.functions.items[1U].function.present = true;
+    removed.functions.items[1U].connection_generation.present = true;
+    removed.functions.items[1U].connection_generation.value += 1000U;
+    CHECK(authority.update_presence(removed) == Error::INVALID_ARGUMENT);
+    ControlServiceSession next(authority);
+    CHECK(authority.open(next) == Error::INVALID_ARGUMENT);
+    const auto closed = authority.accept(session,
+        frame(w::kOpcodeList, 6U, {payload.data(), list_size.value()}), context,
+        control_snapshot, 0U, executor);
+    CHECK(closed.action == w::InboundAction::close && !session.connected());
+    CHECK(executor.count == 1U);
+    CHECK(ControlAuthority::execute_job(engine, executor.pop()) == Error::OK);
+    CHECK(engine.disconnect_client(99U));
+
+    Backend identity_backend;
+    Tokens identity_tokens;
+    Clock identity_clock;
+    const std::array<ReceiverId, 1U> one_id{{17U}};
+    ReceiverEngine identity_engine(identity_backend, one_id.data(), one_id.size(),
+                                   identity_tokens, identity_clock);
+    const std::array<ReceiverCapability, 1U> one_cap{{
+        ReceiverCapability{17U, true, false, true}}};
+    CHECK(identity_engine.configure_strict_capabilities(one_cap.data(), one_cap.size()));
+    const auto identity_list = make_list(one_id.data(), one_id.size());
+    server.epoch = identity_list.epoch;
+    server.producer = identity_list.producer;
+    ControlAuthority identity_authority(server, identity_list, identity_engine);
+    CHECK(identity_authority.enable_presence_cache() == Error::OK);
+    auto identity_initial = presence_snapshot(identity_list, 1U);
+    CHECK(identity_authority.update_presence(identity_initial) == Error::OK);
+    identity_initial.sequence = 2U;
+    identity_initial.functions.items[0U].function.vid ^= 1U;
+    CHECK(identity_authority.update_presence(identity_initial) == Error::INVALID_ARGUMENT);
+    ControlServiceSession identity_session(identity_authority);
+    CHECK(identity_authority.open(identity_session) == Error::INVALID_ARGUMENT);
+
+    ControlAuthority generation_authority(server, identity_list, identity_engine);
+    CHECK(generation_authority.enable_presence_cache() == Error::OK);
+    auto generation_initial = presence_snapshot(identity_list, 1U);
+    CHECK(generation_authority.update_presence(generation_initial) == Error::OK);
+    generation_initial.sequence = 2U;
+    generation_initial.functions.items[0U].connection_generation.value += 1U;
+    CHECK(generation_authority.update_presence(generation_initial) ==
+          Error::INVALID_ARGUMENT);
+    ControlServiceSession generation_session(generation_authority);
+    CHECK(generation_authority.open(generation_session) == Error::INVALID_ARGUMENT);
+
+    ControlAuthority sequence_authority(server, identity_list, identity_engine);
+    CHECK(sequence_authority.enable_presence_cache() == Error::OK);
+    auto sequence_initial = presence_snapshot(identity_list, 7U);
+    CHECK(sequence_authority.update_presence(sequence_initial) == Error::OK);
+    CHECK(sequence_authority.update_presence(sequence_initial) == Error::INVALID_ARGUMENT);
+    ControlServiceSession sequence_session(sequence_authority);
+    CHECK(sequence_authority.open(sequence_session) == Error::INVALID_ARGUMENT);
+
+    ControlAuthority invalidated_authority(server, identity_list, identity_engine);
+    CHECK(invalidated_authority.enable_presence_cache() == Error::OK);
+    CHECK(invalidated_authority.update_presence(
+        presence_snapshot(identity_list, 1U)) == Error::OK);
+    CHECK(invalidated_authority.invalidate_presence_epoch() == Error::OK);
+    ControlServiceSession invalidated_session(invalidated_authority);
+    CHECK(invalidated_authority.open(invalidated_session) == Error::INVALID_ARGUMENT);
+
+    ControlAuthority pending_status_authority(server, identity_list, identity_engine);
+    CHECK(pending_status_authority.enable_presence_cache() == Error::OK);
+    CHECK(pending_status_authority.update_presence(
+        presence_snapshot(identity_list, 1U)) == Error::OK);
+    ControlServiceSession pending_status_session(pending_status_authority);
+    Executor pending_status_executor;
+    pending_status_executor.internal_card_observation = true;
+    CHECK(pending_status_authority.open(pending_status_session) == Error::OK);
+    CHECK(hello(pending_status_authority, pending_status_session,
+                pending_status_executor));
+    w::StatusRequest pending_status_request;
+    pending_status_request.epoch = server.epoch;
+    pending_status_request.scope.kind = w::ScopeKind::enclosure;
+    auto pending_status_size = w::encode_status_request(pending_status_request,
+        {payload.data(), payload.size()});
+    CHECK(pending_status_size);
+    const auto pending_status_reply = pending_status_authority.accept(
+        pending_status_session,
+        frame(w::kOpcodeStatus, 2U,
+              {payload.data(), pending_status_size.value()}), context,
+        control_snapshot, 0U, pending_status_executor);
+    CHECK(pending_status_reply.queued && pending_status_executor.count == 1U);
+    (void)pending_status_executor.pop();
+    CHECK(pending_status_authority.invalidate_presence_epoch() == Error::OK);
+    AuthorityCompletion pending_status_completion;
+    pending_status_completion.key = SessionKey{pending_status_session.client_id(), 2U};
+    pending_status_completion.kind = AuthorityJobKind::internal_card_status;
+    const auto invalidated_status = pending_status_authority.complete(
+        pending_status_completion);
+    CHECK(invalidated_status.action == w::InboundAction::close &&
+          invalidated_status.cleanup_required &&
+          !pending_status_session.connected());
+    CHECK(ControlAuthority::execute_job(identity_engine,
+                                       invalidated_status.cleanup) == Error::OK);
+    CHECK(identity_engine.disconnect_client(99U));
+
+    Backend unbound_backend;
+    Tokens unbound_tokens;
+    Clock unbound_clock;
+    ReceiverEngine unbound_engine(unbound_backend, one_id.data(), one_id.size(),
+                                  unbound_tokens, unbound_clock);
+    CHECK(unbound_engine.configure_strict_capabilities(one_cap.data(), one_cap.size()));
+    auto unbound_list = identity_list;
+    unbound_list.receivers.value.items[0U].binding.present = false;
+    server.epoch = unbound_list.epoch;
+    server.producer = unbound_list.producer;
+    ControlAuthority unbound_authority(server, unbound_list, unbound_engine);
+    CHECK(unbound_authority.enable_presence_cache() == Error::UNSUPPORTED);
+    CHECK(unbound_engine.disconnect_client(99U));
     return true;
 }
 
@@ -1420,6 +1675,7 @@ bool test_deferred_admission_deadline_and_observed_close()
 
 int main()
 {
+    if (!test_presence_cache_projection_and_epoch_rules()) return 1;
     if (!test_projection_lease_tune_and_gate()) return 1;
     if (!test_authority_release_preserves_legacy_engine_lease()) return 1;
     if (!test_rejected_queue_aborts_and_late_completion_drops()) return 1;
