@@ -469,6 +469,7 @@ public:
     // presence) taken under the engine registry lock.  It performs no backend
     // I/O.  Slot order is the legacy receiver order 0..receiver_count()-1.
     Result<dtv::userland::detail::ReceiverEngineStatus> engine_status() const noexcept;
+    std::uint64_t monotonic_ms() noexcept;
     Result<void> set_independent_lnb_power(bool enabled) noexcept;
     dtv::userland::wire::Optional<bool> independent_lnb_power_state() noexcept;
     // Fixed enclosure shape.  receiver_supports() is the backend's pure

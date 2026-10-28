@@ -771,6 +771,11 @@ Result<engine::ReceiverEngineStatus> TunerService::engine_status() const noexcep
     return engine_.status();
 }
 
+std::uint64_t TunerService::monotonic_ms() noexcept
+{
+    return time_.monotonic_ms();
+}
+
 bool TunerService::supports_internal_card_observation() const noexcept
 {
     return backend_.legacy().supports_internal_card_observation();

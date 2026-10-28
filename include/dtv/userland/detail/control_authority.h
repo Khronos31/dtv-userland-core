@@ -216,6 +216,8 @@ public:
     // reply only when reply_ready is true.
     AuthorityPollResult retry_pending_admission(std::uint64_t now_ms,
                                                 ControlAuthorityExecutor& executor) noexcept;
+    std::uint32_t admission_wait_limit_ms(std::uint64_t now_ms,
+                                         std::uint32_t max_wait_ms) const noexcept;
     AuthorityJob close(ControlServiceSession& session) noexcept;
     AuthorityReply complete(const AuthorityCompletion& completion) noexcept;
     AuthorityReply complete(const SessionKey& key, Error result) noexcept;

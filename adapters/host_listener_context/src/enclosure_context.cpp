@@ -837,13 +837,17 @@ struct EnclosureContext::Impl final {
     {
         std::array<detail::ReadyEvent, detail::kListenerIoEventCapacity> events{};
         std::size_t count = 0U;
-        const Timeout bounded{std::min<std::uint32_t>(timeout.milliseconds, 100U)};
+        const std::uint64_t before_wait_ms = family->time().monotonic_ms();
+        const std::uint32_t max_wait_ms =
+            std::min<std::uint32_t>(timeout.milliseconds, 100U);
+        const Timeout bounded{bridge->admission_wait_limit_ms(
+            before_wait_ms, max_wait_ms)};
         const Error waited = io->poll(workers->wake_fd(), bounded, events.data(),
                                       events.size(), count);
         if (waited != Error::OK) return Result<void>::failure(waited);
         if (count > events.size()) return Result<void>::failure(Error::PROTOCOL_ERROR);
         process_events(events.data(), count);
-        const Error advanced = bridge->poll();
+        const Error advanced = bridge->poll(family->time().monotonic_ms());
         complete_control_responses();
         pump_data();
         return advanced == Error::OK ? Result<void>::success()

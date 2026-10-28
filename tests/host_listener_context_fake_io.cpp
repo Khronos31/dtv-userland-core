@@ -41,6 +41,7 @@ struct FakeListenerIoControl::Impl final {
     bool poll_entered = false;
     std::size_t unpublish_count = 0U;
     std::size_t namespace_release_count = 0U;
+    std::uint32_t last_poll_timeout_ms = 0U;
 };
 
 namespace {
@@ -75,6 +76,7 @@ public:
     {
         std::unique_lock<std::mutex> lock(state_.mutex);
         state_.poll_entered = true;
+        state_.last_poll_timeout_ms = timeout.milliseconds;
         state_.changed.notify_all();
         auto ready = [this] {
             if (!state_.pending.empty()) return true;
@@ -82,8 +84,8 @@ public:
                 if (connection.closed) continue;
                 if ((connection.interest & ready_write) != 0U &&
                     !connection.write_blocked) return true;
-                if ((connection.interest & ready_read) != 0U &&
-                    (connection.input_offset < connection.input.size() || connection.eof))
+                if (connection.eof || ((connection.interest & ready_read) != 0U &&
+                    connection.input_offset < connection.input.size()))
                     return true;
             }
             return false;
@@ -103,8 +105,9 @@ public:
             if (connection.closed) continue;
             std::uint8_t flags = 0U;
             if ((connection.interest & ready_read) != 0U &&
-                (connection.input_offset < connection.input.size() || connection.eof))
+                connection.input_offset < connection.input.size())
                 flags |= ready_read;
+            if (connection.eof) flags |= ready_hangup;
             if ((connection.interest & ready_write) != 0U &&
                 !connection.write_blocked) flags |= ready_write;
             if (flags != 0U)
@@ -240,6 +243,14 @@ void FakeListenerIoControl::send(ConnectionToken connection, ByteView input)
     impl_->changed.notify_all();
 }
 
+void FakeListenerIoControl::disconnect(ConnectionToken connection)
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    if (connection.value < 3U || connection.value - 3U >= impl_->connections.size()) return;
+    impl_->connections[static_cast<std::size_t>(connection.value - 3U)].eof = true;
+    impl_->changed.notify_all();
+}
+
 bool FakeListenerIoControl::closed(ConnectionToken connection) const
 {
     std::lock_guard<std::mutex> lock(impl_->mutex);
@@ -324,6 +335,12 @@ std::size_t FakeListenerIoControl::namespace_release_count() const
 {
     std::lock_guard<std::mutex> lock(impl_->mutex);
     return impl_->namespace_release_count;
+}
+
+std::uint32_t FakeListenerIoControl::last_poll_timeout_ms() const
+{
+    std::lock_guard<std::mutex> lock(impl_->mutex);
+    return impl_->last_poll_timeout_ms;
 }
 
 void set_fake_listener_io_control(FakeListenerIoControl* control) noexcept

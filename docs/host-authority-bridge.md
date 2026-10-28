@@ -76,3 +76,11 @@ ticket remain pending for a later `poll()` retry. Full response-send
 confirmation still releases the one-outstanding-request gate; partial response
 handling closes the session through the existing path. CARD/LNB dispatch, OS
 listeners, product producers/pins, and deployment remain outside this increment.
+
+The shared `EnclosureContext` poll path processes socket events before draining
+worker completions and retrying one retained TUNE admission. It supplies the
+same monotonic millisecond clock used when the request was accepted. While an
+admission is pending, the poll wait is bounded by its earliest existing TUNE
+deadline as well as the caller's existing wait limit; no new retry interval is
+introduced. An observed control close is therefore applied before the poll
+turn's admission retry.

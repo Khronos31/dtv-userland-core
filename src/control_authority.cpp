@@ -375,6 +375,26 @@ AuthorityPollResult ControlAuthority::retry_pending_admission(
     return result;
 }
 
+std::uint32_t ControlAuthority::admission_wait_limit_ms(
+    std::uint64_t now_ms, std::uint32_t max_wait_ms) const noexcept
+{
+    std::uint64_t wait_ms = max_wait_ms;
+    for (const ControlServiceSession* session = sessions_; session != nullptr;
+         session = session->next_) {
+        if (!session->pending_admission_) continue;
+        const std::uint64_t accepted_at_ms =
+            session->pending_admission_accepted_at_ms_;
+        const std::uint64_t timeout_ms =
+            session->pending_admission_request_.timeout_ms;
+        const std::uint64_t elapsed_ms = now_ms >= accepted_at_ms
+            ? now_ms - accepted_at_ms : 0U;
+        if (elapsed_ms >= timeout_ms) return 0U;
+        const std::uint64_t remaining_ms = timeout_ms - elapsed_ms;
+        if (remaining_ms < wait_ms) wait_ms = remaining_ms;
+    }
+    return static_cast<std::uint32_t>(wait_ms);
+}
+
 AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
                                            const wire::ControlRequest& request,
                                            const wire::Context& context,

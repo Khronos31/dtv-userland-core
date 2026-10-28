@@ -21,6 +21,7 @@ public:
         dtv::userland::ByteView input = {nullptr, 0U});
     void send(dtv::userland::host_listener_context::detail::ConnectionToken connection,
               dtv::userland::ByteView input);
+    void disconnect(dtv::userland::host_listener_context::detail::ConnectionToken connection);
     std::vector<std::uint8_t> output(
         dtv::userland::host_listener_context::detail::ConnectionToken connection) const;
     bool closed(dtv::userland::host_listener_context::detail::ConnectionToken connection) const;
@@ -38,6 +39,7 @@ public:
     bool published() const;
     std::size_t unpublish_count() const;
     std::size_t namespace_release_count() const;
+    std::uint32_t last_poll_timeout_ms() const;
 
 private:
     friend void set_fake_listener_io_control(FakeListenerIoControl*) noexcept;
