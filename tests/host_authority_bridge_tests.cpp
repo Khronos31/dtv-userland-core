@@ -884,6 +884,8 @@ bool run_invalidated_admission_bridge_close(bool reject_cleanup)
         std::cerr << "admission-close fixture start failed\n";
         return false;
     }
+    const auto before = fixture.tuner.engine_status();
+    if (!before) return false;
 
     fixture.nonce.block_next();
     Result<TunerAcquireResult> blocked =
@@ -929,10 +931,16 @@ bool run_invalidated_admission_bridge_close(bool reject_cleanup)
     }
     const Error first_poll = fixture.bridge->poll();
     const auto first_counts = fixture.bridge->counts();
+    const auto after_first_poll = fixture.tuner.engine_status();
+    const auto stale_response = fixture.bridge->take_response(fixture.control);
     const bool slot_closed = first_poll == Error::OK && first_counts.active == 0U &&
         first_counts.tombstone == 1U &&
         !fixture.bridge->session_connected_for_test(fixture.control) &&
         fixture.bridge->client_id(fixture.control) != 0U;
+    const bool tune_unchanged = after_first_poll &&
+        after_first_poll.value().tune_metadata[2U].revision ==
+            before.value().tune_metadata[2U].revision;
+    const bool no_old_response = stale_response.action != w::InboundAction::respond;
     const bool cleanup_retained = fixture.bridge->retained_disconnect_for_test(
         fixture.control, fixture.bridge->client_id(fixture.control));
     const bool retry_deferred = reject_cleanup && cleanup_retained;
@@ -955,12 +963,15 @@ bool run_invalidated_admission_bridge_close(bool reject_cleanup)
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
     const bool stopped = static_cast<bool>(fixture.workers->stop_and_join());
-    const bool passed = slot_closed && (retry_deferred || submit_succeeded) && freed &&
+    const bool passed = slot_closed && tune_unchanged && no_old_response &&
+        (retry_deferred || submit_succeeded) && freed &&
         receiver_lease_cleared && stream_closed && shutdown == Error::OK && stopped;
     if (!passed)
         std::cerr << "admission-close rejected=" << reject_cleanup
                   << " slot-closed=" << slot_closed << " retry-deferred=" << retry_deferred
-                  << " submit-succeeded=" << submit_succeeded << " freed=" << freed
+                  << " submit-succeeded=" << submit_succeeded
+                  << " tune-unchanged=" << tune_unchanged
+                  << " no-old-response=" << no_old_response << " freed=" << freed
                   << " lease-cleared=" << receiver_lease_cleared
                   << " stream-closed=" << stream_closed
                   << " shutdown=" << static_cast<unsigned>(shutdown)
