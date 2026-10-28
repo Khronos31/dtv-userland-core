@@ -986,6 +986,107 @@ bool test_invalidated_admission_bridge_close()
     return submitted && rejected;
 }
 
+bool test_registry_contention_keeps_pending_admission_open()
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start(nullptr, false, false)) return false;
+    const auto before = fixture.tuner.engine_status();
+    if (!before) return false;
+
+    fixture.nonce.block_next();
+    Result<TunerAcquireResult> blocked =
+        Result<TunerAcquireResult>::failure(Error::INTERNAL);
+    std::thread holder([&] { blocked = fixture.tuner.acquire(99U, 4U); });
+    struct GateGuard final {
+        Nonce& nonce;
+        std::thread& holder;
+        ~GateGuard() { nonce.release(); if (holder.joinable()) holder.join(); }
+    } gate_guard{fixture.nonce, holder};
+    if (!fixture.nonce.wait_entered()) {
+        std::cerr << "contention nonce gate did not enter\n";
+        return false;
+    }
+
+    w::TuneRequest request;
+    request.epoch = fixture.list.epoch;
+    request.lease_id = fixture.lease;
+    request.system = w::System::isdb_t;
+    request.frequency_hz = 473142857U;
+    request.timeout_ms = 1000U;
+    std::array<std::uint8_t, 128U> payload{};
+    const auto size = w::encode_tune_request(request, {payload.data(), payload.size()});
+    if (!size) return false;
+    w::Context context;
+    context.epoch = fixture.list.epoch;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+    const auto pending = fixture.bridge->accept(fixture.control,
+        frame(w::kOpcodeTune, 4U, {payload.data(), size.value()}), context, snapshot, 0U);
+    if (!pending.queued ||
+        fixture.bridge->admission_wait_limit_ms(0U, 1000U) != 1000U) {
+        std::cerr << "contention TUNE did not become pending\n";
+        return false;
+    }
+
+    const Error first_poll = fixture.bridge->poll();
+    const auto first_counts = fixture.bridge->counts();
+    const bool first_active = first_counts.active == 1U && first_counts.tombstone == 0U &&
+        fixture.bridge->session_connected_for_test(fixture.control);
+    const Error second_poll = fixture.bridge->poll();
+    const auto second_counts = fixture.bridge->counts();
+    const bool second_active = second_counts.active == 1U && second_counts.tombstone == 0U &&
+        fixture.bridge->session_connected_for_test(fixture.control);
+    const auto no_response = fixture.bridge->take_response(fixture.control);
+    const bool no_early_response = no_response.action != w::InboundAction::respond;
+
+    fixture.nonce.release();
+    holder.join();
+    const Error retry_poll = fixture.bridge->poll();
+    dtv::userland::detail::AuthorityReply response{};
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (retry_poll == Error::OK && std::chrono::steady_clock::now() < until) {
+        response = fixture.bridge->take_response(fixture.control);
+        if (response.action == w::InboundAction::respond) break;
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto header = w::decode_header({response.frame.data, w::kHeaderSize});
+    const bool tune_completed = response.action == w::InboundAction::respond && header &&
+        header.value().kind == w::Kind::response &&
+        header.value().opcode == w::kOpcodeTune &&
+        fixture.bridge->response_sent(fixture.control, true) == Error::OK;
+    const auto after = fixture.tuner.engine_status();
+    const bool tune_advanced = after &&
+        after.value().tune_metadata[2U].revision >
+            before.value().tune_metadata[2U].revision;
+
+    (void)fixture.tuner.disconnect_client(99U);
+    if (!first_active || !second_active)
+        fixture.bridge->close_session_for_test(fixture.control);
+    else if (fixture.bridge->counts().active != 0U)
+        (void)fixture.bridge->close_session(fixture.control);
+    const Error shutdown = fixture.bridge->begin_shutdown();
+    const auto stop_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() && std::chrono::steady_clock::now() < stop_until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool stopped = static_cast<bool>(fixture.workers->stop_and_join());
+    const bool passed = blocked && first_poll == Error::OK && second_poll == Error::OK &&
+        first_active && second_active && no_early_response && retry_poll == Error::OK &&
+        tune_completed && tune_advanced && shutdown == Error::OK && stopped;
+    if (!passed)
+        std::cerr << "contention pending active=" << first_active << "/" << second_active
+                  << " poll=" << static_cast<unsigned>(first_poll) << "/"
+                  << static_cast<unsigned>(second_poll) << "/"
+                  << static_cast<unsigned>(retry_poll) << " early-response="
+                  << no_early_response << " tune-completed=" << tune_completed
+                  << " tune-advanced=" << tune_advanced
+                  << " shutdown=" << static_cast<unsigned>(shutdown)
+                  << " stopped=" << stopped << "\n";
+    return passed;
+}
+
 bool test_attached_missing_final_stays_fatal()
 {
     ActiveStreamFixture fixture(true);
@@ -3562,6 +3663,8 @@ int main(int argc, char** argv)
         else if (selected == "n5") passed = test_response_sent_retains_rejected_hello_disconnect();
         else if (selected == "admission-close")
             passed = test_invalidated_admission_bridge_close();
+        else if (selected == "admission-contention")
+            passed = test_registry_contention_keeps_pending_admission_open();
         else return 2;
         if (!passed) return 1;
         return 0;
@@ -3572,7 +3675,8 @@ int main(int argc, char** argv)
         !test_finish_control_close_waits_for_owned_stream() ||
         !test_accept_preserves_close_pending_before_poll() ||
         !test_response_sent_retains_rejected_hello_disconnect() ||
-        !test_invalidated_admission_bridge_close()) {
+        !test_invalidated_admission_bridge_close() ||
+        !test_registry_contention_keeps_pending_admission_open()) {
         std::cerr << "stream guard direct-observation fixture failed\n";
         return 1;
     }

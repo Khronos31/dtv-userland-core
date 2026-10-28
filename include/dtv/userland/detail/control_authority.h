@@ -144,6 +144,7 @@ struct AuthorityPollResult final {
     // wire response from a retained request or a newly published worker job.
     bool attempted = false;
     bool reply_ready = false;
+    bool close_required = false;
 };
 
 struct FunctionPresenceObservation final {

@@ -497,6 +497,7 @@ AuthorityPollResult ControlAuthority::retry_pending_admission(
     result.session = session;
     if (presence_cache_enabled_ && presence_epoch_invalidated_) {
         result.reply.action = wire::InboundAction::close;
+        result.close_required = true;
         result.reply.cleanup = close_cleanup(*session);
         if (!executor.submit(result.reply.cleanup)) result.reply.cleanup_required = true;
         return result;

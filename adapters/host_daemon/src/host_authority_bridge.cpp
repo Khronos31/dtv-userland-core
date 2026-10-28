@@ -1375,7 +1375,7 @@ Error HostAuthorityBridge::poll(std::uint64_t now_ms) noexcept
     const auto admission = authority_owner_.authority().retry_pending_admission(
         now_ms, *this);
     bool admission_closed = false;
-    if (admission.session != nullptr &&
+    if (admission.close_required && admission.session != nullptr &&
         admission.reply.action == dtv::userland::wire::InboundAction::close) {
         std::size_t index = kHostAuthoritySessionCapacity;
         for (std::size_t i = 0U; slots_ && i < kHostAuthoritySessionCapacity; ++i) {
