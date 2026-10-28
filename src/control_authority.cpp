@@ -236,6 +236,64 @@ void ControlAuthority::forget_lease(ControlServiceSession& session,
     }
 }
 
+bool ControlAuthority::queue_admission(ControlServiceSession& session) noexcept
+{
+    if (admission_queue_count_ == admission_queue_.size()) return false;
+    const std::size_t tail = (admission_queue_head_ + admission_queue_count_) %
+                             admission_queue_.size();
+    admission_queue_[tail] = &session;
+    ++admission_queue_count_;
+    return true;
+}
+
+void ControlAuthority::remove_admission(ControlServiceSession& session) noexcept
+{
+    for (std::size_t i = 0U; i < admission_queue_count_; ++i) {
+        const std::size_t index = (admission_queue_head_ + i) % admission_queue_.size();
+        if (admission_queue_[index] != &session) continue;
+        for (std::size_t j = i; j + 1U < admission_queue_count_; ++j) {
+            const std::size_t current = (admission_queue_head_ + j) % admission_queue_.size();
+            const std::size_t next = (admission_queue_head_ + j + 1U) % admission_queue_.size();
+            admission_queue_[current] = admission_queue_[next];
+        }
+        const std::size_t tail = (admission_queue_head_ + admission_queue_count_ - 1U) %
+                                 admission_queue_.size();
+        admission_queue_[tail] = nullptr;
+        --admission_queue_count_;
+        return;
+    }
+}
+
+AuthorityReply ControlAuthority::submit_admitted_tune(
+    ControlServiceSession& session, const wire::ControlRequest& request,
+    const AdmittedTune& ticket, ControlAuthorityExecutor& executor) noexcept
+{
+    AuthorityJob job;
+    job.kind = AuthorityJobKind::tune;
+    job.key = SessionKey{session.client_id_, request.request_id};
+    job.tune = ticket;
+    if (!executor.submit(job)) {
+        (void)engine_.abort_unstarted_tune(ticket, Error::RESOURCE_LIMIT);
+        session.pending_ = false;
+        session.pending_admission_ = false;
+        return error_reply(session, request.opcode, request.request_id,
+                           Error::RESOURCE_LIMIT, "tune");
+    }
+    session.pending_ = true;
+    session.pending_admission_ = false;
+    session.pending_request_id_ = request.request_id;
+    session.pending_lease_id_ = request.tune.lease_id;
+    session.pending_tune_revision_ = ticket.tune_revision;
+    session.pending_kind_ = AuthorityJobKind::tune;
+    session.pending_requested_hz_ = request.tune.frequency_hz;
+    session.pending_selection_ = request.tune.selection;
+    session.pending_selection_value_ = request.tune.selection_value;
+    AuthorityReply queued;
+    queued.action = wire::InboundAction::dispatch;
+    queued.queued = true;
+    return queued;
+}
+
 AuthorityReply ControlAuthority::accept(ControlServiceSession& session,
                                         const wire::Frame& frame,
                                         const wire::Context& context,
@@ -257,6 +315,64 @@ AuthorityReply ControlAuthority::accept(ControlServiceSession& session,
         return reply(session, inbound.reply_size, inbound.close_after_reply);
     return dispatch(session, session.connection_request_, context, snapshot,
                     accepted_at_ms, executor);
+}
+
+AuthorityPollResult ControlAuthority::retry_pending_admission(
+    std::uint64_t now_ms, ControlAuthorityExecutor& executor) noexcept
+{
+    AuthorityPollResult result;
+    ControlServiceSession* session = nullptr;
+    while (admission_queue_count_ != 0U) {
+        session = admission_queue_[admission_queue_head_];
+        admission_queue_[admission_queue_head_] = nullptr;
+        admission_queue_head_ = (admission_queue_head_ + 1U) % admission_queue_.size();
+        --admission_queue_count_;
+        if (session != nullptr && session->pending_admission_ && session->connected() &&
+            find_session(session->client_id_) == session)
+            break;
+        session = nullptr;
+    }
+    if (session == nullptr) return result;
+
+    result.attempted = true;
+    result.session = session;
+    const wire::ControlRequest& request = session->connection_request_;
+    const std::uint64_t accepted_at_ms = session->pending_admission_accepted_at_ms_;
+    if (now_ms >= accepted_at_ms &&
+        now_ms - accepted_at_ms >= session->pending_admission_request_.timeout_ms) {
+        session->pending_admission_ = false;
+        session->pending_ = false;
+        result.reply = error_reply(*session, request.opcode, request.request_id,
+                                   Error::TIMEOUT, "tune");
+        result.reply_ready = true;
+        return result;
+    }
+
+    TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+    const auto ticket = engine_.try_admit_tune_detailed(
+        session->client_id_, session->pending_admission_request_,
+        accepted_at_ms, failure);
+    if (!ticket && failure == TuneAdmissionFailure::registry_contention) {
+        if (!queue_admission(*session)) {
+            session->pending_admission_ = false;
+            session->pending_ = false;
+            result.reply = error_reply(*session, request.opcode, request.request_id,
+                                       Error::RESOURCE_LIMIT, "tune");
+            result.reply_ready = true;
+        }
+        return result;
+    }
+    if (!ticket) {
+        session->pending_admission_ = false;
+        session->pending_ = false;
+        result.reply = error_reply(*session, request.opcode, request.request_id,
+                                   ticket.error(), "tune");
+        result.reply_ready = true;
+        return result;
+    }
+    result.reply = submit_admitted_tune(*session, request, ticket.value(), executor);
+    result.reply_ready = result.reply.action == wire::InboundAction::respond;
+    return result;
 }
 
 AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
@@ -379,33 +495,39 @@ AuthorityReply ControlAuthority::dispatch(ControlServiceSession& session,
             engine_request.slot = request.tune.selection_value;
         if (request.tune.lnb_voltage.present)
             engine_request.lnb_voltage = request.tune.lnb_voltage.value;
-        const auto ticket = engine_.try_admit_tune(session.client_id_, engine_request,
-                                                    accepted_at_ms);
+        TuneAdmissionFailure failure = TuneAdmissionFailure::none;
+        const auto ticket = engine_.try_admit_tune_detailed(
+            session.client_id_, engine_request, accepted_at_ms, failure);
+        if (!ticket && failure == TuneAdmissionFailure::registry_contention) {
+            if (admission_queue_count_ == admission_queue_.size())
+                return error_reply(session, request.opcode, request.request_id,
+                                   Error::RESOURCE_LIMIT, "tune");
+            session.pending_ = true;
+            session.pending_admission_ = true;
+            session.pending_request_id_ = request.request_id;
+            session.pending_kind_ = AuthorityJobKind::tune;
+            session.pending_receiver_ = receiver;
+            session.pending_requested_hz_ = request.tune.frequency_hz;
+            session.pending_selection_ = request.tune.selection;
+            session.pending_selection_value_ = request.tune.selection_value;
+            session.pending_admission_request_ = engine_request;
+            session.pending_admission_accepted_at_ms_ = accepted_at_ms;
+            if (!queue_admission(session)) {
+                session.pending_ = false;
+                session.pending_admission_ = false;
+                return error_reply(session, request.opcode, request.request_id,
+                                   Error::RESOURCE_LIMIT, "tune");
+            }
+            AuthorityReply queued;
+            queued.action = wire::InboundAction::dispatch;
+            queued.queued = true;
+            return queued;
+        }
         if (!ticket)
             return error_reply(session, request.opcode, request.request_id,
                                ticket.error(), "tune");
-        AuthorityJob job;
-        job.kind = AuthorityJobKind::tune;
-        job.key = SessionKey{session.client_id_, request.request_id};
-        job.tune = ticket.value();
-        if (!executor.submit(job)) {
-            (void)engine_.abort_unstarted_tune(ticket.value(), Error::RESOURCE_LIMIT);
-            return error_reply(session, request.opcode, request.request_id,
-                               Error::RESOURCE_LIMIT, "tune");
-        }
-        session.pending_ = true;
-        session.pending_request_id_ = request.request_id;
-        session.pending_lease_id_ = request.tune.lease_id;
-        session.pending_tune_revision_ = ticket.value().tune_revision;
         session.pending_receiver_ = receiver;
-        session.pending_kind_ = AuthorityJobKind::tune;
-        session.pending_requested_hz_ = request.tune.frequency_hz;
-        session.pending_selection_ = request.tune.selection;
-        session.pending_selection_value_ = request.tune.selection_value;
-        AuthorityReply queued;
-        queued.action = wire::InboundAction::dispatch;
-        queued.queued = true;
-        return queued;
+        return submit_admitted_tune(session, request, ticket.value(), executor);
     }
     case wire::ControlRequestKind::release: {
         if (session.pending_)
@@ -623,6 +745,11 @@ AuthorityCleanup ControlAuthority::close_cleanup(ControlServiceSession& session)
 {
     AuthorityCleanup job;
     if (&session.authority_ != this || !session.connected()) return job;
+    if (session.pending_admission_) {
+        remove_admission(session);
+        session.pending_admission_ = false;
+        session.pending_ = false;
+    }
     if (session.pending_ &&
         (session.pending_kind_ == AuthorityJobKind::acquire ||
          session.pending_kind_ == AuthorityJobKind::rollback_release)) {
@@ -653,6 +780,7 @@ AuthorityReply ControlAuthority::complete(const SessionKey& key, Error result) n
 {
     ControlServiceSession* session = find_session(key.client_id);
     if (session == nullptr || !session->pending_ ||
+        session->pending_admission_ ||
         session->pending_request_id_ != key.request_id)
         return {};
     if (session->pending_kind_ == AuthorityJobKind::acquire ||
@@ -712,6 +840,7 @@ AuthorityReply ControlAuthority::complete(const AuthorityCompletion& completion)
     const SessionKey& key = completion.key;
     ControlServiceSession* session = find_session(key.client_id);
     if (session == nullptr || !session->pending_ ||
+        session->pending_admission_ ||
         session->pending_request_id_ != key.request_id ||
         session->pending_kind_ != completion.kind)
         return {};

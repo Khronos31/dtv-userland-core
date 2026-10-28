@@ -58,6 +58,8 @@ public:
                 condition.wait(lock, [&] { return !block_tune; });
             }
         }
+        if (tune_error != Error::OK)
+            return Result<TuneProgramming>::failure(tune_error);
         return Result<TuneProgramming>::success(TuneProgramming{requested_hz + 9U});
     }
     Result<bool> is_locked(ReceiverId, ReceiverSystem) noexcept override
@@ -148,14 +150,42 @@ public:
     std::atomic<int> khz_calls{0};
     std::atomic<int> close_calls{0};
     Error close_error = Error::OK;
+    Error tune_error = Error::OK;
 };
 
 class Tokens final : public ReceiverTokenSource {
 public:
     Result<ReceiverToken> generate() noexcept override
     {
+        std::unique_lock<std::mutex> lock(mutex);
+        if (block) {
+            entered = true;
+            condition.notify_all();
+            condition.wait(lock, [&] { return !block; });
+        }
         return Result<ReceiverToken>::success(ReceiverToken{17U});
     }
+    void arm()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        entered = false;
+        block = true;
+    }
+    void wait_entered()
+    {
+        std::unique_lock<std::mutex> lock(mutex);
+        condition.wait(lock, [&] { return entered; });
+    }
+    void open()
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        block = false;
+        condition.notify_all();
+    }
+    std::mutex mutex;
+    std::condition_variable condition;
+    bool block = false;
+    bool entered = false;
 };
 
 class Clock final : public ReceiverClock {
@@ -308,6 +338,26 @@ std::uint64_t acquired_lease(const AuthorityReply& reply)
     const auto response = w::decode_acquire_response(
         {reply.frame.data + w::kHeaderSize, w::kAcquireResponseSize});
     return response ? response.value().lease_id : 0U;
+}
+
+AuthorityReply tune(ControlAuthority& authority, ControlServiceSession& session,
+                    Executor& executor, const w::ServerHello& server,
+                    const w::Context& context, const w::Snapshot& snapshot,
+                    std::uint32_t request_id, std::uint64_t lease_id,
+                    std::uint64_t frequency_hz, std::uint32_t timeout_ms,
+                    std::uint64_t accepted_at_ms)
+{
+    w::TuneRequest request;
+    request.epoch = server.epoch;
+    request.lease_id = lease_id;
+    request.frequency_hz = frequency_hz;
+    request.timeout_ms = timeout_ms;
+    std::array<std::uint8_t, 128U> payload{};
+    const auto size = w::encode_tune_request(request, {payload.data(), payload.size()});
+    if (!size) return {};
+    return authority.accept(session,
+        frame(w::kOpcodeTune, request_id, {payload.data(), size.value()}),
+        context, snapshot, accepted_at_ms, executor);
 }
 
 bool test_projection_lease_tune_and_gate()
@@ -1157,6 +1207,205 @@ bool test_internal_card_status_queue_and_completion()
     return true;
 }
 
+bool test_deferred_admission_fairness_and_session_order()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 4U> ids{{17U, 18U, 19U, 20U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const std::array<ReceiverCapability, 4U> capabilities{{
+        {17U, true, false, true}, {18U, true, false, true},
+        {19U, true, false, true}, {20U, true, false, true}}};
+    CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+    const auto list = make_list(ids.data(), ids.size());
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession first(authority);
+    ControlServiceSession second(authority);
+    ControlServiceSession third(authority);
+    Executor executor;
+    CHECK(authority.open(first) == Error::OK && hello(authority, first, executor));
+    CHECK(authority.open(second) == Error::OK && hello(authority, second, executor));
+    CHECK(authority.open(third) == Error::OK && hello(authority, third, executor));
+    const std::uint64_t first_lease = acquired_lease(
+        acquire(authority, engine, first, executor, 2U, 17U));
+    const std::uint64_t second_lease = acquired_lease(
+        acquire(authority, engine, second, executor, 2U, 18U));
+    const std::uint64_t third_lease = acquired_lease(
+        acquire(authority, engine, third, executor, 2U, 19U));
+    CHECK(first_lease != 0U && second_lease != 0U && third_lease != 0U);
+    CHECK(send_full(authority, first, executor) == Error::OK &&
+          send_full(authority, second, executor) == Error::OK &&
+          send_full(authority, third, executor) == Error::OK);
+
+    tokens.arm();
+    Result<AcquireResult> gated_acquire = Result<AcquireResult>::failure(Error::INTERNAL);
+    std::thread holder([&] { gated_acquire = engine.acquire(99U, 20U); });
+    struct GateGuard final {
+        Tokens& tokens;
+        std::thread& holder;
+        ~GateGuard() { tokens.open(); if (holder.joinable()) holder.join(); }
+    } gate_guard{tokens, holder};
+    tokens.wait_entered();
+    w::Context context;
+    w::Snapshot snapshot;
+    context.state = w::ContextState::ready;
+    CHECK(tune(authority, first, executor, server, context, snapshot,
+               3U, first_lease, 473142857U, 1000U, clock.now).queued);
+    CHECK(tune(authority, second, executor, server, context, snapshot,
+               3U, second_lease, 473142858U, 1000U, clock.now).queued);
+    CHECK(tune(authority, third, executor, server, context, snapshot,
+               3U, third_lease, 473142859U, 1000U, clock.now).queued);
+    CHECK(executor.count == 0U);
+
+    for (ControlServiceSession* expected : {&first, &second, &third}) {
+        const auto poll = authority.retry_pending_admission(clock.now, executor);
+        CHECK(poll.attempted && !poll.reply_ready && poll.session == expected &&
+              executor.count == 0U);
+    }
+    tokens.open();
+    holder.join();
+    CHECK(gated_acquire);
+    int expected_hz_calls = 0;
+    for (ControlServiceSession* expected : {&first, &second, &third}) {
+        const auto poll = authority.retry_pending_admission(clock.now, executor);
+        CHECK(poll.attempted && !poll.reply_ready && poll.session == expected &&
+              poll.reply.queued && executor.count == 1U);
+        const AuthorityJob job = executor.pop();
+        CHECK(job.kind == AuthorityJobKind::tune && job.key.client_id == expected->client_id() &&
+              job.key.request_id == 3U);
+        const auto completion = ControlAuthority::execute_job_value(engine, job);
+        CHECK(completion.error == Error::OK &&
+              backend.hz_calls.load() == ++expected_hz_calls);
+        const auto reply = authority.complete(completion);
+        const auto header = w::decode_header({reply.frame.data, w::kHeaderSize});
+        CHECK(header && header.value().kind == w::Kind::response &&
+              header.value().request_id == 3U);
+        CHECK(send_full(authority, *expected, executor) == Error::OK);
+    }
+
+    CHECK(tune(authority, first, executor, server, context, snapshot,
+               4U, first_lease, 473142860U, 1000U, clock.now).queued &&
+          executor.count == 1U);
+    const AuthorityJob next = executor.pop();
+    CHECK(next.key.request_id == 4U && next.tune.tune_revision == 2U);
+    const auto next_completion = ControlAuthority::execute_job_value(engine, next);
+    CHECK(next_completion.error == Error::OK && backend.hz_calls == 4);
+    const auto next_reply = authority.complete(next_completion);
+    const auto next_header = w::decode_header({next_reply.frame.data, w::kHeaderSize});
+    CHECK(next_header && next_header.value().request_id == 4U);
+    CHECK(send_full(authority, first, executor) == Error::OK);
+
+    const auto busy_ticket = engine.try_admit_tune(first.client_id(),
+        HzTuneRequest{first_lease, ReceiverSystem::terrestrial, 473142861U}, clock.now);
+    CHECK(busy_ticket);
+    const auto receiver_busy = tune(authority, first, executor, server, context, snapshot,
+        5U, first_lease, 473142862U, 1000U, clock.now);
+    CHECK(receiver_busy.action == w::InboundAction::respond && executor.count == 0U);
+    const auto receiver_error = w::decode_error_response(
+        {receiver_busy.frame.data + w::kHeaderSize,
+         receiver_busy.frame.size - w::kHeaderSize});
+    CHECK(receiver_error && receiver_error.value().error.code ==
+          static_cast<std::uint32_t>(Error::BUSY));
+    CHECK(!authority.retry_pending_admission(clock.now, executor).attempted);
+    CHECK(engine.abort_unstarted_tune(busy_ticket.value(), Error::BUSY));
+    CHECK(send_full(authority, first, executor) == Error::OK);
+
+    backend.tune_error = Error::BUSY;
+    CHECK(tune(authority, first, executor, server, context, snapshot,
+               6U, first_lease, 473142863U, 1000U, clock.now).queued &&
+          executor.count == 1U);
+    const auto backend_busy = ControlAuthority::execute_job_value(engine, executor.pop());
+    CHECK(backend_busy.error == Error::BUSY && backend.hz_calls == 5);
+    const auto backend_reply = authority.complete(backend_busy);
+    const auto backend_error = w::decode_error_response(
+        {backend_reply.frame.data + w::kHeaderSize,
+         backend_reply.frame.size - w::kHeaderSize});
+    CHECK(backend_error && backend_error.value().error.code ==
+          static_cast<std::uint32_t>(Error::BUSY));
+    CHECK(!authority.retry_pending_admission(clock.now, executor).attempted &&
+          executor.count == 0U);
+    CHECK(send_full(authority, first, executor) == Error::OK);
+
+    for (ControlServiceSession* session : {&first, &second, &third}) {
+        const AuthorityJob cleanup = authority.close(*session);
+        CHECK(ControlAuthority::execute_job(engine, cleanup) == Error::OK);
+    }
+    CHECK(engine.disconnect_client(99U));
+    return true;
+}
+
+bool test_deferred_admission_deadline_and_observed_close()
+{
+    Backend backend;
+    Tokens tokens;
+    Clock clock;
+    const std::array<ReceiverId, 2U> ids{{17U, 18U}};
+    ReceiverEngine engine(backend, ids.data(), ids.size(), tokens, clock);
+    const std::array<ReceiverCapability, 2U> capabilities{{
+        {17U, true, false, true}, {18U, true, false, true}}};
+    CHECK(engine.configure_strict_capabilities(capabilities.data(), capabilities.size()));
+    const auto list = make_list(ids.data(), ids.size());
+    w::ServerHello server;
+    server.epoch = list.epoch;
+    server.producer = list.producer;
+    ControlAuthority authority(server, list, engine);
+    ControlServiceSession session(authority);
+    Executor executor;
+    CHECK(authority.open(session) == Error::OK && hello(authority, session, executor));
+    const std::uint64_t lease = acquired_lease(
+        acquire(authority, engine, session, executor, 2U, 17U));
+    CHECK(lease != 0U && send_full(authority, session, executor) == Error::OK);
+    w::Context context;
+    context.state = w::ContextState::ready;
+    w::Snapshot snapshot;
+
+    tokens.arm();
+    Result<AcquireResult> gated_acquire = Result<AcquireResult>::failure(Error::INTERNAL);
+    std::thread holder([&] { gated_acquire = engine.acquire(99U, 18U); });
+    struct GateGuard final {
+        Tokens& tokens;
+        std::thread& holder;
+        ~GateGuard() { tokens.open(); if (holder.joinable()) holder.join(); }
+    } gate_guard{tokens, holder};
+    tokens.wait_entered();
+    CHECK(tune(authority, session, executor, server, context, snapshot,
+               3U, lease, 473142857U, 20U, 100U).queued);
+    const auto expired = authority.retry_pending_admission(120U, executor);
+    CHECK(expired.attempted && expired.reply_ready && expired.session == &session &&
+          executor.count == 0U && backend.hz_calls == 0);
+    const auto expired_error = w::decode_error_response(
+        {expired.reply.frame.data + w::kHeaderSize,
+         expired.reply.frame.size - w::kHeaderSize});
+    CHECK(expired_error && expired_error.value().error.code ==
+          static_cast<std::uint32_t>(Error::TIMEOUT));
+    CHECK(send_full(authority, session, executor) == Error::OK);
+
+    CHECK(tune(authority, session, executor, server, context, snapshot,
+               4U, lease, 473142858U, 1000U, 200U).queued);
+    // A short independent client deadline has elapsed; its close is now
+    // observed by the server before the next admission poll.
+    tokens.open();
+    holder.join();
+    CHECK(gated_acquire);
+    const AuthorityJob cleanup = authority.close(session);
+    CHECK(cleanup.kind == AuthorityJobKind::disconnect && !session.connected());
+    const auto after_timeout = engine.status();
+    CHECK(after_timeout && after_timeout.value().tune_metadata[0U].revision == 0U &&
+          !after_timeout.value().tune_metadata[0U].current_valid);
+    CHECK(!authority.retry_pending_admission(201U, executor).attempted &&
+          executor.count == 0U && backend.hz_calls == 0);
+    CHECK(ControlAuthority::execute_job(engine, cleanup) == Error::OK);
+    const auto after_close = engine.status();
+    CHECK(after_close && after_close.value().tune_metadata[0U].revision == 0U &&
+          after_close.value().states[0U] == ReceiverState::free);
+    CHECK(engine.disconnect_client(99U));
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -1172,6 +1421,8 @@ int main()
     if (!test_card_dispatch_rejects_unadvertised_reader()) return 1;
     if (!test_lnb_power_dispatch_and_status()) return 1;
     if (!test_internal_card_status_queue_and_completion()) return 1;
+    if (!test_deferred_admission_fairness_and_session_order()) return 1;
+    if (!test_deferred_admission_deadline_and_observed_close()) return 1;
     std::puts("control authority tests passed");
     return 0;
 }

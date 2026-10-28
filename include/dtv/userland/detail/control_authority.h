@@ -135,6 +135,16 @@ struct AuthorityReply final {
 };
 
 class ControlAuthority;
+class ControlServiceSession;
+
+struct AuthorityPollResult final {
+    ControlServiceSession* session = nullptr;
+    AuthorityReply reply{};
+    // attempted is false when the queue was empty; reply_ready distinguishes a
+    // wire response from a retained request or a newly published worker job.
+    bool attempted = false;
+    bool reply_ready = false;
+};
 
 class ControlServiceSession final {
 public:
@@ -170,9 +180,12 @@ private:
     bool used_ = false;
     bool close_after_reply_ = false;
     std::uint64_t pending_requested_hz_ = 0U;
+    HzTuneRequest pending_admission_request_{};
+    std::uint64_t pending_admission_accepted_at_ms_ = 0U;
     wire::Selection pending_selection_ = wire::Selection::automatic;
     std::uint16_t pending_selection_value_ = 0U;
     bool pending_ = false;
+    bool pending_admission_ = false;
     bool closed_ = false;
     wire::ControlRequestKind pending_card_kind_ = wire::ControlRequestKind::card_status;
     std::uint16_t pending_card_opcode_ = 0U;
@@ -198,6 +211,11 @@ public:
                           const wire::Context& context, const wire::Snapshot& snapshot,
                           std::uint64_t accepted_at_ms,
                           ControlAuthorityExecutor& executor) noexcept;
+    // Attempts one retained TUNE admission without waiting.  The event-loop
+    // owner supplies now_ms in the Engine monotonic clock domain and routes a
+    // reply only when reply_ready is true.
+    AuthorityPollResult retry_pending_admission(std::uint64_t now_ms,
+                                                ControlAuthorityExecutor& executor) noexcept;
     AuthorityJob close(ControlServiceSession& session) noexcept;
     AuthorityReply complete(const AuthorityCompletion& completion) noexcept;
     AuthorityReply complete(const SessionKey& key, Error result) noexcept;
@@ -227,6 +245,12 @@ private:
     bool remember_lease(ControlServiceSession& session, std::uint64_t lease_id,
                         ReceiverId receiver) noexcept;
     void forget_lease(ControlServiceSession& session, std::uint64_t lease_id) noexcept;
+    bool queue_admission(ControlServiceSession& session) noexcept;
+    void remove_admission(ControlServiceSession& session) noexcept;
+    AuthorityReply submit_admitted_tune(ControlServiceSession& session,
+                                        const wire::ControlRequest& request,
+                                        const AdmittedTune& ticket,
+                                        ControlAuthorityExecutor& executor) noexcept;
     AuthorityCleanup close_cleanup(ControlServiceSession& session) noexcept;
     AuthorityJob disconnect_job(ControlServiceSession& session) noexcept;
 
@@ -235,6 +259,9 @@ private:
     ReceiverEngine& engine_;
     TuneValidator validate_tune_;
     ControlServiceSession* sessions_ = nullptr;
+    std::array<ControlServiceSession*, kReceiverEngineCapacity> admission_queue_{};
+    std::size_t admission_queue_head_ = 0U;
+    std::size_t admission_queue_count_ = 0U;
     ClientIdAllocator client_ids_{kAuthorityClientIdFirst, UINT64_MAX};
     bool valid_ = false;
     std::uint64_t stream_engine_epoch_ = 0U;
