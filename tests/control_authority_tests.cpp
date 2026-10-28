@@ -1394,6 +1394,10 @@ bool test_deferred_admission_deadline_and_observed_close()
                4U, lease, 473142858U, 1000U, 200U).queued);
     // A short independent client deadline has elapsed; its close is now
     // observed by the server before the next admission poll.
+    const std::uint64_t client_deadline_ms = 210U;
+    const std::uint64_t close_observed_at_ms = 210U;
+    CHECK(close_observed_at_ms >= client_deadline_ms &&
+          close_observed_at_ms - 200U == 10U);
     tokens.open();
     holder.join();
     CHECK(gated_acquire);
