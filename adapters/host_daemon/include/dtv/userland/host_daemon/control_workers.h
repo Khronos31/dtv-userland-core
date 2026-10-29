@@ -46,6 +46,8 @@ struct ControlWorkerStartupOptions final {
     bool reject_next_authority_stream_cleanup_submit = false;
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
+    void (*before_stream_cleanup_execute)(void*) noexcept = nullptr;
+    void* before_stream_cleanup_execute_context = nullptr;
 };
 #endif
 

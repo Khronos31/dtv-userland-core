@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: MIT
 #include "dtv/userland/detail/receiver_engine.h"
 
+#include <cassert>
 #include <cstddef>
 #include <limits>
 
@@ -301,6 +302,7 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
 
     std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
     Lease lease;
+    RetainedStreamFinal retained_final{};
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const int index = find_lease_locked(client_id, lease_id);
@@ -309,6 +311,19 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
             return Result<void>::failure(Error::NOT_FOUND);
         }
         lease = leases_[static_cast<std::size_t>(index)];
+        if (contract_ == StreamContract::v1 && lease.stream_cleanup_completed &&
+            lease.stream_final_valid && lease.stream_final_physical &&
+            !lease.stream_final_released) {
+            retained_final.valid = true;
+            retained_final.ticket = stream_ticket_for(lease, context_epoch_);
+            retained_final.attachment = attachment_for(lease, lease.stream_reservation);
+            retained_final.attachment.token = lease.stream_consumed_token;
+        }
+        if (retained_final.valid && retained_stream_finals_[slot].valid) {
+            set_state_locked(slot, ReceiverState::error);
+            clear_operation_locked(slot);
+            return Result<void>::failure(Error::INTERNAL);
+        }
         leases_[static_cast<std::size_t>(index)] = Lease{};
     }
 
@@ -346,6 +361,8 @@ Result<void> ReceiverEngine::release_lease(std::uint64_t client_id,
             set_state_locked(slot, ReceiverState::error);
         else
             set_state_locked(slot, ReceiverState::free);
+        if (retained_final.valid && !retained_stream_finals_[slot].valid)
+            retained_stream_finals_[slot] = retained_final;
         clear_operation_locked(slot);
     }
     return first == Error::OK ? Result<void>::success()
@@ -867,6 +884,32 @@ bool ReceiverEngine::stream_cleanup_ticket_matches_locked(
            lease.stream_consumed_token == ticket.token;
 }
 
+bool ReceiverEngine::same_stream_ticket(const StreamAttachTicket& left,
+                                        const StreamAttachTicket& right) noexcept
+{
+    return left.epoch == right.epoch && left.client_id == right.client_id &&
+           left.lease_instance == right.lease_instance && left.slot == right.slot &&
+           left.stream_id == right.stream_id && left.revision == right.revision &&
+           left.reservation == right.reservation && left.token == right.token &&
+           left.deadline_ms == right.deadline_ms;
+}
+
+StreamAttachTicket ReceiverEngine::stream_ticket_for(const Lease& lease,
+                                                     std::uint64_t epoch) noexcept
+{
+    StreamAttachTicket ticket{};
+    ticket.epoch = epoch;
+    ticket.client_id = lease.client_id;
+    ticket.lease_instance = lease.instance;
+    ticket.slot = lease.slot;
+    ticket.stream_id = lease.stream_id;
+    ticket.revision = lease.stream_revision;
+    ticket.reservation = lease.stream_reservation;
+    ticket.token = lease.stream_consumed_token;
+    ticket.deadline_ms = lease.stream_deadline_ms;
+    return ticket;
+}
+
 StreamStopResult ReceiverEngine::stop_result_of(const Lease& lease) noexcept
 {
     StreamStopResult result{};
@@ -945,6 +988,12 @@ Result<StreamStartResult> ReceiverEngine::start_stream_v1(
     if (revision == 0U || !tune_metadata_[slot].current_valid ||
         tune_metadata_[slot].current_revision != revision)
         return Result<StreamStartResult>::failure(Error::INVALID_ARGUMENT);
+    const bool retain_final = lease.stream_cleanup_completed &&
+                              lease.stream_final_valid &&
+                              lease.stream_final_physical &&
+                              !lease.stream_final_released;
+    if (retain_final && retained_stream_finals_[slot].valid)
+        return Result<StreamStartResult>::failure(Error::INTERNAL);
     // Nonwrapping stream-ID and reservation issuance before any mutation.
     if (next_stream_id_ == std::numeric_limits<std::uint64_t>::max())
         return Result<StreamStartResult>::failure(Error::RESOURCE_LIMIT);
@@ -956,6 +1005,13 @@ Result<StreamStartResult> ReceiverEngine::start_stream_v1(
     ++next_stream_id_;
     const std::uint64_t reservation = next_reservation_;
     ++next_reservation_;
+    if (retain_final) {
+        RetainedStreamFinal& retained = retained_stream_finals_[slot];
+        retained.valid = true;
+        retained.ticket = stream_ticket_for(lease, context_epoch_);
+        retained.attachment = attachment_for(lease, lease.stream_reservation);
+        retained.attachment.token = lease.stream_consumed_token;
+    }
     // Overflow-safe, nonwrapping armed deadline.
     const std::uint64_t expires_at_ms =
         now_ms > std::numeric_limits<std::uint64_t>::max() - arm_budget_ms
@@ -983,6 +1039,8 @@ Result<StreamStartResult> ReceiverEngine::start_stream_v1(
     lease.stream_quiesced = false;
     lease.stream_cleanup_error = Error::OK;
     lease.stream_final_valid = false;
+    lease.stream_final_physical = false;
+    lease.stream_final_released = false;
     lease.stream_final_terminal = 0U;
     lease.stream_final_stream_id = 0U;
     lease.stream_state = StreamState::armed;
@@ -1028,6 +1086,8 @@ Result<StreamAttachTicket> ReceiverEngine::reserve_attach_v1(
         lease.stream_id = 0U;
         return Result<StreamAttachTicket>::failure(Error::TIMEOUT);
     }
+    if (retained_stream_finals_[lease.slot].valid)
+        return Result<StreamAttachTicket>::failure(Error::BUSY);
     if (next_reservation_ == std::numeric_limits<std::uint64_t>::max())
         return Result<StreamAttachTicket>::failure(Error::RESOURCE_LIMIT);
     const std::uint64_t reservation = next_reservation_;
@@ -1395,10 +1455,12 @@ Result<void> ReceiverEngine::run_stream_cleanup_v1(
         if (!stopped) first = stopped.error();
     }
     bool detach_clean = true;
+    bool final_created = false;
     if (attached_maybe && stream_control_ != nullptr) {
         const auto detached = stream_control_->detach(attachment);
         observe_disconnect(slot, detached.error());
         detach_clean = detached || detached.error() == Error::NOT_FOUND;
+        final_created = static_cast<bool>(detached);
         if (!detach_clean && first == Error::OK) first = detached.error();
     }
     {
@@ -1406,6 +1468,8 @@ Result<void> ReceiverEngine::run_stream_cleanup_v1(
         const int index = find_lease_locked(client_id, lease_id);
         if (index >= 0 && leases_[static_cast<std::size_t>(index)].instance ==
                               ticket.lease_instance) {
+            if (final_created)
+                leases_[static_cast<std::size_t>(index)].stream_final_physical = true;
             record_stream_cleanup_locked(slot, first, detach_clean && first == Error::OK);
         }
     }
@@ -1447,6 +1511,59 @@ Result<Attachment> ReceiverEngine::stream_attachment_v1(
     Attachment attachment = attachment_for(lease, ticket.reservation);
     attachment.token = ticket.token;
     return Result<Attachment>::success(attachment);
+}
+
+Result<void> ReceiverEngine::release_stream_final_v1(
+    const StreamAttachTicket& ticket) noexcept
+{
+    if (ticket.slot >= kReceiverEngineCapacity)
+        return Result<void>::failure(Error::NOT_FOUND);
+    if (stream_control_ == nullptr)
+        return Result<void>::failure(Error::UNSUPPORTED);
+
+    const std::size_t slot = ticket.slot;
+    std::unique_lock<std::mutex> receiver_lock(receiver_mutexes_[slot]);
+    Attachment attachment{};
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (contract_ != StreamContract::v1)
+            return Result<void>::failure(Error::UNSUPPORTED);
+        if (stream_cleanup_ticket_matches_locked(slot, ticket) &&
+            leases_[slot].stream_cleanup_completed &&
+            leases_[slot].stream_final_valid &&
+            leases_[slot].stream_final_physical &&
+            !leases_[slot].stream_final_released) {
+            attachment = attachment_for(leases_[slot], ticket.reservation);
+            attachment.token = ticket.token;
+        } else if (retained_stream_finals_[slot].valid &&
+                   same_stream_ticket(retained_stream_finals_[slot].ticket, ticket)) {
+            attachment = retained_stream_finals_[slot].attachment;
+        } else {
+            return Result<void>::failure(Error::NOT_FOUND);
+        }
+    }
+
+    const auto released = stream_control_->release_final(attachment);
+    if (!released) return released;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        bool ownership_consumed = false;
+        if (retained_stream_finals_[slot].valid &&
+            same_stream_ticket(retained_stream_finals_[slot].ticket, ticket)) {
+            retained_stream_finals_[slot] = RetainedStreamFinal{};
+            ownership_consumed = true;
+        } else if (stream_cleanup_ticket_matches_locked(slot, ticket) &&
+                   leases_[slot].stream_cleanup_completed &&
+                   leases_[slot].stream_final_valid &&
+                   leases_[slot].stream_final_physical &&
+                   !leases_[slot].stream_final_released) {
+            leases_[slot].stream_final_released = true;
+            ownership_consumed = true;
+        }
+        assert(ownership_consumed);
+        (void)ownership_consumed;
+    }
+    return Result<void>::success();
 }
 
 Result<StreamCounters> ReceiverEngine::stream_stats_v1(

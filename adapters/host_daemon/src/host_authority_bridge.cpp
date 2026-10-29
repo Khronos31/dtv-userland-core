@@ -237,6 +237,8 @@ Error HostAuthorityBridge::close_data_session(
         slot.connection_open = false;
         slot.state = DataSlotState::tombstone;
         slot.attach_result = HostAuthorityAttachResult{};
+        if (slot.stream_end.ready)
+            return release_completed_stream(connection.slot);
         if (!slot.attach_pending && slot.prepared &&
             !queue_stream_cleanup(connection.slot) && workers_.error() != Error::OK)
             enter_fatal();
@@ -462,15 +464,7 @@ Error HostAuthorityBridge::data_stream_end_sent(
         !slot.drained)
         return Error::NOT_FOUND;
     if (!complete_frame) return Error::OK;
-    const auto released = tuner_service_.authority_release_stream_final_v1(slot.ticket);
-    if (!released) {
-        slot.state = DataSlotState::fatal_unresolved;
-        enter_fatal();
-        return released.error();
-    }
-    forget_stream(slot.ticket.client_id, slot.ticket.stream_id);
-    slot = DataSlot{slot.generation, DataSlotState::free};
-    return Error::OK;
+    return release_completed_stream(connection.slot);
 }
 
 Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream(
@@ -523,8 +517,7 @@ Result<dtv::userland::detail::StreamStopResult> HostAuthorityBridge::stop_stream
         found_data = true;
         data.state = DataSlotState::tombstone;
         if (stopped.value().cleanup_owner && !data.attach_pending &&
-            (!retain_submit_rejection ||
-             (!data.cleanup_inflight && !data.stream_end.ready)) &&
+            !data.cleanup_inflight && !data.stream_end.ready &&
             !queue_stream_cleanup(i)) {
             if (retain_submit_rejection && workers_.error() != Error::OK) {
                 enter_fatal();
@@ -1104,6 +1097,10 @@ void HostAuthorityBridge::close_all_data() noexcept
         }
         slot.connection_open = false;
         slot.state = DataSlotState::tombstone;
+        if (slot.stream_end.ready) {
+            if (release_completed_stream(i) != Error::OK) enter_fatal();
+            continue;
+        }
         if (!slot.attach_pending && slot.prepared &&
             !queue_stream_cleanup(i) && workers_.error() != Error::OK)
             enter_fatal();
@@ -1122,21 +1119,13 @@ void HostAuthorityBridge::close_owned_streams(std::size_t index) noexcept
         data.state = DataSlotState::tombstone;
         data.attach_result = HostAuthorityAttachResult{};
         if (data.attach_pending || data.cleanup_pending || data.cleanup_inflight) continue;
+        if (data.stream_end.ready) {
+            if (release_completed_stream(data_index) != Error::OK) return;
+            continue;
+        }
         if (data.prepared) {
             if (!queue_stream_cleanup(data_index) && workers_.error() != Error::OK)
                 enter_fatal();
-            continue;
-        }
-        if (data.stream_end.ready) {
-            const auto released = tuner_service_.authority_release_stream_final_v1(
-                data.ticket);
-            if (!released) {
-                data.state = DataSlotState::fatal_unresolved;
-                enter_fatal();
-                return;
-            }
-            forget_stream(data.ticket.client_id, data.ticket.stream_id);
-            data = DataSlot{data.generation, DataSlotState::free};
             continue;
         }
         const auto aborted = tuner_service_.authority_abort_attach_v1(
@@ -1162,6 +1151,10 @@ void HostAuthorityBridge::close_owned_streams(std::size_t index) noexcept
             data.connection_open = false;
             data.state = DataSlotState::tombstone;
             data.attach_result = HostAuthorityAttachResult{};
+            if (data.stream_end.ready) {
+                if (release_completed_stream(data_index) != Error::OK) return;
+                break;
+            }
             if (!data.attach_pending && data.prepared &&
                 !queue_stream_cleanup(data_index) && workers_.error() != Error::OK)
                 enter_fatal();
@@ -1294,6 +1287,23 @@ bool HostAuthorityBridge::queue_stream_cleanup(std::size_t index) noexcept
     data.cleanup_pending = false;
     data.cleanup_inflight = true;
     return true;
+}
+
+Error HostAuthorityBridge::release_completed_stream(std::size_t index) noexcept
+{
+    if (index >= data_slots_.size()) return Error::INVALID_ARGUMENT;
+    DataSlot& data = data_slots_[index];
+    if (!data.stream_end.ready) return Error::NOT_READY;
+    const auto released = tuner_service_.authority_release_stream_final_v1(data.ticket);
+    if (!released) {
+        data.state = DataSlotState::fatal_unresolved;
+        enter_fatal();
+        return released.error();
+    }
+    const auto generation = data.generation;
+    forget_stream(data.ticket.client_id, data.ticket.stream_id);
+    data = DataSlot{generation, DataSlotState::free};
+    return Error::OK;
 }
 
 void HostAuthorityBridge::stop_ingresses() noexcept

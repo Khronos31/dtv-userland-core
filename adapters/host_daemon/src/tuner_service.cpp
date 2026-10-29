@@ -1037,9 +1037,7 @@ Result<void> TunerService::authority_release_stream_final_v1(
 {
     if ((ticket.client_id & dtv::userland::detail::kAuthorityClientIdFirst) == 0U)
         return Result<void>::failure(Error::INVALID_ARGUMENT);
-    const auto attachment = engine_.stream_attachment_v1(ticket);
-    if (!attachment) return Result<void>::failure(attachment.error());
-    return stream_control_.release_final(attachment.value());
+    return engine_.release_stream_final_v1(ticket);
 }
 
 }  // namespace px4::userland

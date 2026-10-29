@@ -216,6 +216,30 @@ bool test_failed_attach_policy_and_old_read()
     return true;
 }
 
+bool test_retained_final_release_unblocks_next_attach()
+{
+    PacketStreamSession session;
+    const Attachment old_identity = identity(8U);
+    const Attachment next_identity = identity(9U);
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        STORE_CHECK(session.begin_attach_locked(old_identity, 2U));
+        const auto p = packet(80U);
+        session.append_locked(ByteView{p.data(), p.size()});
+        STORE_CHECK(session.detach_locked(old_identity));
+        STORE_CHECK(session.draining);
+        STORE_CHECK(session.begin_attach_locked(next_identity, 2U).error() == Error::BUSY);
+    }
+    STORE_CHECK(session.release_final(old_identity));
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        STORE_CHECK(!session.draining);
+        STORE_CHECK(session.begin_attach_locked(next_identity, 2U,
+                                                StreamQueuePolicy::evict_oldest));
+    }
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -223,7 +247,8 @@ int main()
     const bool ok = test_legacy_full_ring_unchanged() && test_v1_evict_oldest() &&
                     test_eviction_saturation() &&
                     test_held_old_read_isolated_from_replacement() &&
-                    test_failed_attach_policy_and_old_read();
+                    test_failed_attach_policy_and_old_read() &&
+                    test_retained_final_release_unblocks_next_attach();
     if (!ok) return 1;
     std::printf("stream v1 store tests: PASS\n");
     return 0;

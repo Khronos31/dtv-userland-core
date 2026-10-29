@@ -658,6 +658,14 @@ struct ControlWorkerLanes::Impl final {
             while (true) {
                 ControlWorkerTask task{};
                 if (!pop_task(task)) break;
+#if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
+                if (task.operation ==
+                        ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1 &&
+                    owner.before_stream_cleanup_execute != nullptr) {
+                    owner.before_stream_cleanup_execute(
+                        owner.before_stream_cleanup_execute_context);
+                }
+#endif
                 ControlWorkerCompletion completion = owner.execute(task);
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
                 if (task.operation == ControlWorkerOperation::tuner_authority_job &&
@@ -909,6 +917,8 @@ struct ControlWorkerLanes::Impl final {
     std::atomic<bool> reject_next_authority_stream_cleanup_submit{false};
     void (*before_tuner_attach_completion)(void*) noexcept = nullptr;
     void* before_tuner_attach_completion_context = nullptr;
+    void (*before_stream_cleanup_execute)(void*) noexcept = nullptr;
+    void* before_stream_cleanup_execute_context = nullptr;
 #endif
 
     Impl(CardService& card, TunerService& tuner, ControlExecutionLayout execution_layout
@@ -935,6 +945,9 @@ struct ControlWorkerLanes::Impl final {
                 options->before_tuner_attach_completion;
             before_tuner_attach_completion_context =
                 options->before_tuner_attach_completion_context;
+            before_stream_cleanup_execute = options->before_stream_cleanup_execute;
+            before_stream_cleanup_execute_context =
+                options->before_stream_cleanup_execute_context;
         }
 #endif
     }

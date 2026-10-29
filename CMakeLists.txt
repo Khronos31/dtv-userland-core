@@ -920,6 +920,11 @@ if(DTV_USERLAND_BUILD_TESTING)
     if(DTV_USERLAND_BUILD_RECEIVER)
         add_executable(receiver_engine_tests tests/receiver_engine_tests.cpp)
         target_link_libraries(receiver_engine_tests PRIVATE dtv::receiver)
+        if(DTV_USERLAND_BUILD_CAPTURE)
+            target_link_libraries(receiver_engine_tests PRIVATE dtv::capture)
+            target_compile_definitions(receiver_engine_tests PRIVATE
+                DTV_USERLAND_TEST_PACKET_SESSION=1)
+        endif()
         add_test(NAME receiver_engine_tests COMMAND receiver_engine_tests)
         # Outer bound behind the tests' own finite waits.
         set_tests_properties(receiver_engine_tests PROPERTIES TIMEOUT 120)

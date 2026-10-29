@@ -1,5 +1,8 @@
 // SPDX-License-Identifier: MIT
 #include "dtv/userland/detail/receiver_engine.h"
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+#include "dtv/userland/detail/packet_stream_session.h"
+#endif
 
 #include <array>
 #include <atomic>
@@ -14,6 +17,42 @@
 #include <thread>
 #include <utility>
 #include <vector>
+
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+namespace dtv::userland::detail {
+
+struct ReceiverEngineTestAccess final {
+    static bool retain_current_final(ReceiverEngine& engine,
+                                     const StreamAttachTicket& ticket)
+    {
+        if (ticket.slot >= kReceiverEngineCapacity) return false;
+        std::lock_guard<std::mutex> lock(engine.mutex_);
+        if (!engine.stream_cleanup_ticket_matches_locked(ticket.slot, ticket))
+            return false;
+        ReceiverEngine::Lease& lease = engine.leases_[ticket.slot];
+        if (!lease.stream_cleanup_completed || !lease.stream_final_valid ||
+            !lease.stream_final_physical || lease.stream_final_released ||
+            engine.retained_stream_finals_[ticket.slot].valid)
+            return false;
+        ReceiverEngine::RetainedStreamFinal& retained =
+            engine.retained_stream_finals_[ticket.slot];
+        retained.valid = true;
+        retained.ticket = ticket;
+        retained.attachment = engine.attachment_for(lease, lease.stream_reservation);
+        retained.attachment.token = lease.stream_consumed_token;
+        return true;
+    }
+
+    static void clear_retained_final(ReceiverEngine& engine, std::size_t slot)
+    {
+        if (slot >= kReceiverEngineCapacity) return;
+        std::lock_guard<std::mutex> lock(engine.mutex_);
+        engine.retained_stream_finals_[slot] = ReceiverEngine::RetainedStreamFinal{};
+    }
+};
+
+}  // namespace dtv::userland::detail
+#endif
 
 namespace {
 
@@ -404,6 +443,140 @@ private:
     std::mutex mutex_;
 };
 
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+class PacketSessionStream final : public ReceiverStreamControl {
+public:
+    Result<void> attach(const Attachment& attachment) noexcept override
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        return session.begin_attach_locked(attachment, 4U, StreamQueuePolicy::evict_oldest);
+    }
+
+    Result<void> detach(const Attachment& attachment) noexcept override
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        return session.detach_locked(attachment);
+    }
+
+    Result<StreamCounters> stats(const Attachment& attachment) const noexcept override
+    {
+        return session.stats(attachment);
+    }
+
+    Result<StreamFinalSnapshot> final_snapshot(
+        const Attachment& attachment) const noexcept override
+    {
+        return session.final_snapshot_query(attachment);
+    }
+
+    Result<void> release_final(const Attachment& attachment) noexcept override
+    {
+        const auto released = fail_next_release.exchange(false)
+            ? Result<void>::failure(Error::INTERNAL)
+            : session.release_final(attachment);
+        {
+            std::unique_lock<std::mutex> lock(release_barrier_mutex);
+            if (release_barrier_enabled) {
+                release_barrier_entered = true;
+                release_barrier_condition.notify_all();
+                release_barrier_condition.wait(lock,
+                    [this] { return release_barrier_released; });
+                release_barrier_enabled = false;
+            }
+        }
+        return released;
+    }
+
+    void hold_next_release()
+    {
+        std::lock_guard<std::mutex> lock(release_barrier_mutex);
+        release_barrier_enabled = true;
+        release_barrier_entered = false;
+        release_barrier_released = false;
+    }
+
+    bool wait_release_barrier()
+    {
+        std::unique_lock<std::mutex> lock(release_barrier_mutex);
+        return release_barrier_condition.wait_for(lock, kWaitBound,
+            [this] { return release_barrier_entered; });
+    }
+
+    void release_release_barrier()
+    {
+        std::lock_guard<std::mutex> lock(release_barrier_mutex);
+        release_barrier_released = true;
+        release_barrier_condition.notify_all();
+    }
+
+    Result<StreamReadResult> read_eof(const Attachment& attachment,
+                                      MutableByteView output) noexcept
+    {
+        std::lock_guard<std::mutex> lock(session.mutex);
+        const auto ticket = session.begin_read_locked(attachment);
+        if (!ticket) return Result<StreamReadResult>::failure(ticket.error());
+        return session.finish_read_locked(attachment, ticket.value(), output);
+    }
+
+    Result<StreamReadResult> read_eof_after_barrier(
+        const Attachment& attachment, MutableByteView output) noexcept
+    {
+        const auto ticket = [&]() {
+            std::lock_guard<std::mutex> lock(session.mutex);
+            return session.begin_read_locked(attachment);
+        }();
+        if (!ticket) return Result<StreamReadResult>::failure(ticket.error());
+        {
+            std::unique_lock<std::mutex> lock(barrier_mutex);
+            barrier_entered = true;
+            barrier_condition.notify_all();
+            barrier_condition.wait(lock, [this] { return barrier_released; });
+        }
+        std::lock_guard<std::mutex> lock(session.mutex);
+        return session.finish_read_locked(attachment, ticket.value(), output);
+    }
+
+    bool wait_read_barrier()
+    {
+        std::unique_lock<std::mutex> lock(barrier_mutex);
+        return barrier_condition.wait_for(lock, kWaitBound,
+            [this] { return barrier_entered; });
+    }
+
+    void release_read_barrier()
+    {
+        std::lock_guard<std::mutex> lock(barrier_mutex);
+        barrier_released = true;
+        barrier_condition.notify_all();
+    }
+
+    PacketStreamSession session;
+    std::mutex barrier_mutex;
+    std::condition_variable barrier_condition;
+    bool barrier_entered = false;
+    bool barrier_released = false;
+    std::mutex release_barrier_mutex;
+    std::condition_variable release_barrier_condition;
+    bool release_barrier_enabled = false;
+    bool release_barrier_entered = false;
+    bool release_barrier_released = false;
+    std::atomic<bool> fail_next_release{false};
+};
+
+constexpr std::uint64_t kReleaseMigrationEpoch = 0x52454c454153454dULL;
+
+bool configure_v1_session_engine(ReceiverEngine& engine)
+{
+    ReceiverCapability capability{};
+    capability.receiver = kTerrestrial;
+    capability.supports_terrestrial = true;
+    const std::array<ReceiverCapability, 1U> capabilities{capability};
+    return engine.configure_strict_capabilities(capabilities.data(), capabilities.size()) &&
+           engine.configure_stream_contract(StreamContract::v1, kReleaseMigrationEpoch);
+}
+
+#endif
+
 class CountingTokens final : public ReceiverTokenSource {
 public:
     Result<ReceiverToken> generate() noexcept override
@@ -435,6 +608,36 @@ TuneRequest terrestrial(std::uint64_t lease_id, Error validation = Error::OK)
     request.validation = validation;
     return request;
 }
+
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+bool create_eof_final(Fixture& f, PacketSessionStream& stream, ReceiverEngine& engine,
+                      std::uint64_t client, std::uint64_t lease_id,
+                      StreamAttachTicket& ticket)
+{
+    const auto admitted = engine.try_admit_tune(
+        client, terrestrial(lease_id), f.clock.monotonic_ms());
+    if (!admitted || !engine.execute_admitted_tune(admitted.value())) return false;
+    const auto status = engine.status();
+    if (!status) return false;
+    const auto started = engine.start_stream_v1(client, lease_id,
+        status.value().tune_metadata[0U].current_revision, 10U, 5000U);
+    if (!started) return false;
+    const auto reserved = engine.reserve_attach_v1(client, lease_id,
+        kReleaseMigrationEpoch, started.value().stream_id, started.value().token, 11U);
+    if (!reserved || !engine.prepare_attach_v1(reserved.value()) ||
+        !engine.commit_attach_v1(reserved.value())) return false;
+    const auto stopped = engine.stop_stream_v1(client, lease_id, started.value().stream_id);
+    if (!stopped || !engine.run_stream_cleanup_v1(reserved.value())) return false;
+    const auto attachment = engine.stream_attachment_v1(reserved.value());
+    if (!attachment) return false;
+    std::array<std::uint8_t, PacketStreamSession::packet_size> output{};
+    const auto eof = stream.read_eof(attachment.value(),
+        MutableByteView{output.data(), output.size()});
+    if (!eof || !eof.value().eof || eof.value().timed_out) return false;
+    ticket = reserved.value();
+    return true;
+}
+#endif
 
 TuneRequest satellite_slot(std::uint64_t lease_id, std::uint16_t slot)
 {
@@ -739,6 +942,443 @@ bool test_stale_attachment_cleanup()
     return true;
 }
 
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+bool test_v1_attach_waits_for_retained_eof_final()
+{
+    Fixture f;
+    PacketSessionStream stream;
+    ReceiverEngine engine(f.backend, f.ids.data(), 1U, f.tokens, f.clock,
+                          nullptr, nullptr, &stream);
+    constexpr std::uint64_t epoch = 0x454f4646494e414cULL;
+    ReceiverCapability capability{};
+    capability.receiver = kTerrestrial;
+    capability.supports_terrestrial = true;
+    const std::array<ReceiverCapability, 1U> capabilities{capability};
+    ENGINE_CHECK(engine.configure_strict_capabilities(capabilities.data(),
+                                                       capabilities.size()));
+    ENGINE_CHECK(engine.configure_stream_contract(StreamContract::v1, epoch));
+
+    const auto arm = [&engine, &f](std::uint64_t client, std::uint64_t lease_id,
+                               std::uint64_t now) {
+        const auto admitted = engine.try_admit_tune(
+            client, terrestrial(lease_id), f.clock.monotonic_ms());
+        if (!admitted)
+            return Result<StreamStartResult>::failure(admitted.error());
+        const auto tuned = engine.execute_admitted_tune(admitted.value());
+        if (!tuned)
+            return Result<StreamStartResult>::failure(tuned.error());
+        const auto status = engine.status();
+        if (!status) return Result<StreamStartResult>::failure(status.error());
+        return engine.start_stream_v1(client, lease_id,
+            status.value().tune_metadata[0U].current_revision, now, 5000U);
+    };
+    const auto attach = [&engine, epoch](std::uint64_t client, std::uint64_t lease_id,
+                                         const StreamStartResult& started,
+                                         std::uint64_t now) {
+        return engine.reserve_attach_v1(client, lease_id, epoch,
+            started.stream_id, started.token, now);
+    };
+    const auto finish_stream = [&engine](std::uint64_t client, std::uint64_t lease_id,
+                                         const StreamAttachTicket& ticket) {
+        const auto stopped = engine.stop_stream_v1(client, lease_id, ticket.stream_id);
+        return stopped && engine.run_stream_cleanup_v1(ticket);
+    };
+
+    const auto first_lease = engine.acquire(1U, kTerrestrial);
+    ENGINE_CHECK(first_lease);
+    const auto first_start = arm(1U, first_lease.value().lease_id, 10U);
+    ENGINE_CHECK(first_start);
+    const auto first_ticket = attach(1U, first_lease.value().lease_id,
+                                     first_start.value(), 11U);
+    ENGINE_CHECK(first_ticket && engine.prepare_attach_v1(first_ticket.value()) &&
+                 engine.commit_attach_v1(first_ticket.value()) &&
+                 finish_stream(1U, first_lease.value().lease_id, first_ticket.value()));
+
+    const auto first_attachment = engine.stream_attachment_v1(first_ticket.value());
+    ENGINE_CHECK(first_attachment);
+    std::array<std::uint8_t, PacketStreamSession::packet_size> output{};
+    const auto eof = stream.read_eof(first_attachment.value(),
+        MutableByteView{output.data(), output.size()});
+    ENGINE_CHECK(eof && eof.value().eof && !eof.value().timed_out &&
+                 eof.value().terminal == StreamTerminal::stopped);
+
+    const auto same_lease_start = arm(1U, first_lease.value().lease_id, 20U);
+    ENGINE_CHECK(same_lease_start &&
+                 same_lease_start.value().stream_id == first_start.value().stream_id + 1U);
+    const auto same_lease_rejected = attach(1U, first_lease.value().lease_id,
+                                            same_lease_start.value(), 21U);
+    ENGINE_CHECK(failed(same_lease_rejected, Error::BUSY));
+    ENGINE_CHECK(engine.release_stream_final_v1(first_ticket.value()));
+    const auto same_lease_ticket = attach(1U, first_lease.value().lease_id,
+                                          same_lease_start.value(), 22U);
+    ENGINE_CHECK(same_lease_ticket &&
+                 engine.prepare_attach_v1(same_lease_ticket.value()) &&
+                 engine.commit_attach_v1(same_lease_ticket.value()) &&
+                 finish_stream(1U, first_lease.value().lease_id,
+                               same_lease_ticket.value()));
+    const unsigned tokens_before_guard = f.tokens.next.load();
+    ENGINE_CHECK(dtv::userland::detail::ReceiverEngineTestAccess::retain_current_final(
+        engine, same_lease_ticket.value()));
+    const auto status_before_guard = engine.status();
+    ENGINE_CHECK(status_before_guard);
+    const auto guarded_start = engine.start_stream_v1(1U,
+        first_lease.value().lease_id,
+        status_before_guard.value().tune_metadata[0U].current_revision, 29U, 5000U);
+    const auto retained_snapshot = engine.stream_final_snapshot_v1(
+        same_lease_ticket.value());
+    ENGINE_CHECK(failed(guarded_start, Error::INTERNAL) &&
+                 f.tokens.next.load() == tokens_before_guard && retained_snapshot);
+    dtv::userland::detail::ReceiverEngineTestAccess::clear_retained_final(engine, 0U);
+    ENGINE_CHECK(engine.release(1U, first_lease.value().lease_id) &&
+                 engine.release_stream_final_v1(same_lease_ticket.value()));
+
+    const auto second_lease = engine.acquire(2U, kTerrestrial);
+    ENGINE_CHECK(second_lease);
+    const auto second_start = arm(2U, second_lease.value().lease_id, 20U);
+    ENGINE_CHECK(second_start);
+    const auto second_ticket = attach(2U, second_lease.value().lease_id,
+                                      second_start.value(), 22U);
+    ENGINE_CHECK(second_ticket && engine.prepare_attach_v1(second_ticket.value()) &&
+                 engine.commit_attach_v1(second_ticket.value()) &&
+                 finish_stream(2U, second_lease.value().lease_id, second_ticket.value()) &&
+                 engine.release(2U, second_lease.value().lease_id));
+
+    const auto third_lease = engine.acquire(3U, kTerrestrial);
+    ENGINE_CHECK(third_lease);
+    const auto third_start = arm(3U, third_lease.value().lease_id, 30U);
+    ENGINE_CHECK(third_start);
+    const auto third_ticket = attach(3U, third_lease.value().lease_id,
+                                     third_start.value(), 31U);
+    ENGINE_CHECK(failed(third_ticket, Error::BUSY));
+    ENGINE_CHECK(engine.release_stream_final_v1(second_ticket.value()));
+    const auto third_retry = attach(3U, third_lease.value().lease_id,
+                                    third_start.value(), 32U);
+    ENGINE_CHECK(third_retry && engine.prepare_attach_v1(third_retry.value()) &&
+                 engine.commit_attach_v1(third_retry.value()) &&
+                 finish_stream(3U, third_lease.value().lease_id, third_retry.value()));
+    const auto third_attachment = engine.stream_attachment_v1(third_retry.value());
+    ENGINE_CHECK(third_attachment);
+
+    std::array<std::uint8_t, PacketStreamSession::packet_size> barrier_output{};
+    Result<StreamReadResult> barrier_read =
+        Result<StreamReadResult>::failure(Error::NOT_FOUND);
+    std::thread reader([&] {
+        barrier_read = stream.read_eof_after_barrier(third_attachment.value(),
+            MutableByteView{barrier_output.data(), barrier_output.size()});
+    });
+    if (!stream.wait_read_barrier()) {
+        stream.release_read_barrier();
+        reader.join();
+        return false;
+    }
+    const auto fourth_start = arm(3U, third_lease.value().lease_id, 40U);
+    if (!fourth_start) {
+        stream.release_read_barrier();
+        reader.join();
+        return false;
+    }
+    const auto barrier_rejected = attach(3U, third_lease.value().lease_id,
+                                         fourth_start.value(), 41U);
+    const bool rejected_busy = failed(barrier_rejected, Error::BUSY);
+    stream.release_read_barrier();
+    reader.join();
+    ENGINE_CHECK(rejected_busy && barrier_read && barrier_read.value().eof &&
+                 engine.release_stream_final_v1(third_retry.value()));
+    const auto fourth_ticket = attach(3U, third_lease.value().lease_id,
+                                      fourth_start.value(), 42U);
+    ENGINE_CHECK(fourth_ticket && engine.prepare_attach_v1(fourth_ticket.value()) &&
+                 engine.commit_attach_v1(fourth_ticket.value()) &&
+                 finish_stream(3U, third_lease.value().lease_id, fourth_ticket.value()) &&
+                 engine.release(3U, third_lease.value().lease_id) &&
+                 engine.release_stream_final_v1(fourth_ticket.value()));
+
+    PacketStreamSession legacy;
+    Attachment legacy_first{};
+    legacy_first.owner_client_id = 99U;
+    legacy_first.lease_id = 1U;
+    legacy_first.attachment_id = 1U;
+    legacy_first.receiver = kTerrestrial;
+    {
+        std::lock_guard<std::mutex> lock(legacy.mutex);
+        ENGINE_CHECK(legacy.begin_attach_locked(legacy_first, 4U));
+        ENGINE_CHECK(legacy.detach_locked(legacy_first));
+        const auto ticket = legacy.begin_read_locked(legacy_first);
+        ENGINE_CHECK(ticket);
+        const auto legacy_eof = legacy.finish_read_locked(legacy_first, ticket.value(),
+            MutableByteView{output.data(), output.size()});
+        ENGINE_CHECK(legacy_eof && legacy_eof.value().eof);
+        Attachment legacy_second = legacy_first;
+        legacy_second.attachment_id = 2U;
+        ENGINE_CHECK(legacy.begin_attach_locked(legacy_second, 4U));
+    }
+    return true;
+}
+
+bool test_v1_retained_final_expiry_precedes_busy()
+{
+    Fixture f;
+    PacketSessionStream stream;
+    ReceiverEngine engine(f.backend, f.ids.data(), 1U, f.tokens, f.clock,
+                          nullptr, nullptr, &stream);
+    constexpr std::uint64_t epoch = 0x4558504952454649ULL;
+    ReceiverCapability capability{};
+    capability.receiver = kTerrestrial;
+    capability.supports_terrestrial = true;
+    const std::array<ReceiverCapability, 1U> capabilities{capability};
+    ENGINE_CHECK(engine.configure_strict_capabilities(capabilities.data(),
+                                                       capabilities.size()));
+    ENGINE_CHECK(engine.configure_stream_contract(StreamContract::v1, epoch));
+    const auto lease = engine.acquire(1U, kTerrestrial);
+    ENGINE_CHECK(lease);
+    const auto admitted = engine.try_admit_tune(
+        1U, terrestrial(1U), f.clock.monotonic_ms());
+    ENGINE_CHECK(admitted && engine.execute_admitted_tune(admitted.value()));
+    const auto status = engine.status();
+    ENGINE_CHECK(status);
+    const auto first_start = engine.start_stream_v1(1U, lease.value().lease_id,
+        status.value().tune_metadata[0U].current_revision, 10U, 5000U);
+    ENGINE_CHECK(first_start);
+    const auto first_ticket = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        epoch, first_start.value().stream_id, first_start.value().token, 11U);
+    ENGINE_CHECK(first_ticket && engine.prepare_attach_v1(first_ticket.value()) &&
+                 engine.commit_attach_v1(first_ticket.value()));
+    const auto stopped = engine.stop_stream_v1(1U, lease.value().lease_id,
+                                               first_start.value().stream_id);
+    ENGINE_CHECK(stopped && engine.run_stream_cleanup_v1(first_ticket.value()));
+
+    const auto expiring_start = engine.start_stream_v1(1U, lease.value().lease_id,
+        status.value().tune_metadata[0U].current_revision, 20U, 10U);
+    ENGINE_CHECK(expiring_start);
+    const auto expired = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        epoch, expiring_start.value().stream_id, expiring_start.value().token,
+        expiring_start.value().expires_at_ms);
+    ENGINE_CHECK(failed(expired, Error::TIMEOUT));
+    ENGINE_CHECK(engine.release_stream_final_v1(first_ticket.value()));
+
+    const auto retry_start = engine.start_stream_v1(1U, lease.value().lease_id,
+        status.value().tune_metadata[0U].current_revision, 31U, 5000U);
+    ENGINE_CHECK(retry_start);
+    const auto retry_ticket = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        epoch, retry_start.value().stream_id, retry_start.value().token, 32U);
+    ENGINE_CHECK(retry_ticket && engine.prepare_attach_v1(retry_ticket.value()) &&
+                 engine.commit_attach_v1(retry_ticket.value()));
+    const auto retry_stopped = engine.stop_stream_v1(1U, lease.value().lease_id,
+                                                      retry_start.value().stream_id);
+    ENGINE_CHECK(retry_stopped && engine.run_stream_cleanup_v1(retry_ticket.value()) &&
+                 engine.release(1U, lease.value().lease_id) &&
+                 engine.release_stream_final_v1(retry_ticket.value()));
+    return true;
+}
+
+bool test_v1_release_completion_consumes_migrated_final()
+{
+    Fixture f;
+    PacketSessionStream stream;
+    ReceiverEngine engine(f.backend, f.ids.data(), 1U, f.tokens, f.clock,
+                          nullptr, nullptr, &stream);
+    ENGINE_CHECK(configure_v1_session_engine(engine));
+    const auto lease = engine.acquire(1U, kTerrestrial);
+    ENGINE_CHECK(lease);
+    StreamAttachTicket old_ticket{};
+    ENGINE_CHECK(create_eof_final(f, stream, engine, 1U, lease.value().lease_id,
+                                  old_ticket));
+
+    stream.hold_next_release();
+    Result<void> old_release = Result<void>::failure(Error::INTERNAL);
+    std::thread release_thread([&] {
+        old_release = engine.release_stream_final_v1(old_ticket);
+    });
+    if (!stream.wait_release_barrier()) {
+        stream.release_release_barrier();
+        release_thread.join();
+        return false;
+    }
+    const auto status = engine.status();
+    const auto next_start = status
+        ? engine.start_stream_v1(1U, lease.value().lease_id,
+            status.value().tune_metadata[0U].current_revision, 20U, 5000U)
+        : Result<StreamStartResult>::failure(Error::INTERNAL);
+    const auto blocked = next_start
+        ? engine.reserve_attach_v1(1U, lease.value().lease_id, kReleaseMigrationEpoch,
+            next_start.value().stream_id, next_start.value().token, 21U)
+        : Result<StreamAttachTicket>::failure(Error::INTERNAL);
+    stream.release_release_barrier();
+    release_thread.join();
+
+    ENGINE_CHECK(next_start && failed(blocked, Error::BUSY) && old_release);
+    const auto next_ticket = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        kReleaseMigrationEpoch, next_start.value().stream_id,
+        next_start.value().token, 22U);
+    ENGINE_CHECK(next_ticket);
+    ENGINE_CHECK(engine.prepare_attach_v1(next_ticket.value()) &&
+                 engine.commit_attach_v1(next_ticket.value()) &&
+                 failed(engine.release_stream_final_v1(old_ticket), Error::NOT_FOUND));
+    const auto stopped = engine.stop_stream_v1(1U, lease.value().lease_id,
+                                               next_start.value().stream_id);
+    ENGINE_CHECK(stopped && engine.run_stream_cleanup_v1(next_ticket.value()) &&
+                 engine.release_stream_final_v1(next_ticket.value()) &&
+                 engine.release(1U, lease.value().lease_id));
+
+    const auto other_lease = engine.acquire(2U, kTerrestrial);
+    ENGINE_CHECK(other_lease);
+    const auto admitted = engine.try_admit_tune(
+        2U, terrestrial(other_lease.value().lease_id), f.clock.monotonic_ms());
+    ENGINE_CHECK(admitted && engine.execute_admitted_tune(admitted.value()));
+    const auto other_status = engine.status();
+    ENGINE_CHECK(other_status);
+    const auto other_start = engine.start_stream_v1(2U, other_lease.value().lease_id,
+        other_status.value().tune_metadata[0U].current_revision, 30U, 5000U);
+    ENGINE_CHECK(other_start);
+    const auto other_ticket = engine.reserve_attach_v1(2U, other_lease.value().lease_id,
+        kReleaseMigrationEpoch, other_start.value().stream_id,
+        other_start.value().token, 31U);
+    ENGINE_CHECK(other_ticket && engine.prepare_attach_v1(other_ticket.value()) &&
+                 engine.commit_attach_v1(other_ticket.value()));
+    const auto other_stopped = engine.stop_stream_v1(2U, other_lease.value().lease_id,
+                                                      other_start.value().stream_id);
+    ENGINE_CHECK(other_stopped && engine.run_stream_cleanup_v1(other_ticket.value()) &&
+                 engine.release_stream_final_v1(other_ticket.value()) &&
+                 engine.release(2U, other_lease.value().lease_id));
+    return true;
+}
+
+bool test_v1_release_failure_keeps_migrated_final()
+{
+    Fixture f;
+    PacketSessionStream stream;
+    ReceiverEngine engine(f.backend, f.ids.data(), 1U, f.tokens, f.clock,
+                          nullptr, nullptr, &stream);
+    ENGINE_CHECK(configure_v1_session_engine(engine));
+    const auto lease = engine.acquire(1U, kTerrestrial);
+    ENGINE_CHECK(lease);
+    StreamAttachTicket old_ticket{};
+    ENGINE_CHECK(create_eof_final(f, stream, engine, 1U, lease.value().lease_id,
+                                  old_ticket));
+
+    stream.hold_next_release();
+    stream.fail_next_release.store(true);
+    Result<void> old_release = Result<void>::success();
+    std::thread release_thread([&] {
+        old_release = engine.release_stream_final_v1(old_ticket);
+    });
+    if (!stream.wait_release_barrier()) {
+        stream.release_release_barrier();
+        release_thread.join();
+        return false;
+    }
+    const auto status = engine.status();
+    const auto next_start = status
+        ? engine.start_stream_v1(1U, lease.value().lease_id,
+            status.value().tune_metadata[0U].current_revision, 20U, 5000U)
+        : Result<StreamStartResult>::failure(Error::INTERNAL);
+    stream.release_release_barrier();
+    release_thread.join();
+
+    ENGINE_CHECK(next_start && failed(old_release, Error::INTERNAL));
+    const auto blocked = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        kReleaseMigrationEpoch, next_start.value().stream_id,
+        next_start.value().token, 21U);
+    ENGINE_CHECK(failed(blocked, Error::BUSY) &&
+                 engine.release_stream_final_v1(old_ticket));
+    const auto next_ticket = engine.reserve_attach_v1(1U, lease.value().lease_id,
+        kReleaseMigrationEpoch, next_start.value().stream_id,
+        next_start.value().token, 22U);
+    ENGINE_CHECK(next_ticket && engine.prepare_attach_v1(next_ticket.value()) &&
+                 engine.commit_attach_v1(next_ticket.value()));
+    const auto stopped = engine.stop_stream_v1(1U, lease.value().lease_id,
+                                               next_start.value().stream_id);
+    ENGINE_CHECK(stopped && engine.run_stream_cleanup_v1(next_ticket.value()) &&
+                 engine.release_stream_final_v1(next_ticket.value()) &&
+                 engine.release(1U, lease.value().lease_id));
+    return true;
+}
+
+bool test_v1_release_serializes_lease_release()
+{
+    Fixture f;
+    PacketSessionStream stream;
+    ReceiverEngine engine(f.backend, f.ids.data(), 1U, f.tokens, f.clock,
+                          nullptr, nullptr, &stream);
+    ENGINE_CHECK(configure_v1_session_engine(engine));
+    const auto lease = engine.acquire(1U, kTerrestrial);
+    ENGINE_CHECK(lease);
+    StreamAttachTicket old_ticket{};
+    ENGINE_CHECK(create_eof_final(f, stream, engine, 1U, lease.value().lease_id,
+                                  old_ticket));
+
+    stream.hold_next_release();
+    Result<void> old_release = Result<void>::failure(Error::INTERNAL);
+    std::thread release_thread([&] {
+        old_release = engine.release_stream_final_v1(old_ticket);
+    });
+    if (!stream.wait_release_barrier()) {
+        stream.release_release_barrier();
+        release_thread.join();
+        return false;
+    }
+    const auto status = engine.status();
+    const auto next_start = status
+        ? engine.start_stream_v1(1U, lease.value().lease_id,
+            status.value().tune_metadata[0U].current_revision, 20U, 5000U)
+        : Result<StreamStartResult>::failure(Error::INTERNAL);
+    const auto canceled = next_start
+        ? engine.stop_stream_v1(1U, lease.value().lease_id,
+                                next_start.value().stream_id)
+        : Result<StreamStopResult>::failure(Error::INTERNAL);
+    const auto before_release = engine.status();
+    const bool idle_before_release = before_release &&
+        before_release.value().operations[0U] == ReceiverTuneOperation::idle;
+    std::atomic<bool> lease_release_done{false};
+    Result<void> lease_release = Result<void>::failure(Error::INTERNAL);
+    std::thread lease_release_thread([&] {
+        lease_release = engine.release(1U, lease.value().lease_id);
+        lease_release_done.store(true);
+    });
+    const auto wait_until = std::chrono::steady_clock::now() + kWaitBound;
+    bool lease_release_entered = false;
+    while (!lease_release_done.load() && std::chrono::steady_clock::now() < wait_until) {
+        const auto releasing = engine.status();
+        if (releasing && releasing.value().operations[0U] ==
+                             ReceiverTuneOperation::cleanup) {
+            lease_release_entered = true;
+            break;
+        }
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const bool release_waited = idle_before_release && lease_release_entered &&
+                                !lease_release_done.load();
+    stream.release_release_barrier();
+    release_thread.join();
+    lease_release_thread.join();
+
+    ENGINE_CHECK(next_start && canceled && canceled.value().final_valid &&
+                 release_waited && old_release && lease_release &&
+                 lease_release_done.load() &&
+                 failed(engine.release_stream_final_v1(old_ticket), Error::NOT_FOUND));
+    const auto other_lease = engine.acquire(2U, kTerrestrial);
+    ENGINE_CHECK(other_lease);
+    const auto admitted = engine.try_admit_tune(
+        2U, terrestrial(other_lease.value().lease_id), f.clock.monotonic_ms());
+    ENGINE_CHECK(admitted && engine.execute_admitted_tune(admitted.value()));
+    const auto other_status = engine.status();
+    ENGINE_CHECK(other_status);
+    const auto other_start = engine.start_stream_v1(2U, other_lease.value().lease_id,
+        other_status.value().tune_metadata[0U].current_revision, 30U, 5000U);
+    ENGINE_CHECK(other_start);
+    const auto other_ticket = engine.reserve_attach_v1(2U, other_lease.value().lease_id,
+        kReleaseMigrationEpoch, other_start.value().stream_id,
+        other_start.value().token, 31U);
+    ENGINE_CHECK(other_ticket && engine.prepare_attach_v1(other_ticket.value()) &&
+                 engine.commit_attach_v1(other_ticket.value()));
+    const auto stopped = engine.stop_stream_v1(2U, other_lease.value().lease_id,
+                                               other_start.value().stream_id);
+    ENGINE_CHECK(stopped && engine.run_stream_cleanup_v1(other_ticket.value()) &&
+                 engine.release_stream_final_v1(other_ticket.value()) &&
+                 engine.release(2U, other_lease.value().lease_id));
+    return true;
+}
+#endif
+
 bool test_legacy_timing_is_preserved()
 {
     Fixture f;
@@ -780,7 +1420,15 @@ int main()
                    test_separate_receivers_are_not_serialized() &&
                    test_serialized_regression_fails_without_hanging() &&
                    test_validation_travels_with_each_request() &&
-                   test_stale_attachment_cleanup() && test_legacy_timing_is_preserved()
+                   test_stale_attachment_cleanup() &&
+#if defined(DTV_USERLAND_TEST_PACKET_SESSION)
+                   test_v1_attach_waits_for_retained_eof_final() &&
+                   test_v1_retained_final_expiry_precedes_busy() &&
+                   test_v1_release_completion_consumes_migrated_final() &&
+                   test_v1_release_failure_keeps_migrated_final() &&
+                   test_v1_release_serializes_lease_release() &&
+#endif
+                   test_legacy_timing_is_preserved()
                ? 0
                : 1;
 }

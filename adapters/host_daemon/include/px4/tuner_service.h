@@ -656,11 +656,11 @@ private:
             const dtv::userland::detail::Attachment& attachment) const noexcept override;
         Result<dtv::userland::detail::StreamFinalSnapshot> final_snapshot(
             const dtv::userland::detail::Attachment& attachment) const noexcept override;
+        Result<void> release_final(
+            const dtv::userland::detail::Attachment& attachment) noexcept override;
         Result<dtv::userland::detail::StreamReadResult> read(
             const dtv::userland::detail::Attachment& attachment,
             MutableByteView output, Timeout timeout) noexcept;
-        Result<void> release_final(
-            const dtv::userland::detail::Attachment& attachment) noexcept;
 
     private:
         TunerStreamControl* stream_;
