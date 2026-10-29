@@ -280,6 +280,7 @@ private:
     void close_all() noexcept;
     void close_all_data() noexcept;
     bool queue_stream_cleanup(std::size_t slot) noexcept;
+    Error release_completed_stream(std::size_t slot) noexcept;
     Error finish_failed_attach_cleanup(std::size_t slot) noexcept;
     Result<dtv::userland::detail::StreamStopResult> stop_stream_impl(
         std::uint8_t control_slot, std::uint64_t lease_id,

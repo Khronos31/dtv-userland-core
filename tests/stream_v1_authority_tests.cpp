@@ -171,28 +171,61 @@ public:
 
 class MockStream final : public ReceiverStreamControl {
 public:
-    Result<void> attach(const Attachment&) noexcept override
+    Result<void> attach(const Attachment& attachment) noexcept override
     {
         ++attaches;
-        return attach_result == Error::OK ? Result<void>::success()
-                                          : Result<void>::failure(attach_result);
+        if (attach_result != Error::OK)
+            return Result<void>::failure(attach_result);
+        if (attached || final_valid)
+            return Result<void>::failure(Error::BUSY);
+        identity = attachment;
+        attached = true;
+        return Result<void>::success();
     }
-    Result<void> detach(const Attachment&) noexcept override
+    Result<void> detach(const Attachment& attachment) noexcept override
     {
         ++detaches;
+        if (!attached || !same_identity(identity, attachment))
+            return Result<void>::failure(Error::NOT_FOUND);
+        attached = false;
+        final_identity = identity;
+        final_valid = true;
         return Result<void>::success();
     }
     Result<StreamCounters> stats(const Attachment&) const noexcept override
     {
         return Result<StreamCounters>::success(StreamCounters{});
     }
-    Result<StreamFinalSnapshot> final_snapshot(const Attachment&) const noexcept override
+    Result<StreamFinalSnapshot> final_snapshot(const Attachment& attachment) const noexcept override
     {
-        return Result<StreamFinalSnapshot>::success(StreamFinalSnapshot{});
+        return final_valid && same_identity(final_identity, attachment)
+            ? Result<StreamFinalSnapshot>::success(StreamFinalSnapshot{})
+            : Result<StreamFinalSnapshot>::failure(Error::NOT_FOUND);
+    }
+    Result<void> release_final(const Attachment& attachment) noexcept override
+    {
+        if (!final_valid || !same_identity(final_identity, attachment))
+            return Result<void>::failure(Error::NOT_FOUND);
+        final_valid = false;
+        ++final_releases;
+        return Result<void>::success();
+    }
+    static bool same_identity(const Attachment& left, const Attachment& right) noexcept
+    {
+        return left.owner_client_id == right.owner_client_id &&
+               left.lease_id == right.lease_id &&
+               left.attachment_id == right.attachment_id &&
+               left.receiver == right.receiver && left.system == right.system &&
+               left.token == right.token;
     }
     Error attach_result = Error::OK;
+    bool attached = false;
+    bool final_valid = false;
+    Attachment identity{};
+    Attachment final_identity{};
     int attaches = 0;
     int detaches = 0;
+    int final_releases = 0;
 };
 
 struct Fixture final {
@@ -651,6 +684,118 @@ bool test_stop_during_gated_prepare_retains_ownership()
     return true;
 }
 
+bool test_released_lease_retains_exact_stream_final()
+{
+    Fixture f;
+    V1_CHECK(f.engine.configure_stream_contract(StreamContract::v1, kEpoch));
+    std::uint64_t lease = 0U;
+    std::uint64_t revision = 0U;
+    V1_CHECK(acquire_and_tune(f, lease, revision));
+    const auto started = f.engine.start_stream_v1(1U, lease, revision, 1000U, 5000U);
+    V1_CHECK(started);
+    const auto ticket = f.engine.reserve_attach_v1(1U, lease, kEpoch,
+                                                   started.value().stream_id,
+                                                   started.value().token, 1000U);
+    V1_CHECK(ticket);
+    V1_CHECK(f.engine.prepare_attach_v1(ticket.value()));
+    V1_CHECK(f.engine.abort_attach_v1(ticket.value(), Error::OK));
+    V1_CHECK(f.engine.run_stream_cleanup_v1(ticket.value()));
+    V1_CHECK(f.engine.release(1U, lease));
+
+    auto wrong = ticket.value();
+    ++wrong.revision;
+    V1_CHECK(f.engine.release_stream_final_v1(wrong).error() == Error::NOT_FOUND);
+    V1_CHECK(f.stream.final_releases == 0);
+    V1_CHECK(f.engine.release_stream_final_v1(ticket.value()));
+    V1_CHECK(f.stream.final_releases == 1);
+    V1_CHECK(f.engine.release_stream_final_v1(ticket.value()).error() == Error::NOT_FOUND);
+    V1_CHECK(f.stream.final_releases == 1);
+    return true;
+}
+
+bool test_released_final_is_not_retained_twice()
+{
+    Fixture f;
+    V1_CHECK(f.engine.configure_stream_contract(StreamContract::v1, kEpoch));
+    std::uint64_t lease = 0U;
+    std::uint64_t revision = 0U;
+    V1_CHECK(acquire_and_tune(f, lease, revision));
+    const auto started = f.engine.start_stream_v1(1U, lease, revision, 1000U, 5000U);
+    V1_CHECK(started);
+    const auto ticket = f.engine.reserve_attach_v1(1U, lease, kEpoch,
+                                                   started.value().stream_id,
+                                                   started.value().token, 1000U);
+    V1_CHECK(ticket);
+    V1_CHECK(f.engine.prepare_attach_v1(ticket.value()));
+    V1_CHECK(f.engine.commit_attach_v1(ticket.value()));
+    V1_CHECK(f.engine.stop_stream_v1(1U, lease, started.value().stream_id));
+    V1_CHECK(f.engine.run_stream_cleanup_v1(ticket.value()));
+    V1_CHECK(f.engine.release_stream_final_v1(ticket.value()));
+    V1_CHECK(f.engine.release(1U, lease));
+    V1_CHECK(f.engine.release_stream_final_v1(ticket.value()).error() == Error::NOT_FOUND);
+    V1_CHECK(f.stream.final_releases == 1);
+    return true;
+}
+
+bool test_phantom_final_does_not_block_next_physical_final()
+{
+    Fixture f;
+    V1_CHECK(f.engine.configure_stream_contract(StreamContract::v1, kEpoch));
+    std::uint64_t first_lease = 0U;
+    std::uint64_t first_revision = 0U;
+    V1_CHECK(acquire_and_tune(f, first_lease, first_revision));
+    const auto first_start = f.engine.start_stream_v1(
+        1U, first_lease, first_revision, 1000U, 5000U);
+    V1_CHECK(first_start);
+    const auto first_ticket = f.engine.reserve_attach_v1(
+        1U, first_lease, kEpoch, first_start.value().stream_id,
+        first_start.value().token, 1000U);
+    V1_CHECK(first_ticket);
+    V1_CHECK(f.engine.abort_attach_v1(first_ticket.value(), Error::OK));
+    V1_CHECK(f.engine.run_stream_cleanup_v1(first_ticket.value()));
+    V1_CHECK(f.engine.release_stream_final_v1(first_ticket.value()).error() ==
+             Error::NOT_FOUND);
+    V1_CHECK(f.engine.release(1U, first_lease));
+    V1_CHECK(f.stream.final_releases == 0);
+    V1_CHECK(f.engine.release_stream_final_v1(first_ticket.value()).error() ==
+             Error::NOT_FOUND);
+
+    std::uint64_t second_lease = 0U;
+    std::uint64_t second_revision = 0U;
+    V1_CHECK(acquire_and_tune(f, second_lease, second_revision));
+    const auto second_start = f.engine.start_stream_v1(
+        1U, second_lease, second_revision, 1000U, 5000U);
+    V1_CHECK(second_start);
+    const auto second_ticket = f.engine.reserve_attach_v1(
+        1U, second_lease, kEpoch, second_start.value().stream_id,
+        second_start.value().token, 1000U);
+    V1_CHECK(second_ticket);
+    V1_CHECK(f.engine.prepare_attach_v1(second_ticket.value()));
+    V1_CHECK(f.engine.commit_attach_v1(second_ticket.value()));
+    V1_CHECK(f.engine.stop_stream_v1(1U, second_lease, second_start.value().stream_id));
+    V1_CHECK(f.engine.run_stream_cleanup_v1(second_ticket.value()));
+    V1_CHECK(f.engine.release(1U, second_lease));
+
+    std::uint64_t third_lease = 0U;
+    std::uint64_t third_revision = 0U;
+    V1_CHECK(acquire_and_tune(f, third_lease, third_revision));
+    const auto third_start = f.engine.start_stream_v1(
+        1U, third_lease, third_revision, 1000U, 5000U);
+    V1_CHECK(third_start);
+    const auto third_ticket = f.engine.reserve_attach_v1(
+        1U, third_lease, kEpoch, third_start.value().stream_id,
+        third_start.value().token, 1000U);
+    V1_CHECK(!third_ticket && third_ticket.error() == Error::BUSY);
+    V1_CHECK(f.engine.expire_armed_v1(1U, third_lease,
+        third_start.value().stream_id, 6000U));
+    V1_CHECK(f.engine.release(1U, third_lease));
+    V1_CHECK(f.engine.release_stream_final_v1(second_ticket.value()));
+    V1_CHECK(f.stream.final_releases == 1);
+    V1_CHECK(f.engine.release_stream_final_v1(second_ticket.value()).error() ==
+             Error::NOT_FOUND);
+    return true;
+}
+
 }  // namespace
 
 int main()
@@ -665,7 +810,10 @@ int main()
                     test_old_a_to_new_b_isolation() &&
                     test_armed_expiry_and_exhaustion() &&
                     test_prepare_failure_closes_stream() &&
-                    test_stop_during_gated_prepare_retains_ownership();
+                    test_stop_during_gated_prepare_retains_ownership() &&
+                    test_released_lease_retains_exact_stream_final() &&
+                    test_released_final_is_not_retained_twice() &&
+                    test_phantom_final_does_not_block_next_physical_final();
     if (!ok) return 1;
     std::printf("stream v1 authority tests: PASS\n");
     return 0;

@@ -317,6 +317,11 @@ public:
     virtual Result<StreamCounters> stats(const Attachment& attachment) const noexcept = 0;
     virtual Result<StreamFinalSnapshot> final_snapshot(
         const Attachment& attachment) const noexcept = 0;
+    virtual Result<void> release_final(const Attachment& attachment) noexcept
+    {
+        (void)attachment;
+        return Result<void>::failure(Error::UNSUPPORTED);
+    }
 };
 
 class ReceiverEngine final {
@@ -490,6 +495,8 @@ public:
                                                      std::uint64_t lease_id) const noexcept;
     Result<Attachment> stream_attachment_v1(
         const StreamAttachTicket& ticket) const noexcept;
+    Result<void> release_stream_final_v1(
+        const StreamAttachTicket& ticket) noexcept;
     Result<StreamCounters> stream_stats_v1(
         const StreamAttachTicket& ticket) const noexcept;
     Result<StreamFinalSnapshot> stream_final_snapshot_v1(
@@ -505,6 +512,8 @@ public:
                                       std::uint64_t next_reservation) noexcept;
 
 private:
+    friend struct ReceiverEngineTestAccess;
+
     enum class StreamState : std::uint8_t {
         none,
         armed,
@@ -565,6 +574,9 @@ private:
         bool stream_quiesced = false;
         Error stream_cleanup_error = Error::OK;
         bool stream_final_valid = false;
+        // An exact data-plane detach succeeded and created this final.
+        bool stream_final_physical = false;
+        bool stream_final_released = false;
         std::uint8_t stream_final_terminal = 0U;
         std::uint64_t stream_final_stream_id = 0U;
         // Lease-lifetime most recent terminal.  It survives the next START and
@@ -574,6 +586,12 @@ private:
         std::uint8_t last_terminal = 0U;
         Error last_error = Error::OK;
         bool last_quiesced = false;
+    };
+
+    struct RetainedStreamFinal final {
+        bool valid = false;
+        StreamAttachTicket ticket{};
+        Attachment attachment{};
     };
 
     static bool valid_client(std::uint64_t client_id) noexcept;
@@ -647,6 +665,10 @@ private:
     // ticket with any changed field is not accepted as the cleanup owner.
     bool stream_cleanup_ticket_matches_locked(
         std::size_t slot, const StreamAttachTicket& ticket) const noexcept;
+    static bool same_stream_ticket(const StreamAttachTicket& left,
+                                   const StreamAttachTicket& right) noexcept;
+    static StreamAttachTicket stream_ticket_for(const Lease& lease,
+                                                std::uint64_t epoch) noexcept;
     // Shared retention policy for a recorded cleanup outcome.  It keeps the
     // first non-OK primary error, updates the physical quiescence observation
     // independently, and returns the lease to reusable only for a fully clean
@@ -684,6 +706,7 @@ private:
     std::uint64_t next_lease_instance_ = 1U;
     std::uint64_t generation_ = 1U;
     std::array<Lease, kReceiverEngineCapacity> leases_{};
+    std::array<RetainedStreamFinal, kReceiverEngineCapacity> retained_stream_finals_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_lease_ids_{};
     std::array<std::uint64_t, kReceiverEngineCapacity> reserved_attachment_ids_{};
     // Immutable stream contract and its context epoch, chosen before the first

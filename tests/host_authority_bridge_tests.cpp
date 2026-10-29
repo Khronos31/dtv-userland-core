@@ -280,13 +280,18 @@ public:
 
 class Stream final : public TunerStreamControl {
 public:
-    explicit Stream(bool missing_final_when_unattached = false) noexcept
-        : missing_final_when_unattached_(missing_final_when_unattached)
+    explicit Stream(bool missing_final_when_unattached = false,
+                    bool allow_attach_after_eof = false) noexcept
+        : missing_final_when_unattached_(missing_final_when_unattached),
+          allow_attach_after_eof_(allow_attach_after_eof)
     {
     }
     Result<void> attach(const TunerAttachment& attachment) noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
+        if (attached || (final_valid &&
+            !(allow_attach_after_eof_ && eof_returned)))
+            return Result<void>::failure(Error::BUSY);
         identity = attachment;
         attached = true;
         packets_remaining = 2U;
@@ -304,7 +309,9 @@ public:
             dtv::userland::wire::MeasureState::unsupported,
             dtv::userland::wire::MeasureState::unknown};
         final = TunerStreamFinalSnapshot{};
+        final_valid = false;
         final_released = false;
+        eof_returned = false;
         return Result<void>::success();
     }
     Result<void> detach(const TunerAttachment& attachment) noexcept override
@@ -320,15 +327,12 @@ public:
             }
         }
         std::lock_guard<std::mutex> lock(mutex);
-        if (!attached) {
-            final.counters = counters;
-            final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
-            return Result<void>::success();
-        }
-        if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
+        if (!attached || !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         attached = false;
         final.counters = counters;
         final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
+        final_identity = identity;
+        final_valid = true;
         return Result<void>::success();
     }
     Result<TunerStreamCounters> stats(
@@ -343,15 +347,21 @@ public:
         const TunerAttachment& attachment) const noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!same(attachment) || (!attached && missing_final_when_unattached_))
+        if (!(attached && same(attachment)) &&
+            !(final_valid && same_final(attachment)))
+            return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
+        if (!attached && missing_final_when_unattached_)
             return Result<TunerStreamFinalSnapshot>::failure(Error::NOT_FOUND);
         return Result<TunerStreamFinalSnapshot>::success(final);
     }
     Result<void> release_final(const TunerAttachment& attachment) noexcept override
     {
         std::lock_guard<std::mutex> lock(mutex);
-        if (!same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
+        if (!final_valid || !same_final(attachment))
+            return Result<void>::failure(Error::NOT_FOUND);
+        final_valid = false;
         final_released = true;
+        ++final_release_calls;
         return Result<void>::success();
     }
     Result<TunerStreamReadResult> read(const TunerAttachment& attachment,
@@ -366,10 +376,12 @@ public:
             return Result<TunerStreamReadResult>::success({188U, false, false,
                 TunerStreamTerminal::none});
         }
+        if (!attached) eof_returned = true;
         return Result<TunerStreamReadResult>::success({0U, !attached, attached,
             attached ? TunerStreamTerminal::none : TunerStreamTerminal::stopped});
     }
     bool final_released = false;
+    unsigned final_release_calls = 0U;
     void block_detach() noexcept
     {
         std::lock_guard<std::mutex> lock(detach_gate_mutex);
@@ -404,7 +416,17 @@ private:
             identity.receiver == other.receiver && identity.system == other.system &&
             identity.nonce == other.nonce;
     }
+    bool same_final(const TunerAttachment& other) const noexcept
+    {
+        return final_identity.owner_client_id == other.owner_client_id &&
+            final_identity.lease_id == other.lease_id &&
+            final_identity.attachment_id == other.attachment_id &&
+            final_identity.receiver == other.receiver &&
+            final_identity.system == other.system &&
+            final_identity.nonce == other.nonce;
+    }
     TunerAttachment identity{};
+    TunerAttachment final_identity{};
     TunerStreamCounters counters{};
     TunerStreamFinalSnapshot final{};
     std::mutex detach_gate_mutex;
@@ -413,8 +435,40 @@ private:
     bool detach_entered = false;
     bool detach_released = false;
     bool attached = false;
+    bool final_valid = false;
+    bool eof_returned = false;
     unsigned packets_remaining = 0U;
     bool missing_final_when_unattached_ = false;
+    bool allow_attach_after_eof_ = false;
+};
+
+class CleanupExecutionBarrier final {
+public:
+    static void before_execute(void* context) noexcept
+    {
+        auto& barrier = *static_cast<CleanupExecutionBarrier*>(context);
+        std::unique_lock<std::mutex> lock(barrier.mutex_);
+        ++barrier.count_;
+        barrier.condition_.notify_all();
+        if (barrier.count_ == 2U)
+            barrier.condition_.wait(lock, [&barrier] { return barrier.released_; });
+    }
+    unsigned count() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return count_;
+    }
+    void release() noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+        condition_.notify_all();
+    }
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    unsigned count_ = 0U;
+    bool released_ = false;
 };
 
 class CardBackend final : public CardServiceBackend {
@@ -701,8 +755,9 @@ bool wait_free(HostAuthorityBridge& bridge, std::uint8_t slot)
 }
 
 struct ActiveStreamFixture final {
-    explicit ActiveStreamFixture(bool missing_final_when_unattached = false) noexcept
-        : stream(missing_final_when_unattached)
+    explicit ActiveStreamFixture(bool missing_final_when_unattached = false,
+                                 bool allow_attach_after_eof = false) noexcept
+        : stream(missing_final_when_unattached, allow_attach_after_eof)
     {
     }
 
@@ -3070,6 +3125,269 @@ bool test_control_close_cleans_owned_stream_before_disconnect()
     return true;
 }
 
+bool test_completed_cleanup_close(bool close_control, bool partial_final)
+{
+    const auto fail = [](const char* step) {
+        std::cerr << "completed cleanup close step=" << step << "\n";
+        return false;
+    };
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    Stream stream;
+    TunerService tuner(backend, nonce, time, nullptr, nullptr, &stream);
+    if (!tuner.configure_strict_capabilities() ||
+        !tuner.configure_stream_contract(
+            dtv::userland::detail::StreamContract::v1, 0x5349414e4fULL))
+        return fail("configure-tuner");
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    CleanupExecutionBarrier barrier;
+    ControlWorkerStartupOptions options;
+    options.before_stream_cleanup_execute = &CleanupExecutionBarrier::before_execute;
+    options.before_stream_cleanup_execute_context = &barrier;
+    auto created = ControlWorkerLanes::create_for_test(card, tuner, options);
+    if (!created) return fail("workers");
+    const auto list = make_list();
+    w::ServerHello server{list.epoch, list.producer, 0U};
+    HostAuthorityBridge bridge(tuner, *created.value(), server, list);
+    if (bridge.configure_stream_contract(0x5349414e4fULL, 5000U) != Error::OK)
+        return fail("configure-bridge");
+    const auto control = bridge.open_session();
+    if (!control || !hello(bridge, control.value())) return fail("hello");
+    std::uint64_t lease = 0U;
+    if (!acquire(bridge, control.value(), 2U, lease) ||
+        !tune(bridge, control.value(), list.epoch, lease)) return fail("acquire-tune");
+    const auto first_status = tuner.engine_status();
+    if (!first_status) return fail("first-status");
+    const std::uint64_t client = bridge.client_id(control.value());
+    const auto phantom_start = tuner.authority_start_stream_v1(
+        client, lease, first_status.value().tune_metadata[2U].current_revision,
+        100U, 5000U);
+    if (!phantom_start) return fail("phantom-start");
+    const auto phantom_ticket = tuner.authority_reserve_attach_v1(
+        client, lease, 0x5349414e4fULL, phantom_start.value().stream_id,
+        phantom_start.value().token, 100U);
+    if (!phantom_ticket ||
+        !tuner.authority_abort_attach_v1(phantom_ticket.value(), Error::OK) ||
+        !tuner.authority_run_stream_cleanup_v1(phantom_ticket.value()))
+        return fail("phantom-abort-cleanup");
+    if (tuner.authority_release_stream_final_v1(phantom_ticket.value()).error() !=
+        Error::NOT_FOUND) return fail("phantom-final-visible");
+    if (!release(bridge, control.value(), list.epoch, lease, 6U))
+        return fail("phantom-release");
+    lease = 0U;
+    if (!acquire(bridge, control.value(), 2U, lease, 7U) ||
+        !tune(bridge, control.value(), list.epoch, lease, 8U))
+        return fail("next-acquire-tune");
+    const auto status = tuner.engine_status();
+    if (!status) return fail("status");
+    w::StartRequest start_request;
+    start_request.epoch = list.epoch;
+    start_request.lease_id = lease;
+    start_request.tune_revision = status.value().tune_metadata[2U].current_revision;
+    std::array<std::uint8_t, w::kMaxControlPayload> start_payload{};
+    const auto start_size = w::encode_start_request(
+        start_request, {start_payload.data(), start_payload.size()});
+    w::Context start_context;
+    start_context.epoch = list.epoch;
+    start_context.state = w::ContextState::ready;
+    w::Snapshot start_snapshot;
+    const auto start_reply = start_size ? bridge.accept(control.value(),
+        frame(w::kOpcodeStartStream, 9U,
+              {start_payload.data(), start_size.value()}), start_context,
+        start_snapshot, 100U) : dtv::userland::detail::AuthorityReply{};
+    if (start_reply.action != w::InboundAction::respond ||
+        bridge.response_sent(control.value(), true) != Error::OK) return fail("start");
+    const auto started = w::decode_start_response(
+        {start_reply.frame.data + w::kHeaderSize,
+         start_reply.frame.size - w::kHeaderSize});
+    if (!started) return fail("start-decode");
+    const auto data = bridge.open_data_session();
+    if (!data) return fail("open-data");
+    w::AttachRequest request;
+    request.epoch = list.epoch;
+    request.lease_id = lease;
+    request.stream_id = started.value().stream_id;
+    request.attach_token = started.value().attach_token;
+    if (bridge.prepare_data_attach(data.value(), control.value(), request, 101U) !=
+        Error::OK) return fail("prepare-attach");
+    HostAuthorityAttachResult attached{};
+    const auto attach_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!attached.ready && std::chrono::steady_clock::now() < attach_until) {
+        (void)bridge.poll();
+        attached = bridge.take_data_attach_result(data.value());
+        if (!attached.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!attached.ready || attached.error != Error::OK ||
+        bridge.data_attach_response_sent(data.value(), true) != Error::OK)
+        return fail("attach-commit");
+
+    if (!bridge.stop_stream_v1(client, lease, started.value().stream_id))
+        return fail("first-stop");
+    std::array<std::uint8_t, 188U> packet{};
+    HostAuthorityStreamEndResult stream_end{};
+    const auto cleanup_until =
+        std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!stream_end.ready && std::chrono::steady_clock::now() < cleanup_until) {
+        (void)bridge.poll();
+        const auto read = bridge.read_data(data.value(),
+            {packet.data(), packet.size()}, Timeout{0U});
+        if (read.eof) stream_end = bridge.take_data_stream_end(data.value());
+        if (!stream_end.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!stream_end.ready || barrier.count() != 1U) return fail("first-cleanup-complete");
+    if (!release(bridge, control.value(), list.epoch, lease, 10U))
+        return fail("wire-release-after-cleanup");
+    if (partial_final && bridge.data_stream_end_sent(data.value(), false) != Error::OK)
+        return fail("partial-final-send");
+
+    const std::size_t free_before = bridge.data_counts().free;
+    const Error close_error = close_control
+        ? bridge.close_session(control.value())
+        : bridge.close_data_session(data.value());
+    if (close_error != Error::OK) {
+        barrier.release();
+        std::cerr << "completed cleanup close error="
+                  << static_cast<unsigned>(close_error) << "\n";
+        bridge.close_session_for_test(control.value());
+        return fail("close");
+    }
+    bool idle = false;
+    bool duplicate = false;
+    const auto idle_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!idle && !duplicate && std::chrono::steady_clock::now() < idle_until) {
+        (void)bridge.poll();
+        duplicate = barrier.count() > 1U;
+        idle = created.value()->idle();
+        if (!idle && !duplicate) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    barrier.release();
+    if (duplicate || !idle) {
+        const auto reap_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+        while (!created.value()->idle() && std::chrono::steady_clock::now() < reap_until) {
+            (void)bridge.poll();
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+        (void)bridge.poll();
+        bridge.close_session_for_test(control.value());
+        return fail("duplicate-cleanup-queued");
+    }
+    if (stream.final_release_calls != 1U ||
+        bridge.data_counts().free != free_before + 1U ||
+        bridge.data_counts().tombstone != 0U ||
+        bridge.counts().fatal_unresolved != 0U)
+        return fail("final-slot-or-fatal");
+    if (partial_final &&
+        (bridge.data_stream_end_sent(data.value(), true) != Error::NOT_FOUND ||
+         bridge.counts().fatal_unresolved != 0U || stream.final_release_calls != 1U))
+        return fail("late-final-send");
+    if (!close_control) bridge.close_session_for_test(control.value());
+    return true;
+}
+
+bool test_completed_cleanup_not_requeued_on_data_close()
+{
+    return test_completed_cleanup_close(false, false);
+}
+
+bool test_completed_cleanup_not_requeued_on_control_close()
+{
+    return test_completed_cleanup_close(true, false);
+}
+
+bool test_completed_cleanup_close_during_final_send()
+{
+    return test_completed_cleanup_close(false, true);
+}
+
+bool test_eof_retained_final_admission(bool close_old_data)
+{
+    ActiveStreamFixture fixture(false, true);
+    if (!fixture.start()) return false;
+    const auto first_data = fixture.bridge->open_data_session();
+    if (!first_data || !fixture.attach(first_data.value())) return false;
+    const std::uint64_t client = fixture.bridge->client_id(fixture.control);
+    if (!fixture.bridge->stop_stream_v1(client, fixture.lease,
+                                        fixture.stream_id)) return false;
+    std::array<std::uint8_t, 188U> packet{};
+    HostAuthorityStreamEndResult first_end{};
+    const auto first_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!first_end.ready && std::chrono::steady_clock::now() < first_until) {
+        (void)fixture.bridge->poll();
+        const auto read = fixture.bridge->read_data(first_data.value(),
+            {packet.data(), packet.size()}, Timeout{0U});
+        if (read.eof) first_end = fixture.bridge->take_data_stream_end(first_data.value());
+        if (!first_end.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!first_end.ready) return false;
+    const auto status = fixture.tuner.engine_status();
+    if (!status) return false;
+    const auto next_start = fixture.bridge->start_stream(fixture.control, fixture.lease,
+        status.value().tune_metadata[2U].current_revision, 200U, 5000U);
+    const auto next_data = fixture.bridge->open_data_session();
+    if (!next_start || !next_data) return false;
+    w::AttachRequest request;
+    request.epoch = fixture.list.epoch;
+    request.lease_id = fixture.lease;
+    request.stream_id = next_start.value().stream_id;
+    request.attach_token = next_start.value().token;
+    if (fixture.bridge->prepare_data_attach(next_data.value(), fixture.control,
+                                             request, 201U) != Error::BUSY ||
+        fixture.bridge->counts().fatal_unresolved != 0U)
+        return false;
+
+    if (close_old_data) {
+        if (fixture.bridge->close_data_session(first_data.value()) != Error::OK)
+            return false;
+    } else if (fixture.bridge->data_stream_end_sent(first_data.value(), true) != Error::OK) {
+        return false;
+    }
+    if (fixture.bridge->prepare_data_attach(next_data.value(), fixture.control,
+                                             request, 202U) != Error::OK)
+        return false;
+    HostAuthorityAttachResult attached{};
+    const auto attach_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!attached.ready && std::chrono::steady_clock::now() < attach_until) {
+        (void)fixture.bridge->poll();
+        attached = fixture.bridge->take_data_attach_result(next_data.value());
+        if (!attached.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!attached.ready || attached.error != Error::OK ||
+        fixture.bridge->data_attach_response_sent(next_data.value(), true) != Error::OK)
+        return false;
+
+    if (!fixture.bridge->stop_stream_v1(client, fixture.lease,
+                                        next_start.value().stream_id)) return false;
+    HostAuthorityStreamEndResult next_end{};
+    const auto next_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!next_end.ready && std::chrono::steady_clock::now() < next_until) {
+        (void)fixture.bridge->poll();
+        const auto read = fixture.bridge->read_data(next_data.value(),
+            {packet.data(), packet.size()}, Timeout{0U});
+        if (read.eof) next_end = fixture.bridge->take_data_stream_end(next_data.value());
+        if (!next_end.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    if (!next_end.ready ||
+        fixture.bridge->data_stream_end_sent(next_data.value(), true) != Error::OK ||
+        !release(*fixture.bridge, fixture.control, fixture.list.epoch,
+                 fixture.lease, 13U) ||
+        fixture.bridge->close_session(fixture.control) != Error::OK ||
+        fixture.bridge->begin_shutdown() != Error::OK)
+        return false;
+    const auto shutdown_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() &&
+           std::chrono::steady_clock::now() < shutdown_until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return fixture.bridge->stopped() &&
+           fixture.bridge->shutdown_result() == Error::OK &&
+           fixture.bridge->counts().fatal_unresolved == 0U &&
+           fixture.bridge->data_counts().free == kHostAuthoritySessionCapacity;
+}
+
 bool test_duplicate_completion_is_ignored()
 {
     Backend backend;
@@ -3799,6 +4117,16 @@ int main(int argc, char** argv)
         else if (selected == "b1") passed = test_finish_control_close_waits_for_owned_stream();
         else if (selected == "n4") passed = test_accept_preserves_close_pending_before_poll();
         else if (selected == "n5") passed = test_response_sent_retains_rejected_hello_disconnect();
+        else if (selected == "duplicate-cleanup-data")
+            passed = test_completed_cleanup_not_requeued_on_data_close();
+        else if (selected == "duplicate-cleanup-control")
+            passed = test_completed_cleanup_not_requeued_on_control_close();
+        else if (selected == "duplicate-cleanup-final")
+            passed = test_completed_cleanup_close_during_final_send();
+        else if (selected == "eof-retained-end")
+            passed = test_eof_retained_final_admission(false);
+        else if (selected == "eof-retained-close")
+            passed = test_eof_retained_final_admission(true);
         else if (selected == "admission-close")
             passed = test_invalidated_admission_bridge_close();
         else if (selected == "admission-contention")
@@ -3848,6 +4176,14 @@ int main(int argc, char** argv)
     }
     if (!test_control_close_cleans_owned_stream_before_disconnect()) {
         std::cerr << "control close stream cleanup ordering fixture failed\n";
+        return 1;
+    }
+    if (!test_completed_cleanup_not_requeued_on_data_close() ||
+        !test_completed_cleanup_not_requeued_on_control_close() ||
+        !test_completed_cleanup_close_during_final_send() ||
+        !test_eof_retained_final_admission(false) ||
+        !test_eof_retained_final_admission(true)) {
+        std::cerr << "completed stream cleanup close fixture failed\n";
         return 1;
     }
     if (!test_rejected_start_does_not_record_stream()) {
