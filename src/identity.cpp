@@ -176,6 +176,8 @@ const char* product_slug(Product product) noexcept
         return "pix-userland";
     case Product::siano:
         return "siano-userland";
+    case Product::torne:
+        return "torne-userland";
     }
     return nullptr;
 }
@@ -193,6 +195,9 @@ Result<Product> parse_product(std::string_view slug) noexcept
     }
     if (slug == "siano-userland") {
         return Result<Product>::success(Product::siano);
+    }
+    if (slug == "torne-userland") {
+        return Result<Product>::success(Product::torne);
     }
     return Result<Product>::failure(Error::INVALID_ARGUMENT);
 }

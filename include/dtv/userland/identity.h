@@ -23,12 +23,13 @@ using dtv::userland::Error;
 using dtv::userland::MutableByteView;
 using dtv::userland::Result;
 
-// The four adopted product slugs. No model/VID:PID/random fallback exists.
+// The five adopted product slugs. No model/VID:PID/random fallback exists.
 enum class Product : std::uint8_t {
     px4 = 1U,
     asicen = 2U,
     pix = 3U,
     siano = 4U,
+    torne = 5U,
 };
 
 const char* product_slug(Product product) noexcept;
