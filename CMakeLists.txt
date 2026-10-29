@@ -1,5 +1,5 @@
 cmake_minimum_required(VERSION 3.16)
-project(dtv_userland_core VERSION 0.1.0 LANGUAGES CXX)
+project(dtv_userland_core VERSION 1.0.0 LANGUAGES CXX)
 
 include(GNUInstallDirs)
 if(CMAKE_SOURCE_DIR STREQUAL CMAKE_CURRENT_SOURCE_DIR)
