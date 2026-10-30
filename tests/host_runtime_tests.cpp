@@ -2,6 +2,7 @@
 #include "dtv/userland/host_runtime/family.h"
 #include "dtv/userland/host_runtime/control_socket.h"
 #include "dtv/userland/host_facade/px4d_signals.h"
+#include "host_runtime_test_access.h"
 #if defined(_WIN32)
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -25,12 +26,16 @@
 #include <sys/un.h>
 #include <sys/wait.h>
 #include <unistd.h>
+#include <atomic>
+#include <thread>
 #endif
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cwchar>
 #include <cstring>
+#include <filesystem>
 #include <string>
 #include <vector>
 
@@ -912,6 +917,122 @@ bool endpoint_connect_diagnostic_text_test()
 }
 #endif
 
+#if !defined(_WIN32)
+bool write_all_boundary_test() noexcept
+{
+    std::array<char, 64U> temporary{};
+    const char pattern[] = "/tmp/dtv-write-all-XXXXXX";
+    std::memcpy(temporary.data(), pattern, sizeof(pattern));
+    char* root_value = ::mkdtemp(temporary.data());
+    if (root_value == nullptr) return false;
+    const std::string root(root_value);
+    const std::string product = root + "/siano-userland";
+    const std::string version = product + "/v1";
+    const std::string instance = version + "/test";
+    bool ok = make_directory(product) && make_directory(version) &&
+        make_directory(instance);
+    dtv::userland::host_runtime::EndpointConfig config{root, "siano-userland", "test"};
+    const auto path = dtv::userland::host_runtime::control_endpoint_path(config);
+    int server = -1;
+    if (!ok || !path || path.value().size() >= sizeof(sockaddr_un{}.sun_path)) {
+        ok = false;
+    } else {
+        server = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, path.value().c_str(), path.value().size() + 1U);
+        ok = server >= 0 &&
+            ::bind(server, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
+            ::chmod(path.value().c_str(), 0600) == 0 && ::listen(server, 4) == 0;
+    }
+
+    int effective_send_buffer = 0;
+    if (ok) {
+        auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
+        int peer = -1;
+        if (transport) peer = ::accept(server, nullptr, nullptr);
+        if (!transport || peer < 0) ok = false;
+        else {
+            int receive_buffer = 4096;
+            const int send_buffer = 4096;
+            ok = ::setsockopt(peer, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                              static_cast<socklen_t>(sizeof(receive_buffer))) == 0 &&
+                 dtv::userland::host_runtime::test_access::set_client_send_buffer(
+                     *transport.value(), send_buffer);
+            std::vector<std::uint8_t> payload(1024U * 1024U);
+            for (std::size_t index = 0U; index < payload.size(); ++index)
+                payload[index] = static_cast<std::uint8_t>(index);
+            std::vector<std::uint8_t> received(payload.size());
+            std::atomic<bool> reader_ok{true};
+            std::thread reader([&]() {
+                std::size_t offset = 0U;
+                while (offset < received.size()) {
+                    const ssize_t count = ::recv(peer, received.data() + offset,
+                                                 received.size() - offset, 0);
+                    if (count <= 0) {
+                        reader_ok.store(false);
+                        return;
+                    }
+                    offset += static_cast<std::size_t>(count);
+                }
+            });
+            const auto started = std::chrono::steady_clock::now();
+            const auto written = transport.value()->write_all(
+                dtv::userland::ByteView{payload.data(), payload.size()}, {5000U});
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            effective_send_buffer =
+                dtv::userland::host_runtime::test_access::client_send_buffer(
+                    *transport.value());
+            if (!written) transport.value()->close();
+            reader.join();
+            ok = ok && written && reader_ok.load() && received == payload;
+            std::printf("posix_write_all_1mib_elapsed_ms=%lld\n",
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                elapsed).count()));
+            if (written) transport.value()->close();
+            (void)::close(peer);
+        }
+    }
+    if (effective_send_buffer > 0) {
+        std::printf("posix_write_all_effective_sndbuf=%d payload=%zu\n",
+                    effective_send_buffer, 1024U * 1024U);
+    }
+    ok = ok && effective_send_buffer > 0 &&
+         static_cast<std::size_t>(effective_send_buffer) < 1024U * 1024U;
+
+    if (ok) {
+        auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
+        int peer = -1;
+        if (transport) peer = ::accept(server, nullptr, nullptr);
+        if (!transport || peer < 0) ok = false;
+        else {
+            int receive_buffer = 4096;
+            ok = ::setsockopt(peer, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
+                              static_cast<socklen_t>(sizeof(receive_buffer))) == 0;
+            std::vector<std::uint8_t> payload(16U * 1024U * 1024U, 0x5aU);
+            const auto started = std::chrono::steady_clock::now();
+            const auto written = transport.value()->write_all(
+                dtv::userland::ByteView{payload.data(), payload.size()}, {200U});
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            ok = ok && !written && written.error() == dtv::userland::Error::TIMEOUT &&
+                 elapsed >= std::chrono::milliseconds(100);
+            std::printf("posix_write_all_timeout_elapsed_ms=%lld\n",
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                elapsed).count()));
+            transport.value()->close();
+            (void)::close(peer);
+        }
+    }
+
+    if (server >= 0) (void)::close(server);
+    std::filesystem::remove_all(root);
+    if (ok) std::puts("posix_write_all_large_frame_and_blocked_timeout=PASS");
+    return ok;
+}
+#endif  // !defined(_WIN32)
+
 }  // namespace
 
 int main()
@@ -949,6 +1070,10 @@ int main()
         return 1;
     }
 #if !defined(_WIN32)
+    if (!write_all_boundary_test()) {
+        std::fputs("POSIX write_all boundary fixture failed\n", stderr);
+        return 1;
+    }
     if (!shared_group_distinct_uid_test()) {
         std::fputs("POSIX shared-group distinct-UID fixture failed\n", stderr);
         return 1;

@@ -1231,9 +1231,34 @@ if(DTV_USERLAND_BUILD_TESTING)
             target_compile_options(dtv_userland_host_facade_test PRIVATE /EHs-c- /GR- /W4)
             set(_dtv_userland_host_facade_test_target dtv_userland_host_facade_test)
         endif()
+        add_library(dtv_userland_host_runtime_test STATIC
+            adapters/host_runtime/src/control_socket.cpp
+            adapters/host_runtime/src/posix_client_compat.cpp
+            adapters/host_runtime/src/posix_tuner_nonce.cpp
+            adapters/host_runtime/src/windows_tuner_nonce.cpp)
+        set_target_properties(dtv_userland_host_runtime_test PROPERTIES
+            CXX_STANDARD 17
+            CXX_STANDARD_REQUIRED YES
+            CXX_EXTENSIONS OFF)
+        target_compile_features(dtv_userland_host_runtime_test PUBLIC cxx_std_17)
+        target_include_directories(dtv_userland_host_runtime_test PUBLIC
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_runtime/include>
+            $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>)
+        target_link_libraries(dtv_userland_host_runtime_test PUBLIC
+            dtv::host_tuner dtv::host_workers)
+        target_compile_definitions(dtv_userland_host_runtime_test PRIVATE
+            DTV_USERLAND_HOST_RUNTIME_TEST_ACCESS=1)
+        if(MSVC)
+            target_compile_options(dtv_userland_host_runtime_test PRIVATE /EHs-c- /GR- /W4)
+            target_link_libraries(dtv_userland_host_runtime_test PUBLIC
+                bcrypt ws2_32 advapi32)
+        else()
+            target_compile_options(dtv_userland_host_runtime_test PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
         add_executable(host_runtime_tests tests/host_runtime_tests.cpp)
         target_link_libraries(host_runtime_tests PRIVATE
-            dtv::host_runtime ${_dtv_userland_host_facade_test_target})
+            dtv_userland_host_runtime_test ${_dtv_userland_host_facade_test_target})
         add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
     endif()
     if(WIN32 AND DTV_USERLAND_BUILD_HOST_FACADE)
