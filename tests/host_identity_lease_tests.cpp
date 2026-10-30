@@ -202,6 +202,7 @@ bool test_runtime_directory_diagnostics()
         auto lease = IdentityLease::acquire(config, "identity", &diagnostic);
         CHECK(!lease && lease.error() == Error::NOT_FOUND);
         CHECK(diagnostic.reason == IdentityLeaseDiagnosticReason::runtime_directory_missing);
+        CHECK(!std::filesystem::exists(missing));
     }
     {
         const std::string file = root + "/file";
