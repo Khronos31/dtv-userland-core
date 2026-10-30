@@ -289,7 +289,8 @@ bool transmit(std::size_t& response_count)
         static_cast<DWORD>(apdu.size()), response.data(), &response_length,
         &receive_pci);
     if (result == IFD_SUCCESS && response_length == 2U &&
-        response[0U] == 0x90U && response[1U] == 0x00U) {
+        response[0U] == 0x90U && response[1U] == 0x00U &&
+        receive_pci.Protocol == dtv::userland::unix_pcsc_ifd::kIfdTransmitProtocolT1) {
         ++response_count;
         return true;
     }
@@ -324,24 +325,72 @@ bool test_listener_reinsert()
 
     std::string device_name = std::string(kProfile.device_prefix) +
         "runtime=" + runtime.path() + ":instance=" + instance + ":access=user";
+    CHECK(IFDHCreateChannel(0U, 0U) == IFD_NOT_SUPPORTED);
+    CHECK(IFDHCreateChannelByName(1U, device_name.data()) == IFD_NO_SUCH_DEVICE);
     CHECK(IFDHCreateChannelByName(0U, device_name.data()) == IFD_SUCCESS);
     CHECK(IFDHICCPresence(0U) == IFD_ICC_PRESENT);
 
     std::array<UCHAR, MAX_ATR_SIZE> atr{};
     DWORD atr_length = static_cast<DWORD>(atr.size());
+    atr.fill(0xa5U);
     CHECK(IFDHPowerICC(0U, IFD_POWER_UP, atr.data(), &atr_length) == IFD_SUCCESS);
-    CHECK(atr_length != 0U);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
     CHECK(IFDHSetProtocolParameters(0U, SCARD_PROTOCOL_T1, 0U, 0U, 0U, 0U) ==
           IFD_SUCCESS);
+
+    atr.fill(0U);
+    atr_length = 0U;
+    CHECK(IFDHPowerICC(0U, IFD_RESET, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
+
+    DWORD queried_length = 0U;
+    CHECK(IFDHGetCapabilities(0U, TAG_IFD_ATR, &queried_length, nullptr) ==
+          IFD_ERROR_INSUFFICIENT_BUFFER);
+    CHECK(queried_length == 2U);
+    std::array<UCHAR, MAX_ATR_SIZE> queried_atr{};
+    queried_length = static_cast<DWORD>(queried_atr.size());
+    CHECK(IFDHGetCapabilities(0U, TAG_IFD_ATR, &queried_length,
+                             queried_atr.data()) == IFD_SUCCESS);
+    CHECK(queried_length == 2U && queried_atr[0U] == 0x3bU &&
+          queried_atr[1U] == 0x00U);
+
+    const std::array<UCHAR, 5U> invalid_apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    std::array<UCHAR, 16U> invalid_response{};
+    const std::array<DWORD, 2U> invalid_protocols{0U, SCARD_PROTOCOL_T1};
+    for (const DWORD protocol : invalid_protocols) {
+        DWORD response_length = static_cast<DWORD>(invalid_response.size());
+        const SCARD_IO_HEADER invalid_pci{protocol, sizeof(SCARD_IO_HEADER)};
+        SCARD_IO_HEADER invalid_receive_pci{};
+        CHECK(IFDHTransmitToICC(0U, invalid_pci, const_cast<UCHAR*>(invalid_apdu.data()),
+                                static_cast<DWORD>(invalid_apdu.size()),
+                                invalid_response.data(), &response_length,
+                                &invalid_receive_pci) == IFD_PROTOCOL_NOT_SUPPORTED);
+        CHECK(response_length == 0U);
+    }
 
     std::size_t apdu_count = 0U;
     CHECK(transmit(apdu_count));
     CHECK(apdu_count == 1U && session.transmits.load() == 1U);
 
+    atr.fill(0U);
+    atr_length = 0U;
+    CHECK(IFDHPowerICC(0U, IFD_RESET, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
+
     card.present.store(false, std::memory_order_release);
     CHECK(IFDHICCPresence(0U) == IFD_ICC_NOT_PRESENT);
     const std::size_t after_removal = session.transmits.load();
-    CHECK(!transmit(apdu_count));
+    const std::array<UCHAR, 5U> removed_apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    std::array<UCHAR, 16U> removed_response{};
+    DWORD removed_response_length = static_cast<DWORD>(removed_response.size());
+    const SCARD_IO_HEADER removed_send_pci{1U, sizeof(SCARD_IO_HEADER)};
+    SCARD_IO_HEADER removed_receive_pci{};
+    CHECK(IFDHTransmitToICC(0U, removed_send_pci,
+                            const_cast<UCHAR*>(removed_apdu.data()),
+                            static_cast<DWORD>(removed_apdu.size()),
+                            removed_response.data(), &removed_response_length,
+                            &removed_receive_pci) == IFD_ICC_NOT_PRESENT);
+    CHECK(removed_response_length == 0U);
     CHECK(apdu_count == 1U && session.transmits.load() == after_removal);
 
     const hr::EndpointConfig endpoint{runtime.path(), kProfile.product, instance,
@@ -376,17 +425,39 @@ bool test_listener_reinsert()
     CHECK(!transmit(apdu_count));
     CHECK(apdu_count == 1U && session.transmits.load() == before_reset);
     atr.fill(0U);
-    atr_length = static_cast<DWORD>(atr.size());
+    atr_length = 0U;
     CHECK(IFDHPowerICC(0U, IFD_RESET, atr.data(), &atr_length) == IFD_SUCCESS);
-    CHECK(atr_length != 0U);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
     CHECK(transmit(apdu_count));
     CHECK(apdu_count == 2U && session.transmits.load() == 2U);
-    CHECK(IFDHCloseChannel(0U) == IFD_SUCCESS);
 
+    atr.fill(0xffU);
+    atr_length = static_cast<DWORD>(atr.size());
+    CHECK(IFDHPowerICC(0U, IFD_POWER_DOWN, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 0U);
+    for (const UCHAR value : atr) CHECK(value == 0U);
+    CHECK(IFDHICCPresence(0U) == IFD_ICC_PRESENT);
+    std::uint8_t interface_status = 1U;
+    DWORD interface_status_length = sizeof(interface_status);
+    CHECK(IFDHGetCapabilities(0U, dtv::userland::unix_pcsc_ifd::kAttrIccInterfaceStatus, &interface_status_length,
+                              &interface_status) == IFD_SUCCESS);
+    CHECK(interface_status_length == sizeof(interface_status) &&
+          interface_status == 0U);
+    atr_length = static_cast<DWORD>(atr.size());
+    CHECK(IFDHPowerICC(0U, IFD_POWER_UP, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
+
+    DWORD returned = 99U;
+    CHECK(IFDHControl(0U, 0U, nullptr, 0U, nullptr, 0U, &returned) ==
+          IFD_NOT_SUPPORTED);
+    CHECK(returned == 0U);
+    CHECK(IFDHICCPresence(1U) == IFD_NO_SUCH_DEVICE);
+
+    CHECK(IFDHCloseChannel(0U) == IFD_SUCCESS);
     CHECK(IFDHCreateChannelByName(0U, device_name.data()) == IFD_SUCCESS);
     atr_length = static_cast<DWORD>(atr.size());
     CHECK(IFDHPowerICC(0U, IFD_POWER_UP, atr.data(), &atr_length) == IFD_SUCCESS);
-    CHECK(atr_length != 0U);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
 
     runner.stop_and_join();
     CHECK(runner.healthy());
@@ -436,6 +507,7 @@ bool test_listener_reinsert()
     CHECK(stopped_reset == IFD_ICC_NOT_PRESENT);
     CHECK(atr_length == 0U);
     const RESPONSECODE stopped_close = IFDHCloseChannel(0U);
+    CHECK(stopped_close == IFD_SUCCESS);
     std::printf("listener_stop profile=%s transmit=%lu presence=%lu reset=%lu atr=%lu close=%lu apdus=%zu\n",
                 kProfile.product, static_cast<unsigned long>(stopped_transmit),
                 static_cast<unsigned long>(stopped_presence),
