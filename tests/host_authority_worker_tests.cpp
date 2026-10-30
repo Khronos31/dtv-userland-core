@@ -3,9 +3,12 @@
 #include "px4/host_authority_owner.h"
 
 #include <array>
+#include <atomic>
 #include <chrono>
+#include <condition_variable>
 #include <cstdint>
 #include <iostream>
+#include <mutex>
 #include <thread>
 
 namespace {
@@ -30,7 +33,25 @@ public:
         std::uint8_t, std::uint64_t, std::uint32_t) noexcept override
     {
         ++hz_calls;
+        if (block_tune.load(std::memory_order_acquire)) {
+            std::unique_lock<std::mutex> lock(mutex_);
+            tune_active.store(true, std::memory_order_release);
+            tune_entered = true;
+            condition_.notify_all();
+            const bool released = condition_.wait_for(lock, std::chrono::seconds(5),
+                [this] { return !block_tune.load(std::memory_order_acquire); });
+            tune_active.store(false, std::memory_order_release);
+            if (!released) return Result<TunerHzProgramming>::failure(Error::TIMEOUT);
+        }
         return Result<TunerHzProgramming>::success({});
+    }
+    bool supports_internal_card_observation() const noexcept override { return true; }
+    w::Optional<bool> sample_internal_card_inserted() noexcept override
+    {
+        if (tune_active.load(std::memory_order_acquire))
+            status_during_tune.store(true, std::memory_order_release);
+        status_calls.fetch_add(1U, std::memory_order_relaxed);
+        return w::Optional<bool>{true, false};
     }
     TunerStrictProfile strict_profile(std::uint8_t receiver,
                                       ipc::System system) const noexcept override
@@ -72,6 +93,27 @@ public:
     bool lnb_known = false;
     Error lnb_error = Error::OK;
     std::array<bool, 8U> closed{};
+    std::atomic<bool> block_tune{false};
+    std::atomic<bool> tune_active{false};
+    std::atomic<bool> status_during_tune{false};
+    std::atomic<unsigned> status_calls{0U};
+
+    bool wait_tune_entered()
+    {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return condition_.wait_for(lock, std::chrono::seconds(3),
+                                   [this] { return tune_entered; });
+    }
+    void release_tune()
+    {
+        block_tune.store(false, std::memory_order_release);
+        condition_.notify_all();
+    }
+
+private:
+    std::mutex mutex_;
+    std::condition_variable condition_;
+    bool tune_entered = false;
 };
 
 class Nonce final : public TunerNonceSource {
@@ -288,7 +330,12 @@ int main()
     CardBackend card_backend;
     CardSession card_session;
     CardService card(card_backend, card_session);
-    auto created = ControlWorkerLanes::create(card, tuner);
+    ControlExecutionLayout execution{};
+    execution.receiver_lane.fill(ControlWorkerLane::tuner_dev2);
+    execution.receiver_lane[2U] = ControlWorkerLane::tuner_dev1;
+    execution.receiver_lane[4U] = ControlWorkerLane::tuner_dev2;
+    execution.status_lane = ControlWorkerLane::tuner_dev1;
+    auto created = ControlWorkerLanes::create(card, tuner, nullptr, execution);
     if (!created) return fail("worker create failed");
     ControlWorkerLanes& workers = *created.value();
 
@@ -399,19 +446,65 @@ int main()
         tune_job.key.request_id != 6U || tune_job.tune.receiver != 2U)
         return fail("authority tune job lost its origin values");
     const auto tune_task = task_for(tune_job, ControlWorkerTaskKind::authority_request);
+    backend.block_tune.store(true, std::memory_order_release);
     if (workers.submit(ControlWorkerLane::tuner_dev1, tune_task).error() != Error::OK)
         return fail("authority tune task was rejected on its receiver lane");
+    if (!backend.wait_tune_entered())
+        return fail("authority tune did not enter the blocked shared command resource");
+    AuthorityJob status_job{};
+    status_job.kind = AuthorityJobKind::internal_card_status;
+    status_job.key = {tune_job.key.client_id, 70U};
+    status_job.client_id = status_job.key.client_id;
+    const auto status_task = task_for(status_job,
+                                      ControlWorkerTaskKind::authority_request);
+    const auto status_lane = workers.authority_status_lane();
+    if (status_lane != ControlWorkerLane::tuner_dev1 ||
+        status_task.receiver != 0U ||
+        workers.submit(status_lane, status_task).error() != Error::OK) {
+        backend.release_tune();
+        return fail("default-receiver internal card status job was not queued");
+    }
+    std::this_thread::sleep_for(std::chrono::milliseconds(300));
+    if (backend.status_calls.load(std::memory_order_acquire) != 0U) {
+        backend.release_tune();
+        return fail("internal card status entered during same-device Authority TUNE");
+    }
+    backend.release_tune();
     ControlWorkerCompletion completion{};
-    if (!wait_completion(workers, ControlWorkerLane::tuner_dev1, completion) ||
-        completion.error != Error::OK || completion.authority_key.client_id !=
+    ControlWorkerCompletion status_completion{};
+    bool tune_completed = false;
+    bool status_completed = false;
+    const auto completion_deadline = std::chrono::steady_clock::now() +
+                                     std::chrono::seconds(5);
+    while (std::chrono::steady_clock::now() < completion_deadline &&
+           (!tune_completed || !status_completed)) {
+        ControlWorkerCompletion value{};
+        if (workers.try_pop(ControlWorkerLane::tuner_dev1, value)) {
+            if (value.request_id == tune_task.request_id) {
+                completion = value;
+                tune_completed = true;
+            } else if (value.request_id == status_task.request_id) {
+                status_completion = value;
+                status_completed = true;
+            }
+        } else {
+            std::this_thread::sleep_for(std::chrono::milliseconds(1));
+        }
+    }
+    if (!tune_completed || !status_completed || completion.error != Error::OK ||
+        status_completion.error != Error::OK ||
+        backend.status_calls.load(std::memory_order_acquire) != 1U ||
+        backend.status_during_tune.load(std::memory_order_acquire) ||
+        completion.authority_key.client_id !=
             tune_job.key.client_id || completion.authority_key.request_id != 6U ||
         completion.authority_job_kind != AuthorityJobKind::tune ||
         completion.receiver != 2U || completion.lease_id != lease2 ||
         completion.authority_completion.key.client_id != tune_job.key.client_id ||
         completion.authority_completion.kind != AuthorityJobKind::tune ||
         completion.authority_completion.lease_id != lease2 ||
+        status_completion.authority_job_kind != AuthorityJobKind::internal_card_status ||
         backend.hz_calls != 1U)
-        return fail("worker did not execute the admitted Authority tune exactly once");
+        return fail("Authority TUNE and internal card status ordering was not preserved");
     (void)authority.complete(completion.authority_completion);
     AuthorityJob rejected_cleanup;
     if (authority.response_sent(session, true, executor, &rejected_cleanup) != Error::OK)
