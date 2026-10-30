@@ -1,0 +1,26 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/px4-userland",
+  "source_commit": "5c91e8c57b288c0f490061789829e42dbbf61b3d",
+  "source_paths": [
+    "userland/include/px4/ts_continuity.h",
+    "userland/tests/ts_continuity_tests.cpp"
+  ],
+  "additional_source": {
+    "repository": "Khronos31/asicen-userland",
+    "commit": "e2a86ca194b60f1111ecfa0a020cd0944c351c76",
+    "paths": [
+      "third_party/px4-userland/userland/include/px4/ts_continuity.h"
+    ],
+    "scope": "Byte-identical vendor copy; classification behavior is unchanged.",
+    "hashes": {
+      "third_party/px4-userland/userland/include/px4/ts_continuity.h": "dec396cf3a759c71c4f336ea8e9f384f18cff4941cab23178855c2ad92b6963b"
+    }
+  },
+  "measurement_scope": "CC-only 188-byte TS packet observation: initial/continuous/duplicate/discontinuity/error/null_packet/transport_error/invalid_packet, TEI handling, PCR duplicate exception, and untrusted epoch. No transport, filtering, full MPEG conformance, or PIX C checker.",
+  "source_hashes": {
+    "userland/include/px4/ts_continuity.h": "dec396cf3a759c71c4f336ea8e9f384f18cff4941cab23178855c2ad92b6963b",
+    "userland/tests/ts_continuity_tests.cpp": "b001e5b71920b8426aae47b83ebc0e52288f34ab855544bfbcd44d592cc8ac42"
+  }
+}

@@ -1,0 +1,41 @@
+{
+  "schema": 1,
+  "license": "GPL-2.0-only",
+  "source_repository": "Khronos31/px4-userland",
+  "source_commit": "5c91e8c57b288c0f490061789829e42dbbf61b3d",
+  "source_paths": [
+    "userland/include/px4/card.h",
+    "userland/src/card.cpp",
+    "userland/include/px4/platform_sleep.h",
+    "userland/src/windows/windows_sleep.cpp",
+    "userland/tests/card_tests.cpp"
+  ],
+  "additional_source": {
+    "repository": "Khronos31/asicen-userland",
+    "commit": "e2a86ca194b60f1111ecfa0a020cd0944c351c76",
+    "paths": [
+      "third_party/px4-userland/userland/include/px4/card.h",
+      "third_party/px4-userland/userland/src/card.cpp",
+      "third_party/px4-userland/userland/tests/card_tests.cpp"
+    ],
+    "scope": "CardSession::initialize_with_atr() validation-before-T=1 entry and its fixture only.",
+    "hashes": {
+      "third_party/px4-userland/userland/include/px4/card.h": "131f96ca400ac8d619c7100f97822e7a7524e18d28be32c11f98ef517dbb5f30",
+      "third_party/px4-userland/userland/src/card.cpp": "f49d578bf1e92017dbca53ba37ee13271bd094187f02557f8193e572c1851618",
+      "third_party/px4-userland/userland/tests/card_tests.cpp": "7fcd97cbf69879d1398b37f1365846bd172a5667f94de30b81418070a23e80d7"
+    }
+  },
+  "upstream": {
+    "repository": "tsukumijima/px4_drv",
+    "commit": "9eedea8c502875a788697984b93b50032339b9aa",
+    "note": "Provenance as recorded by the px4-userland source headers; not independently fetched for this increment."
+  },
+  "measurement_scope": "T=1 card session, ATR parse, LRC/CRC EDC, retry/timeout, and Windows high-resolution sleep adapter only. Product-specific IT930x/UART/USB transport and the product ATR pre-acquisition policy are excluded.",
+  "source_hashes": {
+    "userland/include/px4/card.h": "c9c496aa77e73274e66d79ee4e5a22f4db7466da1ae723c10ddf2f09b6b7f1b9",
+    "userland/src/card.cpp": "83674f1d2e60b5bff96514503bbb5d2208fec2b9a5bb872c9e98fbec30741226",
+    "userland/include/px4/platform_sleep.h": "322d809a4f799197a030f83d3396eded1f229972783d7d969d039e91b306d349",
+    "userland/src/windows/windows_sleep.cpp": "1af8147257bdde932972fd25a73563219eb0c38fb685f1750b1b479aa1025623",
+    "userland/tests/card_tests.cpp": "ff414dff6f2c51c8d73dcf85951918fd703e2670bbe9253c59d464dd1bc3ed24"
+  }
+}
