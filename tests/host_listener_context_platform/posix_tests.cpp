@@ -441,10 +441,62 @@ bool test_nested_directory_diagnostics() noexcept
     return true;
 }
 
+bool test_namespace_reservation_boundaries() noexcept
+{
+    std::string root;
+    if (!check(make_root(root), "reservation fixture root")) return false;
+    auto control = config(root, "control.sock");
+    auto data = config(root, "stream.sock");
+    auto io = create_listener_io();
+    if (!check(io != nullptr, "reservation listener factory") ||
+        !check(io->reserve_pair(control, data) == Error::OK,
+               "reserve instance namespace")) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    auto competitor = create_listener_io();
+    if (!check(competitor != nullptr &&
+               competitor->reserve_pair(control, data) == Error::BUSY,
+               "same instance namespace is BUSY")) {
+        (void)io->release_namespace();
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    auto other = create_listener_io();
+    auto other_control = control;
+    auto other_data = data;
+    other_control.instance = "other";
+    other_data.instance = "other";
+    if (!check(other != nullptr &&
+               other->reserve_pair(other_control, other_data) == Error::OK,
+               "different instance namespaces coexist")) {
+        (void)io->release_namespace();
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    if (!check(io->release_namespace() == Error::OK,
+               "release first instance namespace")) {
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    if (!check(competitor->reserve_pair(control, data) == Error::OK,
+               "reserve same instance again after release")) {
+        (void)other->release_namespace();
+        (void)competitor->release_namespace();
+        std::filesystem::remove_all(root);
+        return false;
+    }
+    (void)competitor->release_namespace();
+    (void)other->release_namespace();
+    std::filesystem::remove_all(root);
+    return true;
+}
+
 }  // namespace
 
 int main() noexcept
 {
     return test_pair_io_and_interest() && test_stale_and_foreign_rollback() &&
+        test_namespace_reservation_boundaries() &&
         test_shared_group_boundary() && test_nested_directory_diagnostics() ? 0 : 1;
 }
