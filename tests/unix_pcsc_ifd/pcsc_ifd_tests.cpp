@@ -38,6 +38,7 @@ struct MockState final {
     Error disconnect_error = Error::OK;
     std::uint64_t generation = 1U;
     std::size_t factory_connects = 0U;
+    std::size_t status_calls = 0U;
     std::size_t card_connects = 0U;
     std::size_t resets = 0U;
     std::size_t transmits = 0U;
@@ -66,6 +67,7 @@ public:
 
     Result<IfdCardStatus> status() noexcept override
     {
+        ++state_.status_calls;
         return state_.status_error == Error::OK ?
                    Result<IfdCardStatus>::success(mock_status(state_)) :
                    Result<IfdCardStatus>::failure(state_.status_error);
@@ -279,6 +281,59 @@ bool test_profile_connect_failure_recovery()
                                MutableByteView{atr.data(), atr.size()}, atr_length) ==
           IfdResult::not_supported);
     CHECK(asicen_state.closes == 0U);
+    return true;
+}
+
+bool test_asicen_initial_status()
+{
+    MockState state;
+    state.present = true;
+    state.initialized = true;
+    MockFactory factory(state);
+    IfdAdapter adapter(factory, kAsicenIfdProfile);
+    CHECK(!kAsicenIfdProfile.leave_initial_status_unread);
+    CHECK(adapter.create_channel_by_name(
+              0U, "asicen-userland:device=00001205000960") == IfdResult::success);
+    CHECK(state.status_calls == 1U);
+
+    std::array<std::uint8_t, kIfdAtrMaxLength> atr{};
+    std::size_t atr_length = atr.size();
+    CHECK(adapter.get_capability(0U, kAttrAtrString,
+                                MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::success);
+    CHECK(atr_length == 3U && atr[0] == 0x3bU && atr[1] == 0x10U && atr[2] == 0x12U);
+    CHECK(adapter.set_protocol(0U, kIfdSetProtocolT1, 0U, 0U, 0U, 0U) ==
+          IfdResult::success);
+    return true;
+}
+
+bool test_asicen_disconnect_error_classification()
+{
+    for (const auto error : {Error::BUSY, Error::INVALID_ARGUMENT, Error::RESOURCE_LIMIT}) {
+        MockState state;
+        state.present = true;
+        MockFactory factory(state);
+        IfdAdapter adapter(factory, kAsicenIfdProfile);
+        CHECK(adapter.create_channel_by_name(
+                  0U, "asicen-userland:device=00001205000960") == IfdResult::success);
+        std::array<std::uint8_t, kIfdAtrMaxLength> atr{};
+        std::size_t atr_length = atr.size();
+        CHECK(adapter.power(0U, IfdPowerAction::power_up,
+                            MutableByteView{atr.data(), atr.size()}, atr_length) ==
+              IfdResult::success);
+
+        state.disconnect_error = error;
+        atr_length = atr.size();
+        const auto expected = error == Error::RESOURCE_LIMIT ? IfdResult::success :
+                                                               IfdResult::communication_error;
+        CHECK(adapter.power(0U, IfdPowerAction::power_down,
+                            MutableByteView{atr.data(), atr.size()}, atr_length) == expected);
+        CHECK(atr_length == 0U);
+        const bool channel_failed = error == Error::RESOURCE_LIMIT;
+        CHECK(state.closes == (channel_failed ? 1U : 0U));
+        CHECK(adapter.presence(0U) == IfdResult::icc_present);
+        CHECK(state.factory_connects == (channel_failed ? 2U : 1U));
+    }
     return true;
 }
 
@@ -544,6 +599,8 @@ int main()
     if (!test_device_name_and_error_mapping() ||
         !test_profile_capabilities_and_presence() ||
         !test_profile_connect_failure_recovery() ||
+        !test_asicen_initial_status() ||
+        !test_asicen_disconnect_error_classification() ||
         !test_adapter_state_and_recovery() ||
         !test_adapter_lazy_reconnect() ||
         !test_adapter_timeout_and_buffer_errors()) {

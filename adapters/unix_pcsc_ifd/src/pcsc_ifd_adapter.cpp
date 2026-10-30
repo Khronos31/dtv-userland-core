@@ -69,6 +69,7 @@ bool channel_failure(Error error, const IfdProfile& profile) noexcept
     case Error::OK:
     case Error::INVALID_ARGUMENT:
     case Error::BUSY:
+        return false;
     case Error::RESOURCE_LIMIT:
         return profile.resource_limit_is_channel_failure;
     case Error::UNSUPPORTED:

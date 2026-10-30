@@ -115,7 +115,7 @@ inline constexpr IfdProfile kPx4IfdProfile{
     38400U, false, false, false, false, true};
 inline constexpr IfdProfile kAsicenIfdProfile{
     "asicen-userland", "asicen-userland:", "Khronos31",
-    "ASICEN card reader via asicend", 19200U, true, true, true, true, false};
+    "ASICEN card reader via asicend", 19200U, true, true, false, true, false};
 
 // Grammar: <profile-prefix>[:key=value]+. ':' is chosen because pcsc-lite
 // accepts it in unquoted DEVICENAME tokens; values therefore cannot contain ':'.
