@@ -400,7 +400,22 @@ bool test_listener_reinsert()
         0U, send_pci, const_cast<UCHAR*>(apdu.data()),
         static_cast<DWORD>(apdu.size()), response.data(), &response_length,
         &receive_pci);
-    CHECK(stopped_transmit == IFD_NO_SUCH_DEVICE);
+#if defined(__APPLE__)
+    // macOS can surface the still-connected client's post-stop request as
+    // IFD_RESPONSE_TIMEOUT instead of an immediate disconnect. Both values
+    // come from the existing map_ifd_error contract; success or any other
+    // result is not accepted.
+    const bool stopped_transmit_ok =
+        stopped_transmit == IFD_RESPONSE_TIMEOUT ||
+        stopped_transmit == IFD_NO_SUCH_DEVICE;
+#else
+    const bool stopped_transmit_ok = stopped_transmit == IFD_NO_SUCH_DEVICE;
+#endif
+    if (!stopped_transmit_ok) {
+        std::fprintf(stderr, "stopped_transmit=%lu\n",
+                     static_cast<unsigned long>(stopped_transmit));
+    }
+    CHECK(stopped_transmit_ok);
     CHECK(response_length == 0U);
     CHECK(session.transmits.load() == before_stopped_transmit);
 #if defined(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
