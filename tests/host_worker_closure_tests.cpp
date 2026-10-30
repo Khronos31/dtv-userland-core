@@ -206,6 +206,15 @@ bool wait_for_pending(ControlWorkerLanes& workers, ControlWorkerLane lane,
     return workers.pending_completions_for_test(lane) == expected;
 }
 
+bool wait_for_idle(ControlWorkerLanes& workers)
+{
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(5);
+    while (!workers.idle() && std::chrono::steady_clock::now() < deadline)
+        std::this_thread::yield();
+    return workers.idle();
+}
+
 int fail(const char* message)
 {
     std::cerr << message << '\n';
@@ -301,19 +310,20 @@ int test_fifo_completion_and_wake()
     if (!wait_for_pending(*workers, ControlWorkerLane::tuner_dev1, 3U))
         return fail("FIFO completion queue did not reach three accepted tasks");
 
-    bool readable = false;
-    if (!poll_wake(*workers, 1000, readable) || !readable)
-        return fail("worker completion did not make wake handle pollable");
-    workers->drain_wake();
-    if (!poll_wake(*workers, 0, readable) || readable)
-        return fail("wake drain left the handle readable");
-
     for (std::uint32_t request_id = 1U; request_id <= 3U; ++request_id) {
         ControlWorkerCompletion completion{};
         if (!workers->try_pop(ControlWorkerLane::tuner_dev1, completion) ||
             completion.request_id != request_id || completion.error != Error::OK)
             return fail("FIFO completion order changed");
     }
+    if (!wait_for_idle(*workers))
+        return fail("FIFO worker did not finish completion wake signals");
+    bool readable = false;
+    if (!poll_wake(*workers, 1000, readable) || !readable)
+        return fail("worker completion did not make wake handle pollable");
+    workers->drain_wake();
+    if (!poll_wake(*workers, 0, readable) || readable)
+        return fail("wake drain left the handle readable");
     if (!workers->stop_and_join())
         return fail("FIFO fixture worker stop_and_join failed");
     std::puts("FIFO completion 1->2->3 and wake poll/drain: PASS");
