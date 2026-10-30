@@ -13,6 +13,7 @@ struct Product final {
 inline constexpr Product kProducts[] = {
     {"px4-userland", L"px4-userland", "px4"},
     {"asicen-userland", L"asicen-userland", "asicen"},
+    {"torne-userland", L"torne-userland", "torne"},
 };
 inline constexpr char kProductVersion[] = "v1";
 inline constexpr wchar_t kProductVersionW[] = L"v1";

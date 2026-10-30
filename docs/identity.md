@@ -47,7 +47,7 @@ rules (nonempty, no NUL/control, at most 512 bytes) separately.
 ```
 4 bytes ASCII "DTVI"
 u16 encoding_version = 1
-LP(product slug UTF-8)          # px4-userland / asicen-userland / pix-userland / siano-userland
+LP(product slug UTF-8)          # px4-userland / asicen-userland / pix-userland / siano-userland / torne-userland
 u8 identity_kind                # 1 = serial, 2 = usb-topology
 kind=1: LP(serial UTF-8)
 kind=2: u32 path_count; LP(canonical ASCII path) * path_count

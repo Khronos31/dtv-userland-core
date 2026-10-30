@@ -29,8 +29,9 @@ struct ReaderStatus final {
 
 // runtime_root is the UTF-8 local-absolute runtime parent (normally
 // LOCALAPPDATA), not its product child. Only already-running private endpoints
-// under px4-userland/v1 and asicen-userland/v1 that advertise CARD_SERVICE
-// with a ready context are returned. Discovery is bounded across both products.
+// under px4-userland/v1, asicen-userland/v1 and torne-userland/v1 that advertise
+// CARD_SERVICE with a ready context are returned. Discovery is bounded across
+// all products.
 Result<std::vector<Reader>> list_readers(const std::string& runtime_root) noexcept;
 
 // One current snapshot, not an idle wait. The shared CARD_STATUS reads the

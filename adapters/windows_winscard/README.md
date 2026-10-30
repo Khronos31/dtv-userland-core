@@ -11,8 +11,8 @@ verbatim from the PX4 source repository's `LICENSE`.
 
 `dtv_windows_winscard_client` and `dtv_windows_winscard` are opt-in,
 build-tree-only targets. The latter produces the single product-independent
-`WinSCard.dll` artifact used by PX4 and ASICEN; it is not installed or exported
-by Core. The DLL scans only the PX4 and ASICEN v1 namespaces, includes the
-product, instance and reader ID in each local reader name, and uses the shared
+`WinSCard.dll` artifact used by PX4, ASICEN and torne; it is not installed or
+exported by Core. The DLL scans the PX4, ASICEN and torne v1 namespaces,
+includes the product, instance and reader ID in each local reader name, and uses the shared
 `DTV_USERLAND_RUNTIME_DIR` override. Product builds must stage the same Core
 DLL bytes and must not link a product-specific support target into the DLL.

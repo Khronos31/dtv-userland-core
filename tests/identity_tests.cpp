@@ -133,6 +133,72 @@ void test_vectors()
     }
 }
 
+void test_product_registry()
+{
+    // Every adopted product slug maps to its enum and back. The existing four
+    // mappings are pinned so adding torne cannot renumber or rename them.
+    struct Entry final {
+        id::Product product;
+        std::string_view slug;
+    };
+    const std::array<Entry, 5> entries = {{
+        {id::Product::px4, "px4-userland"},
+        {id::Product::asicen, "asicen-userland"},
+        {id::Product::pix, "pix-userland"},
+        {id::Product::siano, "siano-userland"},
+        {id::Product::torne, "torne-userland"},
+    }};
+    for (const auto& entry : entries) {
+        const char* slug = id::product_slug(entry.product);
+        CHECK(slug != nullptr && std::string_view(slug) == entry.slug);
+        const auto parsed = id::parse_product(entry.slug);
+        CHECK(parsed.has_value() && parsed.value() == entry.product);
+    }
+    CHECK(static_cast<std::uint8_t>(id::Product::px4) == 1U);
+    CHECK(static_cast<std::uint8_t>(id::Product::asicen) == 2U);
+    CHECK(static_cast<std::uint8_t>(id::Product::pix) == 3U);
+    CHECK(static_cast<std::uint8_t>(id::Product::siano) == 4U);
+    CHECK(static_cast<std::uint8_t>(id::Product::torne) == 5U);
+    CHECK(id::product_slug(static_cast<id::Product>(0U)) == nullptr);
+    CHECK(id::product_slug(static_cast<id::Product>(6U)) == nullptr);
+    // Unknown or non-canonical slugs are rejected rather than coerced.
+    CHECK(id::parse_product("").error() == Error::INVALID_ARGUMENT);
+    CHECK(id::parse_product("torne").error() == Error::INVALID_ARGUMENT);
+    CHECK(id::parse_product("Torne-userland").error() == Error::INVALID_ARGUMENT);
+    CHECK(id::parse_product("torne-userland ").error() == Error::INVALID_ARGUMENT);
+}
+
+void test_torne_profile_selector()
+{
+    const auto selector = id::parse_device_selector("usb:1-2.2,1-2.1");
+    CHECK(selector.has_value());
+    const auto torne = id::parse_product("torne-userland");
+    CHECK(torne.has_value() && torne.value() == id::Product::torne);
+    const auto resolved = id::resolve_selector(torne.value(), selector.value());
+    CHECK(resolved.has_value() && resolved.value().product == id::Product::torne);
+    CHECK(resolved.value().kind == id::IdentityKind::usb_topology);
+    CHECK(resolved.value().topology.count == 2U);
+    CHECK(std::string(resolved.value().topology.paths[0].bytes.data(),
+                      resolved.value().topology.paths[0].length) == "1-2.1");
+    CHECK(std::string(resolved.value().topology.paths[1].bytes.data(),
+                      resolved.value().topology.paths[1].length) == "1-2.2");
+
+    // The torne selector produces a product-specific auto instance.
+    const std::string torne_instance = instance_of(resolved.value());
+    CHECK(torne_instance.size() == 37U && torne_instance.compare(0U, 5U, "auto-") == 0);
+    for (const std::string_view slug : {"px4-userland", "asicen-userland", "pix-userland",
+                                        "siano-userland"}) {
+        const auto identity =
+            id::resolve_selector(id::parse_product(slug).value(), selector.value());
+        CHECK(identity.has_value());
+        CHECK(instance_of(identity.value()) != torne_instance);
+    }
+
+    // An undefined product is still rejected with the new enum value present.
+    CHECK(id::resolve_selector(static_cast<id::Product>(6U), selector.value()).error() ==
+          Error::INVALID_ARGUMENT);
+}
+
 void test_identity_variations()
 {
     // A one-character serial change, a product change and a kind change each
@@ -141,6 +207,7 @@ void test_identity_variations()
     CHECK(base != instance_of(serial_identity("px4-userland", "serial-Y")));
     CHECK(base != instance_of(serial_identity("pix-userland", "serial-X")));
     CHECK(base != instance_of(serial_identity("asicen-userland", "serial-X")));
+    CHECK(base != instance_of(serial_identity("torne-userland", "serial-X")));
     const std::array<std::string_view, 8> paths = {"1-2.1", "", "", "", "", "", "", ""};
     CHECK(base != instance_of(topology_identity("px4-userland", paths, 1U)));
 }
@@ -488,6 +555,8 @@ void test_sha256()
 int main()
 {
     test_vectors();
+    test_product_registry();
+    test_torne_profile_selector();
     test_identity_variations();
     test_serial_selector();
     test_usb_selector();

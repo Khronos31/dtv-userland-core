@@ -429,11 +429,14 @@ int run(const wchar_t* dll_path)
     CHECK(::SetEnvironmentVariableW(L"DTV_USERLAND_RUNTIME_DIR", root.runtime.c_str()) != 0);
     std::filesystem::path px4_dir;
     std::filesystem::path asicen_dir;
+    std::filesystem::path torne_dir;
     CHECK(make_product_tree(root.runtime, L"px4-userland", L"fixture-p", px4_dir));
     CHECK(make_product_tree(root.runtime, L"asicen-userland", L"fixture-a", asicen_dir));
+    CHECK(make_product_tree(root.runtime, L"torne-userland", L"fixture-t", torne_dir));
     MockControl px4(px4_dir, "px4-userland", "fixture-p");
     MockControl asicen(asicen_dir, "asicen-userland", "fixture-a");
-    CHECK(px4.valid() && asicen.valid());
+    MockControl torne(torne_dir, "torne-userland", "fixture-t");
+    CHECK(px4.valid() && asicen.valid() && torne.valid());
     HMODULE module = ::LoadLibraryW(dll_path);
     CHECK(module != nullptr);
     if (module == nullptr) return failures + 1;
@@ -455,16 +458,20 @@ int run(const wchar_t* dll_path)
         CHECK(list_result == SCARD_S_SUCCESS);
         const std::wstring px4_name = L"DTV userland (px4:fixture-p/reader-0)";
         const std::wstring asicen_name = L"DTV userland (asicen:fixture-a/reader-0)";
+        const std::wstring torne_name = L"DTV userland (torne:fixture-t/reader-0)";
         bool found_px4 = false;
         bool found_asicen = false;
+        bool found_torne = false;
         for (const wchar_t* reader = readers.data(); reader && *reader;
              reader += std::wcslen(reader) + 1U) {
             found_px4 = found_px4 || px4_name == reader;
             found_asicen = found_asicen || asicen_name == reader;
+            found_torne = found_torne || torne_name == reader;
         }
-        CHECK(found_px4 && found_asicen);
+        CHECK(found_px4 && found_asicen && found_torne);
         CHECK(exercise_reader(module, context, px4_name));
         CHECK(exercise_reader(module, context, asicen_name));
+        CHECK(exercise_reader(module, context, torne_name));
         CHECK(release(context) == SCARD_S_SUCCESS);
     }
     (void)::FreeLibrary(module);
