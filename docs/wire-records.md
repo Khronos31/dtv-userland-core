@@ -1,7 +1,7 @@
-# UDTV 1.1 typed records
+# UDTV 1.0 typed records
 
 `dtv::wire::records` (`include/dtv/userland/records.h`, `src/records.cpp`, part of the
-`dtv_userland_wire` target) is an independently written, bounded codec for the typed UDTV 1.1
+`dtv_userland_wire` target) is an independently written, bounded codec for the typed UDTV 1.0
 records that follow the envelope and the HELLO/ACQUIRE subset. It reuses the envelope, the
 fragment-tolerant `FrameReceiver`, and the existing HELLO request / ACQUIRE codecs unchanged; it
 is not connected to any product client, daemon, or IPC endpoint.
@@ -61,7 +61,7 @@ it is distinct from an observed `false`. `card_inserted` represents an enclosure
 card observation and is not derived by aggregating reader states. External reader observations
 remain in their reader records.
 
-The envelope version is UDTV 1.1. This record layout is supported only between daemon and
+The envelope version is UDTV 1.0. This record layout is supported only between daemon and
 client components from the same release. The `Model` record in this revision is name-only; its
 bytes differ from the earlier development series at Core `af82b7a`, which encoded both `id` and
 `name`. This does not assert that the complete record layout matches that development series.
@@ -78,8 +78,8 @@ rejected. IDs 7..12 are `stream_bytes`, `sync_errors`, `tei_packets`, `continuit
 Each entry uses the existing `Counter` measurement state: `valid` includes measured zero,
 `unknown` preserves its reason, and optional `unsupported` entries are omitted from JSON and CLI
 presentation. Unknown optional entries are fully validated and skipped by projections; they never
-alias a known field name. The frame envelope is version 1.1, so version 1.0 peers are rejected by
-the exact version check.
+alias a known field name. The frame envelope remains version 1.0. Mixed-release peers remain
+unsupported; the existing exact-size and semantic validation checks are unchanged.
 
 ## Validation split
 
