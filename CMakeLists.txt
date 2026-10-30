@@ -426,10 +426,8 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
         CXX_VISIBILITY_PRESET hidden
         VISIBILITY_INLINES_HIDDEN YES)
     target_compile_features(dtv_userland_unix_pcsc_ifd PUBLIC cxx_std_17)
-    target_include_directories(dtv_userland_unix_pcsc_ifd PUBLIC
-        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/unix_pcsc_ifd/include>
-        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
     target_include_directories(dtv_userland_unix_pcsc_ifd PRIVATE
+        adapters/unix_pcsc_ifd/include
         ${DTV_USERLAND_PCSC_IFD_INCLUDE_DIR})
     target_link_libraries(dtv_userland_unix_pcsc_ifd PRIVATE
         dtv::host_runtime dtv::control)
@@ -785,9 +783,6 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
         FILE dtv_userland_unix_pcsc_ifdTargets.cmake
         NAMESPACE dtv::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
-    install(FILES
-        adapters/unix_pcsc_ifd/include/dtv/userland/unix_pcsc_ifd/pcsc_ifd_adapter.h
-        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/unix_pcsc_ifd)
     install(FILES
         adapters/unix_pcsc_ifd/COPYING
         adapters/unix_pcsc_ifd/UNIX_PCSC_IFD_PROVENANCE.json
