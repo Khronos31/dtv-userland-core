@@ -338,6 +338,11 @@ bool test_listener_reinsert()
     CHECK(IFDHSetProtocolParameters(0U, SCARD_PROTOCOL_T1, 0U, 0U, 0U, 0U) ==
           IFD_SUCCESS);
 
+    atr.fill(0U);
+    atr_length = 0U;
+    CHECK(IFDHPowerICC(0U, IFD_RESET, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
+
     DWORD queried_length = 0U;
     CHECK(IFDHGetCapabilities(0U, TAG_IFD_ATR, &queried_length, nullptr) ==
           IFD_ERROR_INSUFFICIENT_BUFFER);
@@ -367,10 +372,25 @@ bool test_listener_reinsert()
     CHECK(transmit(apdu_count));
     CHECK(apdu_count == 1U && session.transmits.load() == 1U);
 
+    atr.fill(0U);
+    atr_length = 0U;
+    CHECK(IFDHPowerICC(0U, IFD_RESET, atr.data(), &atr_length) == IFD_SUCCESS);
+    CHECK(atr_length == 2U && atr[0U] == 0x3bU && atr[1U] == 0x00U);
+
     card.present.store(false, std::memory_order_release);
     CHECK(IFDHICCPresence(0U) == IFD_ICC_NOT_PRESENT);
     const std::size_t after_removal = session.transmits.load();
-    CHECK(!transmit(apdu_count));
+    const std::array<UCHAR, 5U> removed_apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    std::array<UCHAR, 16U> removed_response{};
+    DWORD removed_response_length = static_cast<DWORD>(removed_response.size());
+    const SCARD_IO_HEADER removed_send_pci{1U, sizeof(SCARD_IO_HEADER)};
+    SCARD_IO_HEADER removed_receive_pci{};
+    CHECK(IFDHTransmitToICC(0U, removed_send_pci,
+                            const_cast<UCHAR*>(removed_apdu.data()),
+                            static_cast<DWORD>(removed_apdu.size()),
+                            removed_response.data(), &removed_response_length,
+                            &removed_receive_pci) == IFD_ICC_NOT_PRESENT);
+    CHECK(removed_response_length == 0U);
     CHECK(apdu_count == 1U && session.transmits.load() == after_removal);
 
     const hr::EndpointConfig endpoint{runtime.path(), kProfile.product, instance,
@@ -487,6 +507,7 @@ bool test_listener_reinsert()
     CHECK(stopped_reset == IFD_ICC_NOT_PRESENT);
     CHECK(atr_length == 0U);
     const RESPONSECODE stopped_close = IFDHCloseChannel(0U);
+    CHECK(stopped_close == IFD_SUCCESS);
     std::printf("listener_stop profile=%s transmit=%lu presence=%lu reset=%lu atr=%lu close=%lu apdus=%zu\n",
                 kProfile.product, static_cast<unsigned long>(stopped_transmit),
                 static_cast<unsigned long>(stopped_presence),
