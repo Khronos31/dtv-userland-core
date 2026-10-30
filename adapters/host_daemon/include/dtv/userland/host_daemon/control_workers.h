@@ -4,7 +4,7 @@
 
 #include "px4/card_service.h"
 #include "px4/control_execution_layout.h"
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 #include <dtv/userland/detail/control_authority.h>
 

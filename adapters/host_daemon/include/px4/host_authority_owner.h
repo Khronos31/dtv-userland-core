@@ -2,7 +2,7 @@
 #ifndef PX4_HOST_AUTHORITY_OWNER_H
 #define PX4_HOST_AUTHORITY_OWNER_H
 
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 #include <dtv/userland/detail/control_authority.h>
 

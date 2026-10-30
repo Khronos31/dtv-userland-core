@@ -1,5 +1,5 @@
 // SPDX-License-Identifier: GPL-2.0-only
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 #include <dtv/userland/detail/client_id_allocator.h>
 

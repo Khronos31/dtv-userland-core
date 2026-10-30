@@ -2,7 +2,7 @@
 #ifndef PX4_USERLAND_WINDOWS_TUNER_NONCE_H
 #define PX4_USERLAND_WINDOWS_TUNER_NONCE_H
 
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 namespace px4::userland::ipc::windows {
 
