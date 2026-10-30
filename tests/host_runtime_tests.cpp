@@ -2,6 +2,7 @@
 #include "dtv/userland/host_runtime/family.h"
 #include "dtv/userland/host_runtime/control_socket.h"
 #include "dtv/userland/host_facade/px4d_signals.h"
+#include "host_runtime_test_access.h"
 #if defined(_WIN32)
 #ifndef _WIN32_WINNT
 #define _WIN32_WINNT 0x0A00
@@ -30,6 +31,7 @@
 #endif
 
 #include <array>
+#include <chrono>
 #include <cstdio>
 #include <cwchar>
 #include <cstring>
@@ -944,6 +946,7 @@ bool write_all_boundary_test() noexcept
             ::chmod(path.value().c_str(), 0600) == 0 && ::listen(server, 4) == 0;
     }
 
+    int effective_send_buffer = 0;
     if (ok) {
         auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
         int peer = -1;
@@ -951,8 +954,11 @@ bool write_all_boundary_test() noexcept
         if (!transport || peer < 0) ok = false;
         else {
             int receive_buffer = 4096;
+            const int send_buffer = 4096;
             ok = ::setsockopt(peer, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
-                              static_cast<socklen_t>(sizeof(receive_buffer))) == 0;
+                              static_cast<socklen_t>(sizeof(receive_buffer))) == 0 &&
+                 dtv::userland::host_runtime::test_access::set_client_send_buffer(
+                     *transport.value(), send_buffer);
             std::vector<std::uint8_t> payload(1024U * 1024U);
             for (std::size_t index = 0U; index < payload.size(); ++index)
                 payload[index] = static_cast<std::uint8_t>(index);
@@ -970,14 +976,30 @@ bool write_all_boundary_test() noexcept
                     offset += static_cast<std::size_t>(count);
                 }
             });
+            const auto started = std::chrono::steady_clock::now();
             const auto written = transport.value()->write_all(
                 dtv::userland::ByteView{payload.data(), payload.size()}, {5000U});
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            effective_send_buffer =
+                dtv::userland::host_runtime::test_access::client_send_buffer(
+                    *transport.value());
+            if (!written) transport.value()->close();
             reader.join();
             ok = ok && written && reader_ok.load() && received == payload;
-            transport.value()->close();
+            std::printf("posix_write_all_1mib_elapsed_ms=%lld\n",
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                elapsed).count()));
+            if (written) transport.value()->close();
             (void)::close(peer);
         }
     }
+    if (effective_send_buffer > 0) {
+        std::printf("posix_write_all_effective_sndbuf=%d payload=%zu\n",
+                    effective_send_buffer, 1024U * 1024U);
+    }
+    ok = ok && effective_send_buffer > 0 &&
+         static_cast<std::size_t>(effective_send_buffer) < 1024U * 1024U;
 
     if (ok) {
         auto transport = dtv::userland::host_runtime::connect_control(config, {1000U});
@@ -989,9 +1011,16 @@ bool write_all_boundary_test() noexcept
             ok = ::setsockopt(peer, SOL_SOCKET, SO_RCVBUF, &receive_buffer,
                               static_cast<socklen_t>(sizeof(receive_buffer))) == 0;
             std::vector<std::uint8_t> payload(16U * 1024U * 1024U, 0x5aU);
+            const auto started = std::chrono::steady_clock::now();
             const auto written = transport.value()->write_all(
                 dtv::userland::ByteView{payload.data(), payload.size()}, {200U});
-            ok = ok && !written && written.error() == dtv::userland::Error::TIMEOUT;
+            const auto elapsed = std::chrono::steady_clock::now() - started;
+            ok = ok && !written && written.error() == dtv::userland::Error::TIMEOUT &&
+                 elapsed >= std::chrono::milliseconds(100);
+            std::printf("posix_write_all_timeout_elapsed_ms=%lld\n",
+                        static_cast<long long>(
+                            std::chrono::duration_cast<std::chrono::milliseconds>(
+                                elapsed).count()));
             transport.value()->close();
             (void)::close(peer);
         }
