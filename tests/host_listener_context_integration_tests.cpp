@@ -3,7 +3,7 @@
 
 #include "dtv/userland/control_client.h"
 #include "dtv/userland/host_runtime/control_socket.h"
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 #if defined(_WIN32)
 #include "windows/windows_security.h"
