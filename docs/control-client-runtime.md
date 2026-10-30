@@ -16,7 +16,7 @@ Against Siano main `1a35d6b8bb4d2a72b2084658029cb1a825a9a683`, the new exports c
 | --- | --- |
 | `px4d_signals.h`, `px4_windows_args.h` | `dtv::host_facade` |
 | `px4/posix_tuner_nonce.h`, `px4/windows_tuner_nonce.h`, `TunerNonceSource` | `dtv::host_runtime` |
-| `px4/posix_ipc.h`, `EnclosureFamily`, protected client endpoint transport | `dtv::host_runtime` |
+| `dtv/userland/host_runtime/posix_ipc.h` (canonical; `px4/posix_ipc.h` forwarder), `EnclosureFamily`, protected client endpoint transport | `dtv::host_runtime` |
 | `host_ctl::run_control_cli` | `dtv::host_ctl` |
 | `Px4TsRunner::run_wire` and POSIX/Windows output | `dtv::host_ts` |
 | `tests/runtime_composition_proof.cpp` reference to `Px4TsRunner::run` | Not exported: this is the removed legacy internal-IPC path; the downstream proof should check `run_wire` only. |
