@@ -1,6 +1,10 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <dtv/host_ts/px4_ts_core.h>
 
+#include <cstdio>
+#include <string>
+#include <vector>
+
 namespace {
 
 using px4::userland::ipc::System;
@@ -28,6 +32,46 @@ bool accepts_system_case(const char* value, System expected)
         satellite ? product_satellite : product_terrestrial);
     return legacy.valid && product.valid && legacy.system == expected &&
            product.system == expected;
+}
+
+bool rejects_removed_lnb_option(const char* value)
+{
+    const char* legacy[] = {
+        "siano-ts", "--device", "12345678901234", "--receiver", "0",
+        "--system", "isdb-s", "--frequency-khz", "1200000", "--slot", "0",
+        "--lnb-voltage", value};
+    const char* product[] = {
+        "siano-ts", "--instance", "siano0", "--receiver", "0",
+        "--channel", "BS01_0", "--lnb-voltage", value};
+    px4::userland::cli::TsClientProfile profile{};
+    profile.tool_name = "siano-ts";
+    profile.product_slug = "siano-userland";
+    return !px4::userland::cli::parse_px4_ts_arguments(13, legacy).valid &&
+           !px4::userland::cli::parse_px4_ts_product_arguments(9, product).valid &&
+           !px4::userland::cli::parse_px4_ts_product_arguments(9, product, profile).valid;
+}
+
+bool usage_omits_lnb_option()
+{
+    px4::userland::cli::TsClientProfile profile{};
+    profile.tool_name = "siano-ts";
+    FILE* output = std::tmpfile();
+    if (output == nullptr) return false;
+    px4::userland::cli::print_px4_ts_usage(output);
+    px4::userland::cli::print_px4_ts_usage(profile, output);
+    if (std::fflush(output) != 0 || std::fseek(output, 0L, SEEK_SET) != 0) {
+        std::fclose(output);
+        return false;
+    }
+    std::string text;
+    char buffer[256];
+    for (;;) {
+        const std::size_t read = std::fread(buffer, 1U, sizeof(buffer), output);
+        text.append(buffer, read);
+        if (read < sizeof(buffer)) break;
+    }
+    std::fclose(output);
+    return text.find("--lnb-voltage") == std::string::npos;
 }
 
 }  // namespace
@@ -73,6 +117,8 @@ int main()
     for (const char* value : satellite_values) {
         if (!accepts_system_case(value, System::ISDB_S)) return 1;
     }
+    if (!rejects_removed_lnb_option("0") || !rejects_removed_lnb_option("15") ||
+        !usage_omits_lnb_option()) return 1;
     const char* const unsupported_values[] = {"ISDB-T2", "ISDB-C"};
     for (const char* value : unsupported_values) {
         if (accepts_system_case(value, System::ISDB_T) ||

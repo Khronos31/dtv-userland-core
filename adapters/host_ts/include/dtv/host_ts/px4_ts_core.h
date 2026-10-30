@@ -68,7 +68,6 @@ struct Px4TsArguments final {
     std::uint16_t stream_id = 0xffffU;
     std::uint16_t slot = 0xffffU;
     std::uint32_t bandwidth_hz = 6000000U;
-    std::uint8_t lnb_voltage = 0U;
     std::uint32_t tune_timeout_ms = 10000U;
     std::uint64_t duration_seconds = 0U;
     std::uint64_t packet_count = 0U;

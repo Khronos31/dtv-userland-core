@@ -168,11 +168,9 @@ bool valid_arguments(const Px4TsArguments& arguments) noexcept
             return false;
         }
         if (arguments.system == System::ISDB_T) {
-            return arguments.stream_id == 0xffffU && arguments.slot == 0xffffU &&
-                   arguments.lnb_voltage == 0U;
+            return arguments.stream_id == 0xffffU && arguments.slot == 0xffffU;
         }
         return arguments.system == System::ISDB_S && arguments.bandwidth_hz == 0U &&
-               arguments.lnb_voltage <= 15U &&
                (arguments.stream_id != 0xffffU) != (arguments.slot != 0xffffU) &&
                (arguments.slot == 0xffffU || arguments.slot <= 11U);
     }
@@ -197,9 +195,9 @@ bool valid_arguments(const Px4TsArguments& arguments) noexcept
     }
     if (arguments.system == System::ISDB_T) {
         return arguments.stream_id == 0xffffU && arguments.slot == 0xffffU &&
-               arguments.lnb_voltage == 0U && arguments.bandwidth_hz == 6000000U;
+               arguments.bandwidth_hz == 6000000U;
     }
-    if (arguments.bandwidth_hz != 0U || arguments.lnb_voltage > 15U ||
+    if (arguments.bandwidth_hz != 0U ||
         (arguments.stream_id != 0xffffU && arguments.slot != 0xffffU)) {
         return false;
     }
@@ -292,7 +290,6 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
     bool have_stream_id = false;
     bool have_slot = false;
     bool have_bandwidth = false;
-    bool have_lnb = false;
     bool have_timeout = false;
     bool have_channel = false;
     std::string_view channel_text;
@@ -315,7 +312,7 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
                                  option == "--output" || option == "--receiver" ||
                                  option == "--system" || option == "--frequency-khz" ||
                                  option == "--stream-id" || option == "--slot" ||
-                                 option == "--bandwidth-hz" || option == "--lnb-voltage" ||
+                                 option == "--bandwidth-hz" ||
                                  option == "--channel" ||
                                  option == "--tune-timeout-ms" ||
                                  option == "--duration-seconds" || option == "--packet-count";
@@ -366,11 +363,6 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
             if (have_bandwidth || !parse_unsigned(value, result.bandwidth_hz))
                 return invalid("bandwidth-hz is invalid");
             have_bandwidth = true;
-        } else if (option == "--lnb-voltage") {
-            if (have_lnb || !parse_unsigned(value, result.lnb_voltage) ||
-                (result.lnb_voltage != 0U && result.lnb_voltage != 15U))
-                return invalid("lnb-voltage must be 0 or 15");
-            have_lnb = true;
         } else if (option == "--tune-timeout-ms") {
             if (have_timeout || !parse_unsigned(value, result.tune_timeout_ms))
                 return invalid("tune-timeout-ms is invalid");
@@ -412,7 +404,7 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
     if (result.output.empty()) result.output = "-";
     if (have_runtime && result.runtime_directory.empty())
         return invalid("--runtime-dir must not be empty");
-    if (result.system == System::ISDB_T && (have_stream_id || have_slot || have_lnb ||
+    if (result.system == System::ISDB_T && (have_stream_id || have_slot ||
                                             (have_bandwidth && result.bandwidth_hz != 6000000U)))
         return invalid("satellite-only fields used with isdb-t");
     if (result.system == System::ISDB_S && !have_bandwidth) result.bandwidth_hz = 0U;
@@ -446,7 +438,6 @@ static Px4TsArguments parse_product_arguments(int argc,
     bool have_slot = false;
     bool have_tsid = false;
     bool have_output = false;
-    bool have_lnb = false;
     bool have_timeout = false;
     bool have_time = false;
     std::string_view channel;
@@ -484,7 +475,6 @@ static Px4TsArguments parse_product_arguments(int argc,
                                  option == "--tsid" || option == "-t" ||
                                  option == "--time" || option == "-o" ||
                                  option == "--output" || option == "--packet-count" ||
-                                 option == "--lnb-voltage" ||
                                  option == "--tune-timeout-ms";
         if (!takes_value) return invalid("unknown argument");
         if (index + 1 >= argc || argv[index + 1] == nullptr)
@@ -553,11 +543,6 @@ static Px4TsArguments parse_product_arguments(int argc,
             if (result.packet_count_set || !parse_unsigned(value, result.packet_count))
                 return invalid("packet-count is invalid");
             result.packet_count_set = true;
-        } else if (option == "--lnb-voltage") {
-            if (have_lnb || !parse_unsigned(value, result.lnb_voltage) ||
-                (result.lnb_voltage != 0U && result.lnb_voltage != 15U))
-                return invalid("lnb-voltage must be 0 or 15");
-            have_lnb = true;
         } else {
             if (have_timeout || !parse_unsigned(value, result.tune_timeout_ms))
                 return invalid("tune-timeout-ms is invalid");
@@ -611,8 +596,6 @@ static Px4TsArguments parse_product_arguments(int argc,
                 character = static_cast<char>(character - 'A' + 'a');
         }
     }
-    if (result.system == System::ISDB_T && have_lnb)
-        return invalid("lnb-voltage is satellite-only");
     if (!valid_arguments(result)) return invalid("argument value is out of range");
     result.valid = true;
     return result;
@@ -648,7 +631,7 @@ void print_px4_ts_usage(void* output) noexcept
                  "  -o, --output PATH|-           (default stdout)\n"
                  "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver 0..7 --runtime-dir PATH --group\n"
-                 "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
+                 "      --packet-count N --tune-timeout-ms N\n"
                  "      endpoint socket path limits apply to the complete runtime/product/version/instance/file path and vary by OS; shorten --runtime-dir or --instance if diagnosed\n"
                  "  -h, --help\n"
                  "      --version\n");
@@ -669,7 +652,7 @@ void print_px4_ts_usage(const TsClientProfile& profile, void* output) noexcept
                  "  -o, --output PATH|-           (default stdout)\n"
                  "  -d, --device serial:...|usb:... [--instance TOKEN]\n"
                  "      --receiver ID --runtime-dir PATH --group\n"
-                 "      --packet-count N --lnb-voltage 0|15 --tune-timeout-ms N\n"
+                 "      --packet-count N --tune-timeout-ms N\n"
                  "      endpoint socket path limits apply to the complete runtime/product/version/instance/file path and vary by OS; shorten --runtime-dir or --instance if diagnosed\n"
                  "  -h, --help\n"
                  "      --version\n", profile.tool_name);
@@ -1445,10 +1428,6 @@ static Result<Px4TsRunResult> run_wire_profile(
         options.tune.selection_value = arguments.slot;
     } else {
         options.tune.selection = wire::Selection::automatic;
-    }
-    if (arguments.lnb_voltage != 0U) {
-        options.tune.lnb_voltage.present = true;
-        options.tune.lnb_voltage.value = arguments.lnb_voltage;
     }
     options.tune.timeout_ms = arguments.tune_timeout_ms;
 
