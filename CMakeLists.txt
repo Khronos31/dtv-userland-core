@@ -1217,6 +1217,7 @@ if(DTV_USERLAND_BUILD_TESTING)
         target_compile_definitions(host_worker_closure_tests PRIVATE
             PX4_CONTROL_WORKERS_TEST_ACCESS=1)
         add_test(NAME host_worker_closure_tests COMMAND host_worker_closure_tests)
+        set_tests_properties(host_worker_closure_tests PROPERTIES TIMEOUT 30)
         if(WIN32 OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
             add_executable(host_worker_receiver_concurrency_tests
                 tests/host_worker_receiver_concurrency_tests.cpp)
