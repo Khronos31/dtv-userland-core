@@ -915,6 +915,7 @@ bool endpoint_connect_diagnostic_text_test()
 }
 #endif
 
+#if !defined(_WIN32)
 bool write_all_boundary_test() noexcept
 {
     std::array<char, 64U> temporary{};
@@ -1001,6 +1002,7 @@ bool write_all_boundary_test() noexcept
     if (ok) std::puts("posix_write_all_large_frame_and_blocked_timeout=PASS");
     return ok;
 }
+#endif  // !defined(_WIN32)
 
 }  // namespace
 
