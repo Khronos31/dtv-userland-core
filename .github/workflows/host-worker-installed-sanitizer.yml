@@ -128,6 +128,16 @@ jobs:
           cmake --build build/current-host-ts-consumer --parallel 2
       - name: Run installed host TS consumer with sanitizers
         run: build/current-host-ts-consumer/host_ts_consumer
+      - name: Configure and build installed host header probes with sanitizers
+        run: |
+          cmake -S tests/consumer/host_headers -B build/current-host-headers-consumer \
+            -DCMAKE_CXX_COMPILER=g++ \
+            -DCMAKE_CXX_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr -fno-omit-frame-pointer' \
+            -DCMAKE_EXE_LINKER_FLAGS='-fsanitize=address,undefined -fno-sanitize=vptr' \
+            -DCMAKE_PREFIX_PATH="$PWD/build/current-install"
+          cmake --build build/current-host-headers-consumer --parallel 2
+      - name: Run installed host header probes with sanitizers
+        run: ctest --test-dir build/current-host-headers-consumer --output-on-failure
       - uses: actions/checkout@v4
         with:
           ref: 80095f4d5c9f396ec7267b3202115f8df71226ee
