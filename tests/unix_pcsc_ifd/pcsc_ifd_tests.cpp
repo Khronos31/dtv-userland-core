@@ -337,6 +337,86 @@ bool test_asicen_disconnect_error_classification()
     return true;
 }
 
+bool test_torne_profile_and_initial_status()
+{
+    CHECK(std::string_view(kTorneIfdProfile.product) == "torne-userland");
+    CHECK(std::string_view(kTorneIfdProfile.device_prefix) == "torne-userland:");
+    CHECK(std::string_view(kTorneIfdProfile.reader_name) == "Khronos31");
+    CHECK(std::string_view(kTorneIfdProfile.reader_type) ==
+          "torne card reader via torned");
+    CHECK(kTorneIfdProfile.maximum_baud == 38400U);
+    CHECK(!kTorneIfdProfile.transport_failure_means_absent);
+    CHECK(kTorneIfdProfile.validate_status_identity);
+    CHECK(!kTorneIfdProfile.leave_initial_status_unread);
+    CHECK(!kTorneIfdProfile.resource_limit_is_channel_failure);
+    CHECK(kTorneIfdProfile.invalidate_client_on_connect_failure);
+
+    const auto parsed = parse_ifd_device_name(
+        "torne-userland:runtime=/tmp/torne-ifd:instance=token:access=user",
+        kTorneIfdProfile);
+    CHECK(parsed && parsed.value().product == "torne-userland" &&
+          parsed.value().device_instance == "token");
+    CHECK(!parse_ifd_device_name(
+        "px4-userland:instance=token", kTorneIfdProfile));
+    CHECK(!parse_ifd_device_name(
+        "asicen-userland:instance=token", kTorneIfdProfile));
+    CHECK(!parse_ifd_device_name(
+        "torne-userland:instance=token", kPx4IfdProfile));
+
+    MockState state;
+    state.present = true;
+    state.initialized = true;
+    MockFactory factory(state);
+    IfdAdapter adapter(factory, kTorneIfdProfile);
+    CHECK(adapter.create_channel_by_name(0U,
+        "torne-userland:runtime=/tmp/torne-ifd:device=00001205000960:access=user") ==
+        IfdResult::success);
+    CHECK(state.status_calls == 1U);
+    CHECK(adapter.create_channel_by_name(1U,
+        "torne-userland:runtime=/tmp/torne-ifd:device=00001205000960:access=user") ==
+        IfdResult::no_such_device);
+
+    std::array<std::uint8_t, 4U> rate{};
+    std::size_t length = rate.size();
+    CHECK(adapter.get_capability(0U, kAttrMaxDataRate,
+        MutableByteView{rate.data(), rate.size()}, length) == IfdResult::success);
+    CHECK(length == 4U && rate[0] == 0x00U && rate[1] == 0x96U &&
+          rate[2] == 0x00U && rate[3] == 0x00U);
+    std::array<std::uint8_t, 40U> type{};
+    length = type.size();
+    CHECK(adapter.get_capability(0U, kAttrVendorIfdType,
+        MutableByteView{type.data(), type.size()}, length) == IfdResult::success);
+    CHECK(std::string_view(reinterpret_cast<const char*>(type.data()), length) ==
+          "torne card reader via torned");
+    CHECK(adapter.close_channel(0U) == IfdResult::success);
+    return true;
+}
+
+bool test_torne_connect_failure_recovery()
+{
+    MockState state;
+    state.present = true;
+    state.connect_error = Error::UNSUPPORTED;
+    MockFactory factory(state);
+    IfdAdapter adapter(factory, kTorneIfdProfile);
+    CHECK(adapter.create_channel_by_name(
+        0U, "torne-userland:runtime=/tmp/torne-ifd:device=00001205000960:access=user") ==
+        IfdResult::success);
+    std::array<std::uint8_t, kIfdAtrMaxLength> atr{};
+    std::size_t atr_length = atr.size();
+    CHECK(adapter.power(0U, IfdPowerAction::power_up,
+        MutableByteView{atr.data(), atr.size()}, atr_length) == IfdResult::not_supported);
+    CHECK(state.closes == 1U);
+    const std::size_t connects_after_failure = state.factory_connects;
+    state.connect_error = Error::OK;
+    atr_length = atr.size();
+    CHECK(adapter.power(0U, IfdPowerAction::power_up,
+        MutableByteView{atr.data(), atr.size()}, atr_length) == IfdResult::success);
+    CHECK(state.factory_connects > connects_after_failure);
+    CHECK(adapter.close_channel(0U) == IfdResult::success);
+    return true;
+}
+
 bool test_adapter_state_and_recovery()
 {
     MockState state;
@@ -653,6 +733,8 @@ int main()
         !test_profile_connect_failure_recovery() ||
         !test_asicen_initial_status() ||
         !test_asicen_disconnect_error_classification() ||
+        !test_torne_profile_and_initial_status() ||
+        !test_torne_connect_failure_recovery() ||
         !test_adapter_state_and_recovery() ||
         !test_stale_handle_invalidation(
             kPx4IfdProfile,
