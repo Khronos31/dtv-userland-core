@@ -11,6 +11,7 @@ on:
       - 'src/**'
       - 'tests/host_listener_context*'
       - 'tests/host_listener_context_platform/**'
+      - 'tests/host_identity_lease*'
       - 'tests/host_authority_bridge_tests.cpp'
       - 'tests/consumer/host_listener_context/**'
       - 'CMakeLists.txt'
@@ -26,6 +27,7 @@ on:
       - 'src/**'
       - 'tests/host_listener_context*'
       - 'tests/host_listener_context_platform/**'
+      - 'tests/host_identity_lease*'
       - 'tests/host_authority_bridge_tests.cpp'
       - 'tests/consumer/host_listener_context/**'
       - 'CMakeLists.txt'
@@ -59,7 +61,7 @@ jobs:
       - name: Build
         run: cmake --build build --parallel 2
       - name: Run Linux listener and bridge tests
-        run: ctest --test-dir build -R '^(host_listener_context_.*|host_authority_bridge_tests)$' --output-on-failure
+        run: ctest --test-dir build -R '^(host_listener_context_.*|host_identity_lease_tests|host_identity_lease_path_tests|host_authority_bridge_tests)$' --output-on-failure
       - name: Measure Context fixture peak RSS
         run: |
           python3 -c 'import resource, subprocess; p = subprocess.run(["build/host_listener_context_tests"], check=True); print("host_listener_context_tests_peak_rss_kib=" + str(resource.getrusage(resource.RUSAGE_CHILDREN).ru_maxrss))'
