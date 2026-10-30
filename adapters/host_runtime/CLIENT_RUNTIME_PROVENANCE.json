@@ -52,5 +52,8 @@
     "Siano product targets and pin changes",
     "legacy PosixControlClient internal-IPC path",
     "USB device access"
-  ]
+  ],
+  "canonical_header": "adapters/host_runtime/include/dtv/userland/host_runtime/posix_ipc.h",
+  "compatibility_forwarder": "adapters/host_runtime/include/px4/posix_ipc.h",
+  "header_layout": "The single current UDTV client facade definition lives in the canonical host_runtime path. The historical px4/posix_ipc.h is an installed compatibility forwarder to that path."
 }

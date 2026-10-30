@@ -846,6 +846,7 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
     install(FILES
         adapters/host_runtime/include/dtv/userland/host_runtime/control_socket.h
         adapters/host_runtime/include/dtv/userland/host_runtime/family.h
+        adapters/host_runtime/include/dtv/userland/host_runtime/posix_ipc.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_runtime)
     install(FILES
         adapters/host_runtime/include/px4/posix_ipc.h
