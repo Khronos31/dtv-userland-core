@@ -42,6 +42,9 @@ struct IdentityLeaseConfig final {
     std::string_view runtime_directory;
     std::string_view lock_prefix;
     host_runtime::EndpointAccess access = host_runtime::EndpointAccess::private_user;
+    // POSIX only: with shared_group, require the runtime directory owner to
+    // match the effective user.
+    bool require_effective_user_owner = false;
 };
 
 namespace detail {

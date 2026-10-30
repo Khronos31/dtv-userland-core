@@ -49,6 +49,7 @@ struct Policy final {
     host_runtime::EndpointAccess access = host_runtime::EndpointAccess::private_user;
     bool exact_mode = false;
     bool group_owner_membership = false;
+    bool require_effective_user_owner = false;
 };
 
 using GroupQuery = int (*)(int, gid_t*) noexcept;
@@ -109,8 +110,12 @@ inline bool supplementary_group_contains(gid_t group, GroupQuery getgroups) noex
 inline bool ownership_allowed(uid_t owner_uid, gid_t owner_gid,
                               uid_t effective_uid, gid_t effective_gid,
                               bool shared_group, bool group_owner_membership,
+                              bool require_effective_user_owner,
                               GroupQuery getgroups) noexcept
 {
+    if (require_effective_user_owner) {
+        return owner_uid == effective_uid;
+    }
     if (owner_uid == effective_uid) {
         return !shared_group || group_owner_membership || owner_gid == effective_gid;
     }
@@ -136,7 +141,8 @@ inline Check inspect(const std::string& path, const Policy& policy,
     }
     const bool shared = policy.access == host_runtime::EndpointAccess::shared_group;
     if (!ownership_allowed(info.st_uid, info.st_gid, owner, group, shared,
-                           policy.group_owner_membership, getgroups)) {
+                           policy.group_owner_membership,
+                           policy.require_effective_user_owner, getgroups)) {
         check.status = Status::owner;
         return check;
     }

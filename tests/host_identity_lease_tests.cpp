@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "dtv/userland/host_listener_context/identity_lease.h"
+#include "detail/directory_security.h"
 
 #include <array>
 #include <cerrno>
@@ -21,6 +22,8 @@ using dtv::userland::host_listener_context::IdentityLeaseConfig;
 using dtv::userland::host_listener_context::IdentityLeaseDiagnostic;
 using dtv::userland::host_listener_context::IdentityLeaseDiagnosticReason;
 using dtv::userland::host_runtime::EndpointAccess;
+namespace directory_security =
+    dtv::userland::host_listener_context::detail::directory_security;
 
 namespace {
 
@@ -74,9 +77,11 @@ std::string lock_path(const std::string& root, std::string_view identity) noexce
 dtv::userland::Result<IdentityLease> acquire(
     const std::string& root, std::string_view identity,
     EndpointAccess access = EndpointAccess::private_user,
-    IdentityLeaseDiagnostic* diagnostic = nullptr) noexcept
+    IdentityLeaseDiagnostic* diagnostic = nullptr,
+    bool require_effective_user_owner = false) noexcept
 {
-    const IdentityLeaseConfig config{root, kPrefix, access};
+    const IdentityLeaseConfig config{root, kPrefix, access,
+                                     require_effective_user_owner};
     return IdentityLease::acquire(config, identity, diagnostic);
 }
 
@@ -197,6 +202,7 @@ bool test_runtime_directory_diagnostics()
         auto lease = IdentityLease::acquire(config, "identity", &diagnostic);
         CHECK(!lease && lease.error() == Error::NOT_FOUND);
         CHECK(diagnostic.reason == IdentityLeaseDiagnosticReason::runtime_directory_missing);
+        CHECK(!std::filesystem::exists(missing));
     }
     {
         const std::string file = root + "/file";
@@ -239,6 +245,10 @@ bool test_runtime_directory_diagnostics()
         auto lease = acquire(root, "shared", EndpointAccess::shared_group);
         CHECK(lease);
         lease.value().close();
+        auto strict_owner = acquire(root, "shared-strict", EndpointAccess::shared_group,
+                                    nullptr, true);
+        CHECK(strict_owner);
+        strict_owner.value().close();
         CHECK(::chmod(root.c_str(), 0755) == 0);
         IdentityLeaseDiagnostic diagnostic;
         auto rejected = acquire(root, "shared", EndpointAccess::shared_group, &diagnostic);
@@ -247,6 +257,22 @@ bool test_runtime_directory_diagnostics()
         CHECK(::chmod(root.c_str(), 0700) == 0);
     }
     if (::geteuid() == 0) {
+        const std::string shared_owned = root + "/shared-owned";
+        CHECK(::mkdir(shared_owned.c_str(), 0750) == 0);
+        CHECK(::chown(shared_owned.c_str(), 65534, ::getegid()) == 0);
+        CHECK(::chmod(shared_owned.c_str(), 0750) == 0);
+        auto current_shared = acquire(shared_owned, "shared-current",
+                                      EndpointAccess::shared_group);
+        CHECK(current_shared);
+        current_shared.value().close();
+        IdentityLeaseDiagnostic shared_diagnostic;
+        auto strict_shared = acquire(shared_owned, "shared-strict",
+                                     EndpointAccess::shared_group,
+                                     &shared_diagnostic, true);
+        CHECK(!strict_shared && strict_shared.error() == Error::INVALID_ARGUMENT);
+        CHECK(shared_diagnostic.reason ==
+              IdentityLeaseDiagnosticReason::runtime_directory_owner);
+
         const std::string owned = root + "/owned";
         CHECK(::mkdir(owned.c_str(), 0700) == 0);
         CHECK(::chown(owned.c_str(), 65534, 65534) == 0);
@@ -257,6 +283,33 @@ bool test_runtime_directory_diagnostics()
         CHECK(diagnostic.reason == IdentityLeaseDiagnosticReason::runtime_directory_owner);
         CHECK(::chown(owned.c_str(), ::geteuid(), ::getegid()) == 0);
     }
+    return true;
+}
+
+bool test_owner_policy_predicate()
+{
+    constexpr uid_t effective_user = 1000U;
+    constexpr gid_t effective_group = 100U;
+    constexpr uid_t foreign_user = 2000U;
+
+    CHECK(directory_security::ownership_allowed(
+        foreign_user, effective_group, effective_user, effective_group,
+        true, true, false, nullptr));
+    CHECK(!directory_security::ownership_allowed(
+        foreign_user, effective_group, effective_user, effective_group,
+        true, true, true, nullptr));
+    CHECK(!directory_security::ownership_allowed(
+        foreign_user, 300U, effective_user, effective_group,
+        true, true, false, nullptr));
+    CHECK(!directory_security::ownership_allowed(
+        foreign_user, 300U, effective_user, effective_group,
+        true, true, true, nullptr));
+    CHECK(directory_security::ownership_allowed(
+        effective_user, 300U, effective_user, effective_group,
+        true, true, true, nullptr));
+    CHECK(directory_security::ownership_allowed(
+        effective_user, 300U, effective_user, effective_group,
+        false, false, false, nullptr));
     return true;
 }
 
@@ -379,7 +432,8 @@ int main()
     if (!test_busy_and_independence() || !test_raii_and_move() ||
         !test_invalid_identity_and_prefix() ||
         !test_runtime_directory_diagnostics() ||
-        !test_lock_file_diagnostics() || !test_cross_process_busy()) {
+        !test_lock_file_diagnostics() || !test_cross_process_busy() ||
+        !test_owner_policy_predicate()) {
         return 1;
     }
     std::printf("identity lease regression fixtures passed\n");
