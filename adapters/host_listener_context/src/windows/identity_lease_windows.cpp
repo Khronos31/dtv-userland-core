@@ -6,6 +6,7 @@
 // policy.
 #include "dtv/userland/host_listener_context/identity_lease.h"
 
+#include "detail/windows_path.h"
 #include "detail/windows_security_checks.h"
 
 #ifndef _WIN32_WINNT
@@ -36,6 +37,7 @@ namespace {
 
 namespace windows_security = px4::userland::windows_security;
 namespace windows_security_checks = detail::windows_security_checks;
+namespace windows_path = detail::windows_path;
 
 constexpr std::size_t kStoredPathCapacity = 512U;
 
@@ -220,6 +222,11 @@ Result<IdentityLease> IdentityLease::acquire(
     if (!windows_security_checks::utf8_to_wide(
             std::string(config.runtime_directory.data(), config.runtime_directory.size()),
             runtime)) {
+        if (diagnostic != nullptr)
+            diagnostic->reason = IdentityLeaseDiagnosticReason::runtime_directory;
+        return Result<IdentityLease>::failure(Error::INVALID_ARGUMENT);
+    }
+    if (!windows_path::is_local_absolute(runtime)) {
         if (diagnostic != nullptr)
             diagnostic->reason = IdentityLeaseDiagnosticReason::runtime_directory;
         return Result<IdentityLease>::failure(Error::INVALID_ARGUMENT);

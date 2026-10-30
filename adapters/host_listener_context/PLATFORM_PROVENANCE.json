@@ -11,12 +11,14 @@
     "adapters/host_listener_context/src/posix/identity_lease_posix.cpp",
     "adapters/host_listener_context/src/windows/identity_lease_windows.cpp",
     "adapters/host_listener_context/src/detail/directory_security.h",
-    "adapters/host_listener_context/src/detail/windows_security_checks.h"
+    "adapters/host_listener_context/src/detail/windows_security_checks.h",
+    "adapters/host_listener_context/src/detail/windows_path.h"
   ],
   "platform_fixtures": [
     "tests/host_listener_context_platform/posix_tests.cpp",
     "tests/host_listener_context_platform/windows_tests.cpp",
-    "tests/host_identity_lease_tests.cpp"
+    "tests/host_identity_lease_tests.cpp",
+    "tests/host_identity_lease_path_tests.cpp"
   ],
   "adapted_references": [
     {

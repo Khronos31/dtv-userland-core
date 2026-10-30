@@ -929,6 +929,12 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_test(NAME host_listener_context_integration_tests
             COMMAND host_listener_context_integration_tests)
         set_tests_properties(host_listener_context_integration_tests PROPERTIES TIMEOUT 45)
+        add_executable(host_identity_lease_path_tests
+            tests/host_identity_lease_path_tests.cpp)
+        target_include_directories(host_identity_lease_path_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
+        add_test(NAME host_identity_lease_path_tests
+            COMMAND host_identity_lease_path_tests)
         if(NOT WIN32)
             add_executable(host_identity_lease_tests tests/host_identity_lease_tests.cpp)
             target_link_libraries(host_identity_lease_tests PRIVATE
