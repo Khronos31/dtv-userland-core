@@ -365,6 +365,47 @@ int test_worker_resource_bounds(bool baseline)
     return 0;
 }
 
+int test_startup_failure_errors()
+{
+    Backend backend;
+    Nonce nonce;
+    Time time;
+    TunerService tuner(backend, nonce, time);
+    CardBackend card_backend;
+    CardSession card_session;
+    CardService card(card_backend, card_session);
+    ControlExecutionLayout execution{};
+    execution.receiver_count = 0U;
+    const std::size_t initial_threads = process_thread_count();
+    if (initial_threads == 0U) return fail("process thread count unavailable");
+
+    ControlWorkerStartupOptions options;
+    for (int lane = 0; lane < 3; ++lane) {
+        options.fail_lane = lane;
+        const auto failed = ControlWorkerLanes::create_for_test(
+            card, tuner, options, nullptr, execution);
+        if (failed || failed.error() != Error::INTERNAL) {
+            std::fprintf(stderr, "initial lane %d did not return INTERNAL\n", lane);
+            return 1;
+        }
+        if (!wait_for_thread_count(initial_threads)) {
+            std::fprintf(stderr, "initial lane %d leaked a worker thread\n", lane);
+            return 1;
+        }
+    }
+
+    options.fail_lane = -1;
+    options.fail_wake_pipe = true;
+    const auto wake_failed = ControlWorkerLanes::create_for_test(
+        card, tuner, options, nullptr, execution);
+    if (wake_failed || wake_failed.error() != Error::INTERNAL)
+        return fail("wake creation failure did not return INTERNAL");
+    if (!wait_for_thread_count(initial_threads))
+        return fail("wake creation failure leaked a worker thread");
+    std::puts("lane 0/1/2 and wake startup failures return INTERNAL: PASS");
+    return 0;
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -372,5 +413,7 @@ int main(int argc, char** argv)
     const bool baseline = argc == 2 && std::strcmp(argv[1], "--baseline") == 0;
     if (argc > 2 || (argc == 2 && !baseline)) return 2;
     if (test_sibling_progress(baseline) != 0) return 1;
-    return test_worker_resource_bounds(baseline);
+    if (test_worker_resource_bounds(baseline) != 0) return 1;
+    if (baseline) return 0;
+    return test_startup_failure_errors();
 }
