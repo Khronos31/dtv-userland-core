@@ -177,7 +177,7 @@ void test_hello_negotiation()
     const auto hello = w::decode_hello_response(reply.payload);
     CHECK(hello);
     if (hello) {
-        CHECK(hello.value().major == 1U && hello.value().minor == 1U);
+        CHECK(hello.value().major == 1U && hello.value().minor == 0U);
         // Only the offered optional bit survives; unknown and unoffered bits drop.
         CHECK(hello.value().features == w::kFeatureStateEvent);
         CHECK(hello.value().epoch == h.server.epoch);
