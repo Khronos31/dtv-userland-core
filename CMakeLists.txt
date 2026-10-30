@@ -19,6 +19,8 @@ option(DTV_USERLAND_BUILD_CONTROL "Build the internal control protocol gate" OFF
 option(DTV_USERLAND_BUILD_STATUS_PROJECTION "Build the internal receiver STATUS projection" OFF)
 option(DTV_USERLAND_BUILD_AUTHORITY "Build the internal control authority service" OFF)
 option(DTV_USERLAND_BUILD_HOST_TUNER "Build the host TunerService owner adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_CARD_T1 "Build the GPL-2.0-only host T=1 card adapter" OFF)
+option(DTV_USERLAND_BUILD_HOST_TS_CONTINUITY "Build the GPL-2.0-only host TS continuity checker" OFF)
 option(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER "Build the host authority owner seam" OFF)
 option(DTV_USERLAND_BUILD_HOST_WORKERS "Build the host control worker lanes" OFF)
 option(DTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE "Build the bounded host authority bridge" OFF)
@@ -179,6 +181,44 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         target_compile_options(dtv_userland_host_tuner PRIVATE
             -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
     endif()
+endif()
+if(DTV_USERLAND_BUILD_HOST_CARD_T1)
+    set(_dtv_userland_host_card_t1_sources
+        adapters/host_daemon/src/card_t1.cpp)
+    if(WIN32)
+        list(APPEND _dtv_userland_host_card_t1_sources
+            adapters/host_daemon/src/windows/card_t1_sleep_windows.cpp)
+    endif()
+    add_library(dtv_userland_host_card_t1 STATIC
+        ${_dtv_userland_host_card_t1_sources})
+    add_library(dtv::host_card_t1 ALIAS dtv_userland_host_card_t1)
+    set_target_properties(dtv_userland_host_card_t1 PROPERTIES
+        EXPORT_NAME host_card_t1
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF)
+    target_compile_features(dtv_userland_host_card_t1 PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_host_card_t1 PUBLIC
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_facade/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
+    target_link_libraries(dtv_userland_host_card_t1 PUBLIC dtv::core)
+    if(MSVC)
+        target_compile_options(dtv_userland_host_card_t1 PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_host_card_t1 PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+endif()
+if(DTV_USERLAND_BUILD_HOST_TS_CONTINUITY)
+    add_library(dtv_userland_host_ts_continuity INTERFACE)
+    add_library(dtv::host_ts_continuity ALIAS dtv_userland_host_ts_continuity)
+    set_target_properties(dtv_userland_host_ts_continuity PROPERTIES
+        EXPORT_NAME host_ts_continuity)
+    target_compile_features(dtv_userland_host_ts_continuity INTERFACE cxx_std_17)
+    target_include_directories(dtv_userland_host_ts_continuity INTERFACE
+        $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_daemon/include>
+        $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}>)
 endif()
 if(DTV_USERLAND_BUILD_HOST_WORKERS)
     if(NOT DTV_USERLAND_BUILD_HOST_TUNER OR NOT DTV_USERLAND_BUILD_CARD OR
@@ -619,6 +659,43 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         adapters/host_daemon/TUNER_SERVICE_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_tuner)
 endif()
+if(DTV_USERLAND_BUILD_HOST_CARD_T1)
+    install(TARGETS dtv_userland_host_card_t1
+        EXPORT dtv_userland_host_card_t1Targets
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_host_card_t1Targets
+        FILE dtv_userland_host_card_t1Targets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_daemon/include/dtv/userland/host_card_t1/card_t1.h
+        adapters/host_daemon/include/dtv/userland/host_card_t1/platform_sleep.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_card_t1)
+    if(DTV_USERLAND_BUILD_HOST_WORKERS)
+        install(FILES
+            adapters/host_daemon/include/dtv/userland/host_card_t1/card_protocol_session.h
+            DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_card_t1)
+    endif()
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/HOST_CARD_T1_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_card_t1)
+endif()
+if(DTV_USERLAND_BUILD_HOST_TS_CONTINUITY)
+    install(TARGETS dtv_userland_host_ts_continuity
+        EXPORT dtv_userland_host_ts_continuityTargets)
+    install(EXPORT dtv_userland_host_ts_continuityTargets
+        FILE dtv_userland_host_ts_continuityTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/host_daemon/include/dtv/userland/host_ts_continuity/ts_continuity.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_ts_continuity)
+    install(FILES
+        adapters/host_daemon/COPYING
+        adapters/host_daemon/HOST_TS_CONTINUITY_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_ts_continuity)
+endif()
 if(DTV_USERLAND_BUILD_HOST_WORKERS)
     install(TARGETS dtv_userland_host_workers
         EXPORT dtv_userland_host_workersTargets
@@ -991,6 +1068,20 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_executable(host_tuner_tests tests/host_tuner_tests.cpp)
         target_link_libraries(host_tuner_tests PRIVATE dtv::host_tuner)
         add_test(NAME host_tuner_tests COMMAND host_tuner_tests)
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_CARD_T1)
+        add_executable(host_card_t1_tests tests/host_card_t1_tests.cpp)
+        target_link_libraries(host_card_t1_tests PRIVATE dtv::host_card_t1)
+        add_test(NAME host_card_t1_tests COMMAND host_card_t1_tests)
+        set_tests_properties(host_card_t1_tests PROPERTIES TIMEOUT 60)
+    endif()
+
+    if(DTV_USERLAND_BUILD_HOST_TS_CONTINUITY)
+        add_executable(host_ts_continuity_tests tests/host_ts_continuity_tests.cpp)
+        target_link_libraries(host_ts_continuity_tests PRIVATE dtv::host_ts_continuity)
+        add_test(NAME host_ts_continuity_tests COMMAND host_ts_continuity_tests)
+        set_tests_properties(host_ts_continuity_tests PROPERTIES TIMEOUT 60)
     endif()
 
     if(DTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER)
