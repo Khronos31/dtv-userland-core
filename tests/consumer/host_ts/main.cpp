@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include <dtv/host_ts/px4_ts_core.h>
 #include <host_ctl.h>
-#include <px4/posix_ipc.h>
+#include <dtv/userland/host_runtime/posix_ipc.h>
 #include <px4_windows_args.h>
 #include <px4d_signals.h>
 #if defined(_WIN32)

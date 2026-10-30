@@ -1,7 +1,7 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "host_ctl.h"
 
-#include <px4/posix_ipc.h>
+#include <dtv/userland/host_runtime/posix_ipc.h>
 #include <dtv/userland/control_client.h>
 #include <dtv/userland/host_runtime/control_socket.h>
 #include <dtv/userland/json.h>

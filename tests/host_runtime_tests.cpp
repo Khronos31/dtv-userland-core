@@ -13,6 +13,7 @@
 #include "px4/windows_tuner_nonce.h"
 #include "windows/windows_security.h"
 #else
+#include "dtv/userland/host_runtime/posix_ipc.h"
 #include "px4/posix_ipc.h"
 #include "px4/posix_tuner_nonce.h"
 #include <csignal>

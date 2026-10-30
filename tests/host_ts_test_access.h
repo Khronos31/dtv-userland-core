@@ -3,7 +3,7 @@
 #define DTV_HOST_TS_TEST_ACCESS_H
 
 #include <dtv/host_ts/px4_ts_core.h>
-#include "px4/posix_ipc.h"
+#include "dtv/userland/host_runtime/posix_ipc.h"
 
 namespace px4::userland::cli::test_access {
 
