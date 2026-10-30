@@ -8,8 +8,10 @@
 link `dtv::host_tuner`.
 
 This target preserves the existing service API and its single private
-`ReceiverEngine` owner. The installed `px4/tuner_service.h` exposes the full
-legacy service surface, including strict-tune and v1 stream methods; this
+`ReceiverEngine` owner. The installed canonical header
+`dtv/userland/host_daemon/tuner_service.h` exposes the full legacy service
+surface, including strict-tune and v1 stream methods; the historical installed
+`px4/tuner_service.h` is a compatibility forwarder to that definition. This
 increment does not make those methods a stable Core API or claim that every
 backend supports every operation. Backend capability and `UNSUPPORTED`
 results remain authoritative. The focused fake-backend test establishes only

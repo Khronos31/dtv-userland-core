@@ -16,10 +16,12 @@
     "paths": [
       "adapters/host_daemon/src/tuner_service.cpp",
       "adapters/host_daemon/include/px4/tuner_service.h",
+      "adapters/host_daemon/include/dtv/userland/host_daemon/tuner_service.h",
       "adapters/host_facade/include/px4/error.h",
       "adapters/host_facade/include/px4/ipc.h",
       "adapters/host_facade/include/px4/transport.h"
-    ]
+    ],
+    "layout": "The single TunerService definition lives in the canonical dtv/userland/host_daemon/tuner_service.h. The historical px4/tuner_service.h is a compatibility forwarder to that path."
   },
-  "measurement_scope": "TunerService owner source and public types only; no server, worker, facade implementation, runtime, or TS target"
+  "measurement_scope": "TunerService owner source and public types only; the canonical header is the single definition and px4/tuner_service.h is an installed forwarder. No server, worker, facade implementation, runtime, or TS target"
 }

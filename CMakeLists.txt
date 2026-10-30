@@ -717,6 +717,9 @@ if(DTV_USERLAND_BUILD_HOST_TUNER)
         NAMESPACE dtv::
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
     install(FILES
+        adapters/host_daemon/include/dtv/userland/host_daemon/tuner_service.h
+        DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_daemon)
+    install(FILES
         adapters/host_daemon/include/px4/tuner_service.h
         adapters/host_facade/include/px4/error.h
         adapters/host_facade/include/px4/ipc.h

@@ -3,7 +3,7 @@
 #define DTV_USERLAND_HOST_RUNTIME_FAMILY_H
 
 #include "px4/card_service.h"
-#include "px4/tuner_service.h"
+#include "dtv/userland/host_daemon/tuner_service.h"
 
 namespace dtv::userland::host_runtime {
 
