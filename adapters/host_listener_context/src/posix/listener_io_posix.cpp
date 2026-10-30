@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "detail/listener_io.h"
+#include "detail/directory_security.h"
 #include "dtv/userland/host_listener_context/enclosure_context.h"
 
 #include <algorithm>
@@ -72,87 +73,51 @@ bool same_identity(const PathIdentity& expected, const struct stat& actual) noex
            expected.group == actual.st_gid;
 }
 
+ListenerDiagnosticReason map_directory_status(
+    directory_security::Status status) noexcept
+{
+    switch (status) {
+    case directory_security::Status::missing:
+        return ListenerDiagnosticReason::runtime_directory_missing;
+    case directory_security::Status::lookup:
+        return ListenerDiagnosticReason::runtime_directory_lookup;
+    case directory_security::Status::type:
+        return ListenerDiagnosticReason::runtime_directory_type;
+    case directory_security::Status::owner:
+        return ListenerDiagnosticReason::runtime_directory_owner;
+    case directory_security::Status::mode:
+        return ListenerDiagnosticReason::runtime_directory_mode;
+    case directory_security::Status::security:
+        return ListenerDiagnosticReason::runtime_directory_security;
+    case directory_security::Status::ok:
+        break;
+    }
+    return ListenerDiagnosticReason::none;
+}
+
 bool secure_directory(const std::string& path, host_runtime::EndpointAccess access,
                       uid_t owner, gid_t group, ListenerDiagnostic* diagnostic = nullptr,
                       RuntimeDirectoryLayer layer = RuntimeDirectoryLayer::runtime_root) noexcept
 {
-    struct stat info{};
-    if (::lstat(path.c_str(), &info) != 0) {
-        if (diagnostic != nullptr) {
-            diagnostic->directory_layer = layer;
-            diagnostic->reason = errno == ENOENT
-                ? ListenerDiagnosticReason::runtime_directory_missing
-                : ListenerDiagnosticReason::runtime_directory_lookup;
-        }
-        return false;
-    }
-    if (!S_ISDIR(info.st_mode) || S_ISLNK(info.st_mode)) {
-        if (diagnostic != nullptr) {
-            diagnostic->directory_layer = layer;
-            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_type;
-        }
-        return false;
-    }
-    if (info.st_uid != owner || (access == host_runtime::EndpointAccess::shared_group &&
-                                 info.st_gid != group)) {
-        if (diagnostic != nullptr) {
-            diagnostic->directory_layer = layer;
-            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_owner;
-        }
-        return false;
-    }
-    const bool allowed = access == host_runtime::EndpointAccess::private_user
-        ? (info.st_mode & 0077) == 0
-        : (info.st_mode & 07777) == 0750 && (info.st_mode & 0077) == 0050 &&
-          (info.st_mode & 0700) == 0700;
-    if (!allowed && diagnostic != nullptr) {
+    const directory_security::Policy policy{access, false, false};
+    const auto check = directory_security::inspect(path, policy, owner, group);
+    if (check.status == directory_security::Status::ok) return true;
+    if (diagnostic != nullptr) {
         diagnostic->directory_layer = layer;
-        diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
+        diagnostic->reason = map_directory_status(check.status);
     }
-    return allowed;
+    return false;
 }
 
 bool secure_shared_ancestors(const std::string& path, uid_t owner,
                              ListenerDiagnostic* diagnostic) noexcept
 {
-    std::string normalized(path);
-    while (normalized.size() > 1U && normalized.back() == '/') normalized.pop_back();
-    if (normalized.empty() || normalized.front() != '/') {
-        if (diagnostic != nullptr) {
-            diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
-            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
-        }
-        return false;
+    if (directory_security::shared_ancestors_secure(path, owner)) return true;
+    if (diagnostic != nullptr) {
+        diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
+        diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
     }
-    std::string current;
-    std::size_t offset = 1U;
-    while (offset < normalized.size()) {
-        const std::size_t separator = normalized.find('/', offset);
-        const std::size_t end = separator == std::string::npos ? normalized.size() : separator;
-        const std::string_view component(normalized.data() + offset, end - offset);
-        if (component.empty() || component == "." || component == "..") {
-            if (diagnostic != nullptr) {
-                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
-                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
-            }
-            return false;
-        }
-        current.push_back('/');
-        current.append(component.data(), component.size());
-        struct stat info{};
-        if (::lstat(current.c_str(), &info) != 0 || !S_ISDIR(info.st_mode) ||
-            S_ISLNK(info.st_mode) || (info.st_mode & 0022) != 0 ||
-            (info.st_uid != 0 && info.st_uid != owner)) {
-            if (diagnostic != nullptr) {
-                diagnostic->directory_layer = RuntimeDirectoryLayer::runtime_root;
-                diagnostic->reason = ListenerDiagnosticReason::runtime_directory_security;
-            }
-            return false;
-        }
-        if (separator == std::string::npos) break;
-        offset = separator + 1U;
-    }
-    return true;
+    return false;
 }
 
 bool ensure_directory(const std::string& path, host_runtime::EndpointAccess access,
@@ -160,24 +125,11 @@ bool ensure_directory(const std::string& path, host_runtime::EndpointAccess acce
                       RuntimeDirectoryLayer layer) noexcept
 {
     if (diagnostic != nullptr) diagnostic->directory_layer = layer;
-    const bool created = ::mkdir(path.c_str(),
-        access == host_runtime::EndpointAccess::private_user ? 0700 : 0750) == 0;
-    if (!created && errno != EEXIST) {
-        if (diagnostic != nullptr) {
-            diagnostic->reason = errno == EACCES || errno == EPERM
-                ? ListenerDiagnosticReason::runtime_directory_security
-                : errno == ENOENT ? ListenerDiagnosticReason::runtime_directory_missing
-                                  : ListenerDiagnosticReason::runtime_directory_lookup;
-        }
-        return false;
-    }
-    if (created && access == host_runtime::EndpointAccess::shared_group &&
-        ::chmod(path.c_str(), 0750) != 0) {
-        if (diagnostic != nullptr)
-            diagnostic->reason = ListenerDiagnosticReason::runtime_directory_mode;
-        return false;
-    }
-    return secure_directory(path, access, owner, group, diagnostic, layer);
+    const directory_security::Policy policy{access, false, false};
+    const auto check = directory_security::ensure(path, policy, owner, group);
+    if (check.status == directory_security::Status::ok) return true;
+    if (diagnostic != nullptr) diagnostic->reason = map_directory_status(check.status);
+    return false;
 }
 
 bool stale_socket(const std::string& path, uid_t owner) noexcept

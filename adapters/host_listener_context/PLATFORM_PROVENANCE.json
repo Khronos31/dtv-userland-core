@@ -7,11 +7,16 @@
   "listener_io_contract_sha256": "e670bbaad670bcb960992984d46095dbbb5a3a5e444b2372d45b224c0c114c85",
   "platform_sources": [
     "adapters/host_listener_context/src/posix/listener_io_posix.cpp",
-    "adapters/host_listener_context/src/windows/listener_io_windows.cpp"
+    "adapters/host_listener_context/src/windows/listener_io_windows.cpp",
+    "adapters/host_listener_context/src/posix/identity_lease_posix.cpp",
+    "adapters/host_listener_context/src/windows/identity_lease_windows.cpp",
+    "adapters/host_listener_context/src/detail/directory_security.h",
+    "adapters/host_listener_context/src/detail/windows_security_checks.h"
   ],
   "platform_fixtures": [
     "tests/host_listener_context_platform/posix_tests.cpp",
-    "tests/host_listener_context_platform/windows_tests.cpp"
+    "tests/host_listener_context_platform/windows_tests.cpp",
+    "tests/host_identity_lease_tests.cpp"
   ],
   "adapted_references": [
     {
@@ -21,7 +26,17 @@
     {
       "path": "adapters/host_runtime/include/windows/windows_security.h",
       "purpose": "Current-user protected Windows runtime directory and object DACL construction"
+    },
+    {
+      "repository": "Khronos31/asicen-userland",
+      "commit": "e2a86ca194b60f1111ecfa0a020cd0944c351c76",
+      "paths": [
+        "third_party/px4-userland/userland/src/posix_ipc.cpp",
+        "third_party/px4-userland/userland/src/windows/windows_ipc.cpp",
+        "third_party/px4-userland/userland/include/px4/posix_ipc.h"
+      ],
+      "purpose": "SerialEndpointLease::acquire_identity identity-level exclusive lock, stale-inode retry, last-holder cleanup, and diagnostic reasons. Only the lease behavior is adopted; the legacy listener/socket IPC is excluded."
     }
   ],
-  "scope": "Synchronous nonblocking POSIX poll/AF_UNIX and Windows WSAPoll/AF_UNIX listener I/O, paired endpoint lease/publish/rollback, native-handle lifetime, current-owner security and device-free OS fixtures. No listener protocol state machine, USB access, product dispatch or Engine ownership."
+  "scope": "Synchronous nonblocking POSIX poll/AF_UNIX and Windows WSAPoll/AF_UNIX listener I/O, paired endpoint lease/publish/rollback, identity-level runtime-directory lease with stale-inode retry and last-holder cleanup, native-handle lifetime, current-owner security and device-free OS fixtures. No listener protocol state machine, legacy IPC listener/socket stack, USB access, product dispatch or Engine ownership."
 }
