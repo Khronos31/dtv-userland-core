@@ -196,7 +196,8 @@ Result<IdentityLease> IdentityLease::acquire(
 
     const directory_security::Policy policy{
         config.access, true,
-        config.access == host_runtime::EndpointAccess::shared_group};
+        config.access == host_runtime::EndpointAccess::shared_group,
+        config.require_effective_user_owner};
     const auto check = directory_security::inspect(
         runtime, policy, ::geteuid(), ::getegid());
     if (check.status != directory_security::Status::ok) {

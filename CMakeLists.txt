@@ -1026,6 +1026,8 @@ if(DTV_USERLAND_BUILD_TESTING)
             COMMAND host_identity_lease_path_tests)
         if(NOT WIN32)
             add_executable(host_identity_lease_tests tests/host_identity_lease_tests.cpp)
+            target_include_directories(host_identity_lease_tests PRIVATE
+                adapters/host_listener_context/src)
             target_link_libraries(host_identity_lease_tests PRIVATE
                 dtv::host_listener_context)
             add_test(NAME host_identity_lease_tests COMMAND host_identity_lease_tests)
