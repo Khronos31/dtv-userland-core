@@ -35,6 +35,8 @@ option(DTV_USERLAND_BUILD_UNIX_PCSC_IFD
     "Build the optional GPL-2.0-only Unix PC/SC IFD adapter" OFF)
 option(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE
     "Build the Unix PC/SC IFD adapter with the ASICEN product profile" OFF)
+option(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE
+    "Build the Unix PC/SC IFD adapter with the torne product profile" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -450,6 +452,10 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
         message(FATAL_ERROR
             "DTV_USERLAND_BUILD_UNIX_PCSC_IFD requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_CONTROL")
     endif()
+    if(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE AND DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+        message(FATAL_ERROR
+            "DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE and DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE are exclusive")
+    endif()
     find_path(DTV_USERLAND_PCSC_IFD_INCLUDE_DIR ifdhandler.h
         PATH_SUFFIXES PCSC PCSC.framework/Headers)
     if(NOT DTV_USERLAND_PCSC_IFD_INCLUDE_DIR)
@@ -476,6 +482,9 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
     if(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
         target_compile_definitions(dtv_userland_unix_pcsc_ifd PRIVATE
             DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+    elseif(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+        target_compile_definitions(dtv_userland_unix_pcsc_ifd PRIVATE
+            DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE=1)
     endif()
     foreach(_target dtv_userland_core dtv_userland_wire dtv_userland_identity
             dtv_userland_control dtv_userland_receiver dtv_userland_status_projection
@@ -511,6 +520,9 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
         if(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
             target_compile_definitions(unix_pcsc_ifd_listener_tests PRIVATE
                 DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+        elseif(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+            target_compile_definitions(unix_pcsc_ifd_listener_tests PRIVATE
+                DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE=1)
         endif()
         if(MSVC)
             target_compile_options(unix_pcsc_ifd_listener_tests PRIVATE

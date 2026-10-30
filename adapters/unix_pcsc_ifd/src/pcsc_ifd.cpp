@@ -36,6 +36,8 @@ struct GlobalAdapter final {
     {
 #if defined(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
         return kAsicenIfdProfile;
+#elif defined(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+        return kTorneIfdProfile;
 #else
         return kPx4IfdProfile;
 #endif

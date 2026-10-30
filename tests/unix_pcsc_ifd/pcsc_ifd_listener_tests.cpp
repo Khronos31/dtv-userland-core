@@ -36,6 +36,8 @@ using namespace px4::userland;
 
 #if defined(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
 constexpr const auto& kProfile = dtv::userland::unix_pcsc_ifd::kAsicenIfdProfile;
+#elif defined(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+constexpr const auto& kProfile = dtv::userland::unix_pcsc_ifd::kTorneIfdProfile;
 #else
 constexpr const auto& kProfile = dtv::userland::unix_pcsc_ifd::kPx4IfdProfile;
 #endif
@@ -420,6 +422,9 @@ bool test_listener_reinsert()
     CHECK(session.transmits.load() == before_stopped_transmit);
 #if defined(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
     constexpr RESPONSECODE expected_presence = IFD_ICC_NOT_PRESENT;
+#elif defined(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE)
+    // torne keeps transport/status failures distinct from absence.
+    constexpr RESPONSECODE expected_presence = IFD_COMMUNICATION_ERROR;
 #else
     constexpr RESPONSECODE expected_presence = IFD_COMMUNICATION_ERROR;
 #endif
