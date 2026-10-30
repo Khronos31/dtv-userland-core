@@ -496,12 +496,9 @@ Result<CardSession::Block> CardSession::receive_block(std::uint64_t deadline) no
             if (expected_length != 0U && frame.size() >= expected_length) {
                 break;
             }
-            // RX_READY denotes a complete UART response. A short read which
-            // cannot satisfy its own LEN field is therefore malformed, not a
-            // partial frame that may be extended by a later notification.
-            if (expected_length != 0U && read.value() < chunk.size()) {
-                return Result<Block>::failure(Error::PROTOCOL_ERROR);
-            }
+            // A positive short read may be only the currently available part
+            // of the response. Keep accumulating within the existing block
+            // deadline; zero-byte reads sleep and cannot become a busy loop.
         }
         time_.sleep_ms(kPollIntervalMs);
     }

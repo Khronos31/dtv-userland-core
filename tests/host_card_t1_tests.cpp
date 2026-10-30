@@ -131,7 +131,14 @@ public:
         if (read_error != Error::OK) {
             return Result<std::size_t>::failure(read_error);
         }
-        const std::size_t count = std::min(output.size, receive.size());
+        if (zero_read_checks != 0U) {
+            --zero_read_checks;
+            return Result<std::size_t>::success(0U);
+        }
+        std::size_t count = std::min(output.size, receive.size());
+        if (read_chunk_limit != 0U) {
+            count = std::min(count, read_chunk_limit);
+        }
         for (std::size_t index = 0U; index < count; ++index) {
             output.data[index] = receive.front();
             receive.pop_front();
@@ -272,6 +279,10 @@ public:
             }
             frame.push_back(lrc);
         }
+        if (truncate_queue_bytes != 0U) {
+            const std::size_t remove = std::min(truncate_queue_bytes, frame.size());
+            frame.resize(frame.size() - remove);
+        }
         if (corruption == Corruption::bad_edc) {
             frame.back() ^= 1U;
         } else if (corruption == Corruption::bad_nad) {
@@ -367,6 +378,9 @@ public:
     unsigned int ready_checks = 0U;
     unsigned int ready_delay_checks = 0U;
     unsigned int read_count = 0U;
+    unsigned int zero_read_checks = 0U;
+    std::size_t read_chunk_limit = 0U;
+    std::size_t truncate_queue_bytes = 0U;
     unsigned int baud_set_count = 0U;
     unsigned int cached_resend_count = 0U;
     std::uint8_t response_sequence = 0U;
@@ -535,6 +549,61 @@ bool test_t1_initialize_and_consecutive_apdus()
     CHECK(hardware.written_pcbs[2] == 0x00U);
     CHECK(hardware.written_pcbs[3] == 0x40U);
     CHECK(!hardware.read_before_ready);
+    return true;
+}
+
+bool test_short_read_receive_patterns()
+{
+    constexpr std::array<std::uint8_t, 5U> apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    std::array<std::uint8_t, 16U> response{};
+
+    for (const std::size_t chunk : {3U, 1U}) {
+        MockCardHardware hardware;
+        FakeTime time;
+        CardSession session(hardware, time);
+        CHECK(session.initialize());
+        hardware.read_chunk_limit = chunk;
+        const auto transmitted = session.transmit(
+            view(apdu), MutableByteView{response.data(), response.size()});
+        CHECK(transmitted && transmitted.value() == 2U);
+        CHECK(response[0] == 0x90U && response[1] == 0x00U);
+        CHECK(!hardware.read_before_ready);
+    }
+
+    constexpr std::array<std::uint8_t, 8U> crc_atr{
+        0x3bU, 0x80U, 0x91U, 0x01U, 0x51U, 0x40U, 0x01U, 0x00U};
+    MockCardHardware crc_hardware;
+    crc_hardware.expected_crc = true;
+    crc_hardware.atr_attempts.push_back({crc_atr.begin(), crc_atr.end()});
+    FakeTime crc_time;
+    CardSession crc_session(crc_hardware, crc_time);
+    CHECK(crc_session.initialize());
+    crc_hardware.read_chunk_limit = 2U;
+    const auto crc = crc_session.transmit(
+        view(apdu), MutableByteView{response.data(), response.size()});
+    CHECK(crc && crc.value() == 2U);
+
+    MockCardHardware zero_read;
+    FakeTime zero_time;
+    CardSession zero_session(zero_read, zero_time);
+    CHECK(zero_session.initialize());
+    zero_read.zero_read_checks = 1U;
+    const auto after_zero = zero_session.transmit(
+        view(apdu), MutableByteView{response.data(), response.size()});
+    CHECK(after_zero && after_zero.value() == 2U);
+    CHECK(!zero_time.sleeps.empty());
+
+    MockCardHardware incomplete;
+    FakeTime incomplete_time;
+    CardSession incomplete_session(incomplete, incomplete_time);
+    CHECK(incomplete_session.initialize());
+    incomplete.truncate_queue_bytes = 1U;
+    incomplete.time_to_advance = &incomplete_time;
+    incomplete.ready_advance_ms = 100U;
+    const auto timed_out = incomplete_session.transmit(
+        view(apdu), MutableByteView{response.data(), response.size()});
+    CHECK(!timed_out && timed_out.error() == Error::TIMEOUT);
+    CHECK(!incomplete_session.initialized());
     return true;
 }
 
@@ -725,8 +794,7 @@ bool test_crc_and_malformed_frames()
                                MutableByteView{response.data(), response.size()}));
 
     for (const auto corruption : {MockCardHardware::Corruption::bad_edc,
-                                  MockCardHardware::Corruption::bad_nad,
-                                  MockCardHardware::Corruption::bad_length}) {
+                                  MockCardHardware::Corruption::bad_nad}) {
         MockCardHardware malformed;
         malformed.corruption = corruption;
         FakeTime malformed_time;
@@ -735,6 +803,18 @@ bool test_crc_and_malformed_frames()
         CHECK(!initialized && initialized.error() == Error::PROTOCOL_ERROR);
         CHECK(!malformed_session.initialized());
     }
+
+    // A declared length longer than the available bytes is now accumulated
+    // until the existing block deadline instead of being rejected as an
+    // immediate short read. The incomplete-frame classification is therefore
+    // the existing deadline TIMEOUT, not PROTOCOL_ERROR.
+    MockCardHardware short_length;
+    short_length.corruption = MockCardHardware::Corruption::bad_length;
+    FakeTime short_length_time;
+    CardSession short_length_session(short_length, short_length_time);
+    const auto short_initialized = short_length_session.initialize();
+    CHECK(!short_initialized && short_initialized.error() == Error::TIMEOUT);
+    CHECK(!short_length_session.initialized());
 
     MockCardHardware oversized_lrc;
     FakeTime oversized_lrc_time;
@@ -879,6 +959,7 @@ int main()
         !test_malformed_only_retry_policy() ||
         !test_no_card_and_incomplete_timeout() ||
         !test_t1_initialize_and_consecutive_apdus() ||
+        !test_short_read_receive_patterns() ||
         !test_initialize_from_prevalidated_atr() ||
         !test_duplicate_response_discard_and_recovery() ||
         !test_invalidation_and_reinitialization() ||
