@@ -459,7 +459,7 @@ bool test_adapter_state_and_recovery()
     CHECK(adapter.power(0U, IfdPowerAction::reset,
                         MutableByteView{atr.data(), atr.size()}, atr_length) ==
           IfdResult::success);
-    CHECK(state.resets == 1U);
+    CHECK(state.card_connects == 3U && state.resets == 0U);
 
     atr_length = atr.size();
     CHECK(adapter.power(0U, IfdPowerAction::power_down,
@@ -467,7 +467,7 @@ bool test_adapter_state_and_recovery()
           IfdResult::success);
     CHECK(atr_length == 0U && state.disconnects == 1U);
     CHECK(adapter.close_channel(0U) == IfdResult::success);
-    CHECK(state.closes == 2U);
+    CHECK(state.closes == 3U);
 
     state.status_error = Error::OK;
     CHECK(adapter.create_channel_by_name(0U, name) == IfdResult::success);
@@ -492,7 +492,59 @@ bool test_adapter_state_and_recovery()
     CHECK(adapter.presence(0U) == IfdResult::communication_error);
     state.factory_connect_error = Error::UNSUPPORTED;
     CHECK(adapter.presence(0U) == IfdResult::communication_error);
-    CHECK(state.factory_connects == 11U && state.closes == 8U);
+    CHECK(state.factory_connects == 12U && state.closes == 9U);
+    return true;
+}
+
+bool test_stale_handle_invalidation(const IfdProfile& profile,
+                                    const char* device_name)
+{
+    MockState state;
+    state.present = true;
+    state.initialized = true;
+    MockFactory factory(state);
+    IfdAdapter adapter(factory, profile);
+    CHECK(adapter.create_channel_by_name(0U, device_name) == IfdResult::success);
+    CHECK(adapter.presence(0U) == IfdResult::icc_present);
+
+    std::array<std::uint8_t, kIfdAtrMaxLength> atr{};
+    std::size_t atr_length = atr.size();
+    CHECK(adapter.power(0U, IfdPowerAction::power_up,
+                        MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::success);
+    const std::array<std::uint8_t, 5U> apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    std::array<std::uint8_t, 16U> response{};
+    std::size_t response_length = response.size();
+    CHECK(adapter.transmit(0U, kIfdTransmitProtocolT1,
+                           ByteView{apdu.data(), apdu.size()},
+                           MutableByteView{response.data(), response.size()},
+                           response_length) == IfdResult::success);
+    CHECK(state.transmits == 1U);
+
+    ++state.generation;
+    state.initialized = true;
+    CHECK(adapter.presence(0U) == IfdResult::icc_present);
+    CHECK(state.closes == 1U);
+    response_length = response.size();
+    CHECK(adapter.transmit(0U, kIfdTransmitProtocolT1,
+                           ByteView{apdu.data(), apdu.size()},
+                           MutableByteView{response.data(), response.size()},
+                           response_length) == IfdResult::icc_not_present);
+    CHECK(response_length == 0U && state.transmits == 1U);
+
+    atr_length = atr.size();
+    CHECK(adapter.power(0U, IfdPowerAction::reset,
+                        MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::success);
+    CHECK(state.card_connects == 2U && atr_length == 3U);
+    response_length = response.size();
+    CHECK(adapter.transmit(0U, kIfdTransmitProtocolT1,
+                           ByteView{apdu.data(), apdu.size()},
+                           MutableByteView{response.data(), response.size()},
+                           response_length) == IfdResult::success);
+    CHECK(response_length == 2U && state.transmits == 2U);
+    CHECK(adapter.close_channel(0U) == IfdResult::success);
+    CHECK(state.closes == 2U);
     return true;
 }
 
@@ -602,6 +654,12 @@ int main()
         !test_asicen_initial_status() ||
         !test_asicen_disconnect_error_classification() ||
         !test_adapter_state_and_recovery() ||
+        !test_stale_handle_invalidation(
+            kPx4IfdProfile,
+            "px4-userland:device=00001205000960:access=user") ||
+        !test_stale_handle_invalidation(
+            kAsicenIfdProfile,
+            "asicen-userland:device=00001205000960:access=user") ||
         !test_adapter_lazy_reconnect() ||
         !test_adapter_timeout_and_buffer_errors()) {
         return 1;
