@@ -110,6 +110,34 @@ bool operation_lane_valid(ControlWorkerLane lane, const ControlWorkerTask& task,
     return false;
 }
 
+bool receiver_scoped_operation(const ControlWorkerTask& task) noexcept
+{
+    switch (task.operation) {
+    case ControlWorkerOperation::tuner_acquire:
+    case ControlWorkerOperation::tuner_release:
+    case ControlWorkerOperation::tuner_tune:
+    case ControlWorkerOperation::tuner_start_stream:
+    case ControlWorkerOperation::tuner_stop_stream:
+    case ControlWorkerOperation::tuner_start_stream_v1:
+    case ControlWorkerOperation::tuner_stop_stream_v1:
+    case ControlWorkerOperation::tuner_stop_stream_and_cleanup_v1:
+    case ControlWorkerOperation::tuner_prepare_attach_v1:
+    case ControlWorkerOperation::tuner_run_stream_cleanup_v1:
+    case ControlWorkerOperation::tuner_stats:
+    case ControlWorkerOperation::tuner_attach_stream:
+    case ControlWorkerOperation::tuner_detach_stream:
+        return true;
+    case ControlWorkerOperation::tuner_authority_job:
+        return task.kind != ControlWorkerTaskKind::authority_cleanup &&
+            task.authority_job.kind !=
+                dtv::userland::detail::AuthorityJobKind::lnb_power &&
+            task.authority_job.kind !=
+                dtv::userland::detail::AuthorityJobKind::internal_card_status;
+    default:
+        return false;
+    }
+}
+
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
 ControlWorkerStartupOptions* test_startup_options = nullptr;
 #endif
@@ -904,6 +932,7 @@ struct ControlWorkerLanes::Impl final {
     ControlExecutionLayout execution;
     WakePipe wake;
     std::array<std::unique_ptr<Lane>, 3U> lanes;
+    std::array<std::unique_ptr<Lane>, 8U> receiver_lanes;
     std::atomic<std::size_t> live_threads{0U};
     std::atomic<Error> worker_error{Error::OK};
     bool joined = false;
@@ -1346,6 +1375,10 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create(
     CardService& card_service, TunerService& tuner_service,
     const char* runtime_directory, ControlExecutionLayout execution) noexcept
 {
+    if (execution.receiver_count > execution.receiver_lane.size()) {
+        return Result<std::unique_ptr<ControlWorkerLanes>>::failure(
+            Error::INVALID_ARGUMENT);
+    }
 #if defined(PX4_CONTROL_WORKERS_TEST_ACCESS)
     if (test_startup_options != nullptr) {
         ControlWorkerStartupOptions* options = test_startup_options;
@@ -1383,6 +1416,32 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create(
                 Error::INTERNAL);
         }
     }
+    for (std::size_t receiver = 0U;
+         receiver < impl->execution.receiver_count; ++receiver) {
+        impl->receiver_lanes[receiver] = std::unique_ptr<Impl::Lane>(
+            new Impl::Lane(*impl, impl->execution.receiver_lane[receiver]));
+        if (!impl->receiver_lanes[receiver]->initialize()) {
+            for (auto& lane : impl->lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->receiver_lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            for (auto& lane : impl->receiver_lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            return Result<std::unique_ptr<ControlWorkerLanes>>::failure(Error::INTERNAL);
+        }
+    }
     return Result<std::unique_ptr<ControlWorkerLanes>>::success(
         std::unique_ptr<ControlWorkerLanes>(new ControlWorkerLanes(std::move(impl))));
 }
@@ -1399,6 +1458,10 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create_for_test(
     const ControlWorkerStartupOptions& options, const char* runtime_directory,
     ControlExecutionLayout execution) noexcept
 {
+    if (execution.receiver_count > execution.receiver_lane.size()) {
+        return Result<std::unique_ptr<ControlWorkerLanes>>::failure(
+            Error::INVALID_ARGUMENT);
+    }
     auto impl = std::unique_ptr<Impl>(
         new Impl(card_service, tuner_service, execution, &options));
     if (options.fail_wake_pipe || !impl->wake.open(runtime_directory)) {
@@ -1443,6 +1506,55 @@ Result<std::unique_ptr<ControlWorkerLanes>> ControlWorkerLanes::create_for_test(
                 Error::INTERNAL);
         }
     }
+    for (std::size_t receiver = 0U;
+         receiver < impl->execution.receiver_count; ++receiver) {
+        const int failure_index = static_cast<int>(lane_ids.size() + receiver);
+        if (options.fail_lane == failure_index) {
+            for (auto& lane : impl->lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->receiver_lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            for (auto& lane : impl->receiver_lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            return Result<std::unique_ptr<ControlWorkerLanes>>::failure(Error::INTERNAL);
+        }
+        impl->receiver_lanes[receiver] = std::unique_ptr<Impl::Lane>(
+            new Impl::Lane(*impl, impl->execution.receiver_lane[receiver]));
+        const auto initialized = impl->receiver_lanes[receiver]->initialize();
+        if (!initialized) {
+            for (auto& lane : impl->lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->receiver_lanes)
+                if (lane != nullptr && lane->started) lane->stop();
+            for (auto& lane : impl->lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            for (auto& lane : impl->receiver_lanes) {
+                if (lane != nullptr && lane->started) {
+                    (void)pthread_join(lane->thread, nullptr);
+                    lane->joined = true;
+                    lane->destroy_sync();
+                }
+            }
+            return Result<std::unique_ptr<ControlWorkerLanes>>::failure(Error::INTERNAL);
+        }
+    }
     return Result<std::unique_ptr<ControlWorkerLanes>>::success(
         std::unique_ptr<ControlWorkerLanes>(new ControlWorkerLanes(std::move(impl))));
 }
@@ -1453,6 +1565,9 @@ ControlWorkerLanes::~ControlWorkerLanes() noexcept
     if (!impl_) return;
     (void)stop_and_join();
     for (auto& lane : impl_->lanes) {
+        if (lane != nullptr) lane->destroy_sync();
+    }
+    for (auto& lane : impl_->receiver_lanes) {
         if (lane != nullptr) lane->destroy_sync();
     }
 }
@@ -1522,11 +1637,31 @@ Result<void> ControlWorkerLanes::submit(ControlWorkerLane lane,
     // A real strict daemon routes TUNE through the bounded admission and
     // publication transaction.  Callers that did not opt into strict mode keep
     // the legacy direct queue submission.
+    Impl::Lane* target = impl_->lanes[index].get();
+    if (receiver_scoped_operation(task)) {
+        if (task.receiver >= impl_->receiver_lanes.size() ||
+            impl_->receiver_lanes[task.receiver] == nullptr) {
+            return Result<void>::failure(Error::INVALID_ARGUMENT);
+        }
+        target = impl_->receiver_lanes[task.receiver].get();
+    } else if (task.operation == ControlWorkerOperation::tuner_status ||
+               (task.operation == ControlWorkerOperation::tuner_authority_job &&
+                task.authority_job.kind ==
+                    dtv::userland::detail::AuthorityJobKind::internal_card_status)) {
+        for (std::size_t receiver = 0U;
+             receiver < impl_->receiver_lanes.size(); ++receiver) {
+            if (impl_->execution.receiver_lane[receiver] == lane &&
+                impl_->receiver_lanes[receiver] != nullptr) {
+                target = impl_->receiver_lanes[receiver].get();
+                break;
+            }
+        }
+    }
     if (task.operation == ControlWorkerOperation::tuner_tune &&
         impl_->tuner_service.strict_admission_enabled()) {
-        return impl_->lanes[index]->submit_tune(task);
+        return target->submit_tune(task);
     }
-    return impl_->lanes[index]->submit(task);
+    return target->submit(task);
 }
 
 dtv::userland::detail::AuthorityCompletion ControlWorkerLanes::execute_authority_job(
@@ -1736,8 +1871,17 @@ bool ControlWorkerLanes::try_pop(ControlWorkerLane lane,
 {
     if (!impl_) return false;
     const std::size_t index = static_cast<std::size_t>(lane);
-    return index < impl_->lanes.size() && impl_->lanes[index] != nullptr &&
-           impl_->lanes[index]->try_pop(completion);
+    if (index >= impl_->lanes.size() || impl_->lanes[index] == nullptr) return false;
+    if (impl_->lanes[index]->try_pop(completion)) return true;
+    for (std::size_t receiver = 0U;
+         receiver < impl_->receiver_lanes.size(); ++receiver) {
+        if (impl_->execution.receiver_lane[receiver] == lane &&
+            impl_->receiver_lanes[receiver] != nullptr &&
+            impl_->receiver_lanes[receiver]->try_pop(completion)) {
+            return true;
+        }
+    }
+    return false;
 }
 
 Result<ControlWorkerLane> ControlWorkerLanes::authority_lane(
@@ -1777,8 +1921,16 @@ std::size_t ControlWorkerLanes::pending_completions_for_test(
 {
     if (!impl_) return 0U;
     const std::size_t index = static_cast<std::size_t>(lane);
-    return index < impl_->lanes.size() && impl_->lanes[index] != nullptr ?
-               impl_->lanes[index]->pending_completions() : 0U;
+    if (index >= impl_->lanes.size() || impl_->lanes[index] == nullptr) return 0U;
+    std::size_t pending = impl_->lanes[index]->pending_completions();
+    for (std::size_t receiver = 0U;
+         receiver < impl_->receiver_lanes.size(); ++receiver) {
+        if (impl_->execution.receiver_lane[receiver] == lane &&
+            impl_->receiver_lanes[receiver] != nullptr) {
+            pending += impl_->receiver_lanes[receiver]->pending_completions();
+        }
+    }
+    return pending;
 }
 #endif
 
@@ -1805,6 +1957,9 @@ bool ControlWorkerLanes::idle() const noexcept
     for (const auto& lane : impl_->lanes) {
         if (lane != nullptr && !lane->idle()) return false;
     }
+    for (const auto& lane : impl_->receiver_lanes) {
+        if (lane != nullptr && !lane->idle()) return false;
+    }
     return true;
 }
 
@@ -1817,6 +1972,9 @@ Result<void> ControlWorkerLanes::request_stop() noexcept
 {
     if (!impl_) return Result<void>::success();
     for (auto& lane : impl_->lanes) {
+        if (lane != nullptr && lane->started) lane->stop();
+    }
+    for (auto& lane : impl_->receiver_lanes) {
         if (lane != nullptr && lane->started) lane->stop();
     }
     const Error error = impl_->worker_error.load();
@@ -1834,6 +1992,11 @@ Result<void> ControlWorkerLanes::stop_and_join() noexcept
         ControlWorkerCompletion completion{};
         bool drained = false;
         for (const auto& lane : impl_->lanes) {
+            if (lane != nullptr) {
+                while (lane->try_pop(completion)) drained = true;
+            }
+        }
+        for (const auto& lane : impl_->receiver_lanes) {
             if (lane != nullptr) {
                 while (lane->try_pop(completion)) drained = true;
             }
@@ -1857,6 +2020,11 @@ Result<void> ControlWorkerLanes::stop_and_join() noexcept
             while (lane->try_pop(completion)) {}
         }
     }
+    for (const auto& lane : impl_->receiver_lanes) {
+        if (lane != nullptr) {
+            while (lane->try_pop(completion)) {}
+        }
+    }
     const auto joined = join();
     if (!joined && first == Error::OK) first = joined.error();
     return first == Error::OK ? Result<void>::success() : Result<void>::failure(first);
@@ -1867,6 +2035,13 @@ Result<void> ControlWorkerLanes::join() noexcept
     if (!impl_ || impl_->joined) return Result<void>::success();
     Error first = impl_->worker_error.load();
     for (auto& lane : impl_->lanes) {
+        if (lane == nullptr || !lane->started || lane->joined) continue;
+        if (pthread_join(lane->thread, nullptr) != 0 && first == Error::OK) {
+            first = Error::INTERNAL;
+        }
+        lane->joined = true;
+    }
+    for (auto& lane : impl_->receiver_lanes) {
         if (lane == nullptr || !lane->started || lane->joined) continue;
         if (pthread_join(lane->thread, nullptr) != 0 && first == Error::OK) {
             first = Error::INTERNAL;
