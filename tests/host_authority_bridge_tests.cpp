@@ -330,7 +330,7 @@ public:
         if (!attached || !same(attachment)) return Result<void>::failure(Error::NOT_FOUND);
         attached = false;
         final.counters = counters;
-        final.terminal = static_cast<std::uint8_t>(TunerStreamTerminal::stopped);
+        final.terminal = static_cast<std::uint8_t>(final_terminal);
         final_identity = identity;
         final_valid = true;
         return Result<void>::success();
@@ -406,6 +406,13 @@ public:
         std::lock_guard<std::mutex> lock(mutex);
         return attached;
     }
+    void set_final_for_test(TunerStreamTerminal terminal,
+                            const TunerStreamCounters& value) noexcept
+    {
+        std::lock_guard<std::mutex> lock(mutex);
+        final_terminal = terminal;
+        counters = value;
+    }
 private:
     mutable std::mutex mutex;
     bool same(const TunerAttachment& other) const noexcept
@@ -429,6 +436,7 @@ private:
     TunerAttachment final_identity{};
     TunerStreamCounters counters{};
     TunerStreamFinalSnapshot final{};
+    TunerStreamTerminal final_terminal = TunerStreamTerminal::stopped;
     std::mutex detach_gate_mutex;
     std::condition_variable detach_gate_condition;
     bool detach_blocked = false;
@@ -4101,6 +4109,183 @@ bool test_fatal_late_acquire_is_not_finalized_early()
            status.value().leased[2U] && status.value().leased[4U];
 }
 
+bool test_terminal_projection_case(TunerStreamTerminal terminal,
+                                   w::StreamEndReason expected_reason)
+{
+    ActiveStreamFixture fixture;
+    if (!fixture.start()) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data || !fixture.attach(data.value())) return false;
+
+    TunerStreamCounters counters;
+    counters.packets = 101U;
+    counters.bytes = 303U;
+    counters.sync_errors = 404U;
+    counters.tei_packets = 505U;
+    counters.continuity_errors = 606U;
+    counters.queue_drops = 202U;
+    counters.usb_errors = 707U;
+    counters.empty_intervals = 808U;
+    counters.availability = {
+        w::MeasureState::valid, w::MeasureState::unknown,
+        w::MeasureState::unsupported, w::MeasureState::valid,
+        w::MeasureState::unknown, w::MeasureState::unsupported,
+        w::MeasureState::valid, w::MeasureState::unknown};
+    fixture.stream.set_final_for_test(terminal, counters);
+
+    const auto stopped = fixture.bridge->stop_stream(
+        fixture.control, fixture.lease, fixture.stream_id);
+    if (!stopped || stopped.value().stream_id != fixture.stream_id) return false;
+
+    std::array<std::uint8_t, 188U> output{};
+    HostAuthorityStreamEndResult end{};
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!end.ready && std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        (void)fixture.bridge->read_data(data.value(),
+            {output.data(), output.size()}, Timeout{0U});
+        end = fixture.bridge->take_data_stream_end(data.value());
+        if (!end.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const std::array<std::uint8_t, 8U> ids = {
+        w::kCounterIdTransmittedPackets, w::kCounterIdQueueDroppedPackets,
+        w::kCounterIdStreamBytes, w::kCounterIdSyncErrors,
+        w::kCounterIdTeiPackets, w::kCounterIdContinuityErrors,
+        w::kCounterIdStreamUsbErrors, w::kCounterIdEmptyIntervals};
+    const std::array<std::uint64_t, 8U> values = {
+        101U, 202U, 303U, 404U, 505U, 606U, 707U, 808U};
+    const std::array<w::MeasureState, 8U> states = {
+        w::MeasureState::valid, w::MeasureState::unsupported,
+        w::MeasureState::unknown, w::MeasureState::unsupported,
+        w::MeasureState::valid, w::MeasureState::unknown,
+        w::MeasureState::valid, w::MeasureState::unknown};
+    bool counters_match = end.ready &&
+        end.event.final.statistics.entries.count == ids.size();
+    for (std::size_t i = 0U; counters_match && i < ids.size(); ++i) {
+        const auto& entry = end.event.final.statistics.entries.items[i];
+        counters_match = entry.id == ids[i] &&
+            entry.counter.measurement.state == states[i] &&
+            entry.counter.measurement.value == values[i];
+    }
+    const bool projected = end.ready && end.event.final.reason == expected_reason &&
+        counters_match;
+    if (!projected)
+        std::cerr << "terminal projection mismatch input="
+                  << static_cast<unsigned>(terminal) << " ready=" << end.ready
+                  << " reason=" << static_cast<unsigned>(end.event.final.reason)
+                  << " expected=" << static_cast<unsigned>(expected_reason)
+                  << " counters=" << counters_match << "\n";
+    if (!end.ready || fixture.bridge->data_stream_end_sent(data.value(), true) != Error::OK)
+        return false;
+    if (fixture.bridge->close_session(fixture.control) != Error::OK ||
+        !wait_free(*fixture.bridge, fixture.control) ||
+        fixture.bridge->begin_shutdown() != Error::OK) return false;
+    const auto shutdown_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() &&
+           std::chrono::steady_clock::now() < shutdown_until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return projected && fixture.bridge->stopped() &&
+        fixture.bridge->shutdown_result() == Error::OK &&
+        static_cast<bool>(fixture.workers->stop_and_join());
+}
+
+bool test_legacy_terminal_projection()
+{
+    return test_terminal_projection_case(TunerStreamTerminal::slow_consumer,
+               w::StreamEndReason::slow_consumer) &&
+        test_terminal_projection_case(TunerStreamTerminal::usb_error,
+               w::StreamEndReason::backend_error) &&
+        test_terminal_projection_case(TunerStreamTerminal::sync_error,
+               w::StreamEndReason::backend_error) &&
+        test_terminal_projection_case(TunerStreamTerminal::bridge_fatal,
+               w::StreamEndReason::backend_error) &&
+        test_terminal_projection_case(TunerStreamTerminal::stopped,
+               w::StreamEndReason::stopped) &&
+        test_terminal_projection_case(TunerStreamTerminal::disconnected,
+               w::StreamEndReason::owner_closed);
+}
+
+bool test_attach_submit_failure_reports_resource_limit_and_cleans_up()
+{
+    ControlWorkerStartupOptions options;
+    options.fail_tuner_attach_submit = true;
+    ActiveStreamFixture fixture;
+    if (!fixture.start(&options)) return false;
+    const auto data = fixture.bridge->open_data_session();
+    if (!data) return false;
+    w::AttachRequest request;
+    request.epoch = fixture.list.epoch;
+    request.lease_id = fixture.lease;
+    request.stream_id = fixture.stream_id;
+    request.attach_token = fixture.attach_token;
+    const auto client = fixture.bridge->client_id(fixture.control);
+    const Error result = fixture.bridge->prepare_data_attach(
+        data.value(), fixture.control, request, 101U);
+    const auto rejected_counts = fixture.bridge->data_counts();
+    const bool rejected = result == Error::RESOURCE_LIMIT &&
+        rejected_counts.tombstone == 1U && rejected_counts.fatal_unresolved == 0U &&
+        fixture.bridge->client_id(fixture.control) == client &&
+        fixture.bridge->stream_owned_for_test(fixture.control, fixture.stream_id);
+    const Error data_closed = fixture.bridge->close_data_session(data.value());
+    const auto until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (fixture.bridge->data_counts().free != kHostAuthoritySessionCapacity &&
+           std::chrono::steady_clock::now() < until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    const auto status = fixture.tuner.engine_status();
+    const auto terminal = fixture.tuner.authority_stream_last_terminal_v1(
+        client, fixture.lease);
+    const auto cleaned_counts = fixture.bridge->data_counts();
+    const bool cleaned = cleaned_counts.free == kHostAuthoritySessionCapacity &&
+        cleaned_counts.tombstone == 0U && cleaned_counts.fatal_unresolved == 0U &&
+        fixture.bridge->counts().fatal_unresolved == 0U && status &&
+        status.value().leased[2U] && fixture.bridge->client_id(fixture.control) == client &&
+        fixture.bridge->stream_owned_for_test(fixture.control, fixture.stream_id) &&
+        terminal && terminal.value().stream_id == fixture.stream_id &&
+        terminal.value().quiesced &&
+        terminal.value().cleanup_error == Error::RESOURCE_LIMIT;
+    const auto reused = fixture.bridge->open_data_session();
+    const bool slot_reused = reused && reused.value().slot == data.value().slot &&
+        reused.value().generation != data.value().generation;
+    if (!rejected || (data_closed != Error::OK && data_closed != Error::RESOURCE_LIMIT) ||
+        !cleaned || !slot_reused)
+        std::cerr << "attach submit cleanup result=" << static_cast<unsigned>(result)
+                  << " counts=" << rejected_counts.active << "/"
+                  << rejected_counts.tombstone << " -> " << cleaned_counts.free << "/"
+                  << cleaned_counts.tombstone << "/" << cleaned_counts.fatal_unresolved
+                  << " owner=" << fixture.bridge->client_id(fixture.control)
+                  << "/" << client << " terminal=" << static_cast<bool>(terminal)
+                  << "/" << (terminal && terminal.value().quiesced)
+                  << "/" << (terminal
+                      ? static_cast<unsigned>(terminal.value().cleanup_error) : 0U)
+                  << " lease=" << static_cast<bool>(status)
+                  << "/" << (status && status.value().leased[2U])
+                  << " stream-owned="
+                  << fixture.bridge->stream_owned_for_test(fixture.control, fixture.stream_id)
+                  << " released=" << fixture.stream.final_released
+                  << " data-close=" << static_cast<unsigned>(data_closed)
+                  << " reused=" << slot_reused << "\n";
+    if (slot_reused && fixture.bridge->close_data_session(reused.value()) != Error::OK)
+        return false;
+    const Error closed = fixture.bridge->close_session(fixture.control);
+    const bool owner_closed = closed == Error::OK &&
+        wait_free(*fixture.bridge, fixture.control) &&
+        fixture.bridge->begin_shutdown() == Error::OK;
+    const auto shutdown_until = std::chrono::steady_clock::now() + std::chrono::seconds(5);
+    while (!fixture.bridge->stopped() &&
+           std::chrono::steady_clock::now() < shutdown_until) {
+        (void)fixture.bridge->poll();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    return rejected && (data_closed == Error::OK || data_closed == Error::RESOURCE_LIMIT) &&
+        cleaned && slot_reused && owner_closed &&
+        fixture.bridge->stopped() && fixture.bridge->shutdown_result() == Error::OK &&
+        static_cast<bool>(fixture.workers->stop_and_join());
+}
+
 }  // namespace
 
 int main(int argc, char** argv)
@@ -4135,11 +4320,17 @@ int main(int argc, char** argv)
             passed = test_invalidated_inflight_acquire_cleanup();
         else if (selected == "invalidated-inflight-rollback")
             passed = test_invalidated_inflight_rollback_cleanup();
+        else if (selected == "terminal-projection")
+            passed = test_legacy_terminal_projection();
+        else if (selected == "attach-submit")
+            passed = test_attach_submit_failure_reports_resource_limit_and_cleans_up();
         else return 2;
         if (!passed) return 1;
         return 0;
     }
     if (!test_cleanup_requires_quiesced_terminal() ||
+        !test_legacy_terminal_projection() ||
+        !test_attach_submit_failure_reports_resource_limit_and_cleans_up() ||
         !test_close_cancels_pending_tune_with_owned_stream() ||
         !test_prepare_attach_rejects_old_generation() ||
         !test_finish_control_close_waits_for_owned_stream() ||
