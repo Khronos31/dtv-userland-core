@@ -15,6 +15,7 @@
 #include <windows.h>
 
 #include "detail/listener_io.h"
+#include "detail/windows_security_checks.h"
 #include "dtv/userland/host_listener_context/enclosure_context.h"
 #include <windows/windows_security.h>
 
@@ -71,19 +72,6 @@ Error socket_error(int value) noexcept
     if (value == WSAECONNRESET || value == WSAECONNABORTED || value == WSAENOTCONN)
         return Error::DISCONNECTED;
     return Error::INTERNAL;
-}
-
-bool utf8_to_wide(const std::string& input, std::wstring& output) noexcept
-{
-    if (input.empty() || input.size() > static_cast<std::size_t>(INT_MAX)) return false;
-    const int count = ::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.c_str(), -1,
-                                             nullptr, 0);
-    if (count <= 0) return false;
-    output.resize(static_cast<std::size_t>(count));
-    if (::MultiByteToWideChar(CP_UTF8, MB_ERR_INVALID_CHARS, input.c_str(), -1,
-                              output.data(), count) != count) return false;
-    output.resize(static_cast<std::size_t>(count - 1));
-    return true;
 }
 
 bool wide_to_utf8(const std::wstring& input, char* output, std::size_t capacity) noexcept
@@ -184,48 +172,6 @@ bool same_identity(const PathIdentity& expected, const PathIdentity& actual) noe
            expected.index == actual.index;
 }
 
-bool verify_current_user_security(const wchar_t* path) noexcept
-{
-    PSID owner = nullptr;
-    PACL dacl = nullptr;
-    PSECURITY_DESCRIPTOR descriptor = nullptr;
-    const DWORD status = ::GetNamedSecurityInfoW(const_cast<LPWSTR>(path), SE_FILE_OBJECT,
-        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION,
-        &owner, nullptr, &dacl, nullptr, &descriptor);
-    if (status != ERROR_SUCCESS || owner == nullptr || dacl == nullptr || descriptor == nullptr)
-        return false;
-    SECURITY_DESCRIPTOR_CONTROL control = 0U;
-    DWORD revision = 0U;
-    windows_security::SidBuffer sid_storage{};
-    PSID current = windows_security::current_user_sid(sid_storage);
-    bool accepted = current != nullptr && windows_security::sid_equal(owner, current) &&
-        ::GetSecurityDescriptorControl(descriptor, &control, &revision) != 0 &&
-        (control & SE_DACL_PROTECTED) != 0U;
-    if (accepted) {
-        ACL_SIZE_INFORMATION information{};
-        accepted = ::GetAclInformation(dacl, &information, sizeof(information),
-                                       AclSizeInformation) != 0;
-        for (DWORD index = 0U; accepted && index < information.AceCount; ++index) {
-            void* raw = nullptr;
-            if (::GetAce(dacl, index, &raw) == 0 || raw == nullptr) {
-                accepted = false;
-                break;
-            }
-            const auto* header = static_cast<const ACE_HEADER*>(raw);
-            if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
-                const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw);
-                PSID trustee = reinterpret_cast<PSID>(const_cast<DWORD*>(&ace->SidStart));
-                accepted = windows_security::sid_equal(trustee, current);
-            } else if (header->AceType != ACCESS_DENIED_ACE_TYPE &&
-                       header->AceType != SYSTEM_AUDIT_ACE_TYPE) {
-                accepted = false;
-            }
-        }
-    }
-    (void)::LocalFree(descriptor);
-    return accepted;
-}
-
 bool apply_current_user_security(const wchar_t* path) noexcept
 {
     SECURITY_ATTRIBUTES attributes{};
@@ -241,7 +187,7 @@ bool apply_current_user_security(const wchar_t* path) noexcept
                 PROTECTED_DACL_SECURITY_INFORMATION,
             owner, nullptr, acl, nullptr);
     (void)::LocalFree(acl);
-    return status == ERROR_SUCCESS && verify_current_user_security(path);
+    return status == ERROR_SUCCESS && windows_security_checks::verify_current_user_security(path);
 }
 
 bool ensure_private_directory(const std::wstring& path) noexcept
@@ -350,7 +296,7 @@ public:
             return data_result.error();
         }
         std::wstring runtime;
-        if (!utf8_to_wide(std::string(control.runtime_directory), runtime)) {
+        if (!windows_security_checks::utf8_to_wide(std::string(control.runtime_directory), runtime)) {
             if (diagnostic != nullptr)
                 diagnostic->reason = ListenerDiagnosticReason::runtime_directory_encoding;
             return Error::INVALID_ARGUMENT;
@@ -378,8 +324,8 @@ public:
             return security_failure(RuntimeDirectoryLayer::instance);
         control_path_ = control_result.value();
         data_path_ = data_result.value();
-        if (!utf8_to_wide(control_path_, control_wide_) ||
-            !utf8_to_wide(data_path_, data_wide_)) return Error::INVALID_ARGUMENT;
+        if (!windows_security_checks::utf8_to_wide(control_path_, control_wide_) ||
+            !windows_security_checks::utf8_to_wide(data_path_, data_wide_)) return Error::INVALID_ARGUMENT;
         lock_path_ = instance_path + separator + L".listener.lock";
 
         SECURITY_ATTRIBUTES attributes{};
@@ -417,7 +363,7 @@ public:
         const DWORD lock_info_error = lock_info_ok == 0 ? ::GetLastError() : ERROR_SUCCESS;
         const bool lock_is_regular = lock_info_ok != 0 &&
             (lock_info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY | FILE_ATTRIBUTE_REPARSE_POINT)) == 0U;
-        const bool lock_security_ok = lock_is_regular && verify_current_user_security(lock_path_.c_str());
+        const bool lock_security_ok = lock_is_regular && windows_security_checks::verify_current_user_security(lock_path_.c_str());
         if (!lock_is_regular || !lock_security_ok) {
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
             std::fprintf(stderr,
@@ -745,7 +691,7 @@ private:
             return false;
         }
         if ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U ||
-            !verify_current_user_security(path.c_str())) {
+            !windows_security_checks::verify_current_user_security(path.c_str())) {
             ::WSASetLastError(WSAEACCES);
             return false;
         }
@@ -859,7 +805,7 @@ private:
             identity = {}; ::WSASetLastError(error == 0 ? WSAEACCES : error);
             return INVALID_SOCKET;
         }
-        if (!verify_current_user_security(path.c_str())) {
+        if (!windows_security_checks::verify_current_user_security(path.c_str())) {
             const int error = ::WSAGetLastError();
 #ifdef DTV_LISTENER_CONTEXT_DIAGNOSTICS
             std::fprintf(stderr, "Windows listener stage=verify-security path=%ls win32=%lu\n",

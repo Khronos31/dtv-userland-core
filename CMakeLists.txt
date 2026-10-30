@@ -353,10 +353,12 @@ if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
         adapters/host_listener_context/src/enclosure_context.cpp)
     if(WIN32)
         list(APPEND _dtv_userland_host_listener_context_sources
-            adapters/host_listener_context/src/windows/listener_io_windows.cpp)
+            adapters/host_listener_context/src/windows/listener_io_windows.cpp
+            adapters/host_listener_context/src/windows/identity_lease_windows.cpp)
     else()
         list(APPEND _dtv_userland_host_listener_context_sources
-            adapters/host_listener_context/src/posix/listener_io_posix.cpp)
+            adapters/host_listener_context/src/posix/listener_io_posix.cpp
+            adapters/host_listener_context/src/posix/identity_lease_posix.cpp)
     endif()
     add_library(dtv_userland_host_listener_context STATIC
         ${_dtv_userland_host_listener_context_sources})
@@ -516,6 +518,7 @@ if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
         DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
     install(FILES
         adapters/host_listener_context/include/dtv/userland/host_listener_context/enclosure_context.h
+        adapters/host_listener_context/include/dtv/userland/host_listener_context/identity_lease.h
         DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/dtv/userland/host_listener_context)
 endif()
 
@@ -1011,6 +1014,20 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_test(NAME host_listener_context_integration_tests
             COMMAND host_listener_context_integration_tests)
         set_tests_properties(host_listener_context_integration_tests PROPERTIES TIMEOUT 45)
+        add_executable(host_identity_lease_path_tests
+            tests/host_identity_lease_path_tests.cpp)
+        target_compile_features(host_identity_lease_path_tests PRIVATE cxx_std_17)
+        target_include_directories(host_identity_lease_path_tests PRIVATE
+            ${CMAKE_CURRENT_SOURCE_DIR}/adapters/host_listener_context/src)
+        add_test(NAME host_identity_lease_path_tests
+            COMMAND host_identity_lease_path_tests)
+        if(NOT WIN32)
+            add_executable(host_identity_lease_tests tests/host_identity_lease_tests.cpp)
+            target_link_libraries(host_identity_lease_tests PRIVATE
+                dtv::host_listener_context)
+            add_test(NAME host_identity_lease_tests COMMAND host_identity_lease_tests)
+            set_tests_properties(host_identity_lease_tests PROPERTIES TIMEOUT 30)
+        endif()
         add_subdirectory(tests/host_listener_context_platform)
     endif()
 
