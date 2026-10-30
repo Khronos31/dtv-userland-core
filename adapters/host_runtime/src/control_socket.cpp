@@ -398,11 +398,58 @@ public:
         socket_ = kInvalidSocket;
     }
 
+#if defined(DTV_USERLAND_HOST_RUNTIME_TEST_ACCESS)
+    bool set_send_buffer(int bytes) noexcept
+    {
+        if (socket_ == kInvalidSocket || bytes <= 0) return false;
+#if defined(_WIN32)
+        return ::setsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+                            reinterpret_cast<const char*>(&bytes),
+                            static_cast<int>(sizeof(bytes))) == 0;
+#else
+        return ::setsockopt(socket_, SOL_SOCKET, SO_SNDBUF, &bytes,
+                            static_cast<socklen_t>(sizeof(bytes))) == 0;
+#endif
+    }
+
+    int send_buffer() const noexcept
+    {
+        if (socket_ == kInvalidSocket) return 0;
+        int value = 0;
+#if defined(_WIN32)
+        int length = static_cast<int>(sizeof(value));
+        return ::getsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+                            reinterpret_cast<char*>(&value), &length) == 0 ? value : 0;
+#else
+        socklen_t length = static_cast<socklen_t>(sizeof(value));
+        return ::getsockopt(socket_, SOL_SOCKET, SO_SNDBUF,
+                            reinterpret_cast<char*>(&value), &length) == 0 ? value : 0;
+#endif
+    }
+#endif
+
 private:
     NativeSocket socket_ = kInvalidSocket;
 };
 
 }  // namespace
+
+#if defined(DTV_USERLAND_HOST_RUNTIME_TEST_ACCESS)
+namespace test_access {
+
+bool set_client_send_buffer(wire::TimedClientTransport& transport,
+                            int bytes) noexcept
+{
+    return static_cast<SocketTransport&>(transport).set_send_buffer(bytes);
+}
+
+int client_send_buffer(wire::TimedClientTransport& transport) noexcept
+{
+    return static_cast<SocketTransport&>(transport).send_buffer();
+}
+
+}  // namespace test_access
+#endif
 
 Result<std::string> endpoint_path(const EndpointConfig& config) noexcept
 {
