@@ -469,6 +469,7 @@ Result<CardSession::Block> CardSession::receive_block(std::uint64_t deadline) no
     frame.reserve(kCardUartFrameMaxLength);
     std::size_t expected_length = 0U;
     bool read_filled_chunk = false;
+    bool exact_short_read = false;
 
     while (!deadline_expired(time_, deadline)) {
         const auto ready = wait_data_ready(hardware_, time_, deadline);
@@ -494,6 +495,8 @@ Result<CardSession::Block> CardSession::receive_block(std::uint64_t deadline) no
                 }
             }
             if (expected_length != 0U && frame.size() >= expected_length) {
+                exact_short_read =
+                    frame.size() == expected_length && read.value() < chunk.size();
                 break;
             }
             // A positive short read may be only the currently available part
@@ -506,7 +509,7 @@ Result<CardSession::Block> CardSession::receive_block(std::uint64_t deadline) no
     if (expected_length == 0U || frame.size() < expected_length) {
         return Result<Block>::failure(Error::TIMEOUT);
     }
-    if (frame.size() > expected_length || read_filled_chunk) {
+    if (frame.size() > expected_length || read_filled_chunk || exact_short_read) {
         frame.resize(expected_length);
         const auto discarded = discard_pending_data();
         if (!discarded) {

@@ -649,6 +649,29 @@ bool test_initialize_from_prevalidated_atr()
     return true;
 }
 
+bool test_short_read_duplicate_response_tail()
+{
+    constexpr std::array<std::uint8_t, 5U> apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
+    MockCardHardware hardware;
+    FakeTime time;
+    CardSession session(hardware, time);
+    CHECK(session.initialize());
+
+    hardware.read_chunk_limit = 3U;
+    hardware.duplicate_next_response = true;
+    std::array<std::uint8_t, 256U> response{};
+    const auto first = session.transmit(
+        view(apdu), MutableByteView{response.data(), response.size()});
+    CHECK(first && first.value() == 2U);
+    CHECK(hardware.receive.empty());
+
+    const auto second = session.transmit(
+        view(apdu), MutableByteView{response.data(), response.size()});
+    CHECK(second && second.value() == 2U);
+    CHECK(!hardware.read_before_ready);
+    return true;
+}
+
 bool test_duplicate_response_discard_and_recovery()
 {
     constexpr std::array<std::uint8_t, 5U> apdu{0x90U, 0x30U, 0x00U, 0x00U, 0x00U};
@@ -961,6 +984,7 @@ int main()
         !test_t1_initialize_and_consecutive_apdus() ||
         !test_short_read_receive_patterns() ||
         !test_initialize_from_prevalidated_atr() ||
+        !test_short_read_duplicate_response_tail() ||
         !test_duplicate_response_discard_and_recovery() ||
         !test_invalidation_and_reinitialization() ||
         !test_wtx_timeout_and_lost_response_recovery() ||
