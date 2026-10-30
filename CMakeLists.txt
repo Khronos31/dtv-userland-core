@@ -500,6 +500,28 @@ if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
         target_link_libraries(unix_pcsc_ifd_tests PRIVATE
             dtv::host_runtime dtv::control)
         add_test(NAME unix_pcsc_ifd_tests COMMAND unix_pcsc_ifd_tests)
+        add_executable(unix_pcsc_ifd_listener_tests
+            tests/unix_pcsc_ifd/pcsc_ifd_listener_tests.cpp)
+        target_include_directories(unix_pcsc_ifd_listener_tests PRIVATE
+            adapters/unix_pcsc_ifd/include
+            ${DTV_USERLAND_PCSC_IFD_INCLUDE_DIR})
+        target_link_libraries(unix_pcsc_ifd_listener_tests PRIVATE
+            dtv::unix_pcsc_ifd dtv::host_listener_context dtv::control
+            dtv::host_runtime)
+        if(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
+            target_compile_definitions(unix_pcsc_ifd_listener_tests PRIVATE
+                DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+        endif()
+        if(MSVC)
+            target_compile_options(unix_pcsc_ifd_listener_tests PRIVATE
+                /EHs-c- /GR- /W4)
+        else()
+            target_compile_options(unix_pcsc_ifd_listener_tests PRIVATE
+                -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+        endif()
+        add_test(NAME unix_pcsc_ifd_listener_tests
+            COMMAND unix_pcsc_ifd_listener_tests)
+        set_tests_properties(unix_pcsc_ifd_listener_tests PROPERTIES TIMEOUT 45)
         add_executable(unix_pcsc_ifd_abi_tests
             tests/unix_pcsc_ifd/pcsc_ifd_abi_tests.cpp)
         target_include_directories(unix_pcsc_ifd_abi_tests PRIVATE

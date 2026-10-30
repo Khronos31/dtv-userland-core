@@ -508,13 +508,18 @@ Result<IfdCardStatus> IfdAdapter::refresh_status() noexcept
     const bool generation_changed =
         reader_generation_ != 0U &&
         reader_generation_ != status.value().reader_generation;
+    if (!status.value().present || generation_changed) {
+        if (card_handle_ != 0U) {
+            invalidate_client();
+        } else {
+            clear_card_state();
+        }
+        reader_generation_ = status.value().reader_generation;
+        present_ = status.value().present;
+        return status;
+    }
     reader_generation_ = status.value().reader_generation;
     present_ = status.value().present;
-    if (!present_ || (generation_changed && !status.value().initialized)) {
-        atr_.fill(0U);
-        atr_length_ = 0U;
-        powered_ = false;
-    }
     if (status.value().present && status.value().initialized) {
         atr_ = status.value().atr;
         atr_length_ = status.value().atr_length;
