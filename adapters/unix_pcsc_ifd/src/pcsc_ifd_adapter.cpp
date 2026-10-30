@@ -52,7 +52,7 @@ bool valid_field_value(std::string_view value) noexcept
     return true;
 }
 
-bool channel_failure(Error error) noexcept
+bool channel_failure(Error error, const IfdProfile& profile) noexcept
 {
     switch (error) {
     case Error::VERSION_MISMATCH:
@@ -70,6 +70,7 @@ bool channel_failure(Error error) noexcept
     case Error::INVALID_ARGUMENT:
     case Error::BUSY:
     case Error::RESOURCE_LIMIT:
+        return profile.resource_limit_is_channel_failure;
     case Error::UNSUPPORTED:
     case Error::NO_CARD:
     case Error::CARD_REMOVED:
@@ -115,10 +116,12 @@ public:
     PosixIfdCardClient(std::unique_ptr<dtv::userland::wire::TimedClientTransport> client,
                        std::string instance, std::string runtime_directory,
                        dtv::userland::host_runtime::EndpointAccess access,
-                       std::string product) noexcept
+                       std::string product, const IfdProfile& profile) noexcept
         : client_(std::move(client)), instance_(std::move(instance)),
           runtime_directory_(std::move(runtime_directory)),
-          product_(std::move(product)), access_(access)
+          product_(std::move(product)), access_(access),
+          validate_status_identity_(profile.validate_status_identity),
+          leave_initial_status_unread_(profile.leave_initial_status_unread)
     {
     }
 
@@ -131,6 +134,25 @@ public:
                 dtv::userland::wire::kFeatureCardService);
             if (!snapshot) return Result<IfdCardStatus>::failure(
                 static_cast<Error>(snapshot.error));
+            if (validate_status_identity_) {
+                const auto& product = snapshot.snapshot.status.producer.product;
+                const auto& actual_instance = snapshot.snapshot.status.context.instance;
+                const auto& listed_readers = snapshot.snapshot.list.readers;
+                bool reader_found = false;
+                if (listed_readers.present) {
+                    for (std::size_t index = 0U; index < listed_readers.value.count; ++index) {
+                        if (listed_readers.value.items[index].id == 0U) reader_found = true;
+                    }
+                }
+                if (product.length != product_.size() ||
+                    std::memcmp(product.bytes.data(), product_.data(), product_.size()) != 0 ||
+                    !actual_instance.present ||
+                    actual_instance.value.length != instance_.size() ||
+                    std::memcmp(actual_instance.value.bytes.data(), instance_.data(),
+                                instance_.size()) != 0 || !reader_found) {
+                    return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
+                }
+            }
             const auto& readers = snapshot.snapshot.status.readers;
             if (!readers.present || readers.value.count == 0U)
                 return Result<IfdCardStatus>::failure(Error::NOT_FOUND);
@@ -145,6 +167,10 @@ public:
             session_.epoch = snapshot.snapshot.status.context.epoch;
             session_.reader_id = reader->descriptor.id;
             session_.next_request_id = 4U;
+            card_session_started_ = true;
+            if (leave_initial_status_unread_) {
+                return Result<IfdCardStatus>::success(result);
+            }
             const auto status = dtv::userland::wire::card_status(
                 *client_, session_, dtv::userland::Timeout{kRequestTimeoutMs});
             if (!status)
@@ -288,6 +314,8 @@ private:
     std::string product_;
     dtv::userland::host_runtime::EndpointAccess access_ =
         dtv::userland::host_runtime::EndpointAccess::private_user;
+    bool validate_status_identity_ = false;
+    bool leave_initial_status_unread_ = false;
 };
 
 }  // namespace
@@ -419,7 +447,7 @@ Result<std::unique_ptr<IfdCardClient>> PosixIfdCardClientFactory::connect(
         std::unique_ptr<IfdCardClient>(
             new PosixIfdCardClient(std::move(client.value()), endpoint.device_instance,
                                    endpoint.runtime_directory, access,
-                                   profile_.product)));
+                                   profile_.product, profile_)));
 }
 
 void IfdAdapter::clear_card_state() noexcept
@@ -465,7 +493,7 @@ IfdResult IfdAdapter::fail(Error error, IfdOperation operation) noexcept
 {
     if (error == Error::NO_CARD || error == Error::CARD_REMOVED) {
         clear_card_state();
-    } else if (channel_failure(error)) {
+    } else if (channel_failure(error, profile_)) {
         invalidate_client();
     }
     return map_ifd_error(error, operation);
@@ -504,7 +532,7 @@ Result<IfdCardConnectResult> IfdAdapter::power_or_reset(bool force_reset) noexce
     if (card_handle_ == 0U) {
         result = client_->connect_shared();
         if (!result) {
-            invalidate_client();
+            if (profile_.invalidate_client_on_connect_failure) invalidate_client();
             return result;
         }
     } else if (force_reset || !powered_) {

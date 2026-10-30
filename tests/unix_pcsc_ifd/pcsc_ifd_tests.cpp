@@ -251,6 +251,37 @@ bool test_profile_capabilities_and_presence()
     return true;
 }
 
+bool test_profile_connect_failure_recovery()
+{
+    MockState px4_state;
+    px4_state.present = true;
+    px4_state.connect_error = Error::UNSUPPORTED;
+    MockFactory px4_factory(px4_state);
+    IfdAdapter px4_adapter(px4_factory, kPx4IfdProfile);
+    CHECK(px4_adapter.create_channel_by_name(
+              0U, "px4-userland:device=00001205000960") == IfdResult::success);
+    std::array<std::uint8_t, kIfdAtrMaxLength> atr{};
+    std::size_t atr_length = atr.size();
+    CHECK(px4_adapter.power(0U, IfdPowerAction::power_up,
+                            MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::not_supported);
+    CHECK(px4_state.closes == 1U);
+
+    MockState asicen_state;
+    asicen_state.present = true;
+    asicen_state.connect_error = Error::UNSUPPORTED;
+    MockFactory asicen_factory(asicen_state);
+    IfdAdapter asicen_adapter(asicen_factory, kAsicenIfdProfile);
+    CHECK(asicen_adapter.create_channel_by_name(
+              0U, "asicen-userland:device=00001205000960") == IfdResult::success);
+    atr_length = atr.size();
+    CHECK(asicen_adapter.power(0U, IfdPowerAction::power_up,
+                               MutableByteView{atr.data(), atr.size()}, atr_length) ==
+          IfdResult::not_supported);
+    CHECK(asicen_state.closes == 0U);
+    return true;
+}
+
 bool test_adapter_state_and_recovery()
 {
     MockState state;
@@ -512,6 +543,7 @@ int main()
 {
     if (!test_device_name_and_error_mapping() ||
         !test_profile_capabilities_and_presence() ||
+        !test_profile_connect_failure_recovery() ||
         !test_adapter_state_and_recovery() ||
         !test_adapter_lazy_reconnect() ||
         !test_adapter_timeout_and_buffer_errors()) {

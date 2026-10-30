@@ -104,14 +104,18 @@ struct IfdProfile final {
     const char* reader_type;
     std::uint32_t maximum_baud;
     bool transport_failure_means_absent;
+    bool validate_status_identity;
+    bool leave_initial_status_unread;
+    bool resource_limit_is_channel_failure;
+    bool invalidate_client_on_connect_failure;
 };
 
 inline constexpr IfdProfile kPx4IfdProfile{
     "px4-userland", "px4-userland:", "Khronos31", "PX-Q3U4/PX-MLT5PE via px4d",
-    38400U, false};
+    38400U, false, false, false, false, true};
 inline constexpr IfdProfile kAsicenIfdProfile{
     "asicen-userland", "asicen-userland:", "Khronos31",
-    "ASICEN card reader via asicend", 19200U, true};
+    "ASICEN card reader via asicend", 19200U, true, true, true, true, false};
 
 // Grammar: <profile-prefix>[:key=value]+. ':' is chosen because pcsc-lite
 // accepts it in unquoted DEVICENAME tokens; values therefore cannot contain ':'.
