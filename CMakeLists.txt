@@ -31,6 +31,10 @@ option(DTV_USERLAND_BUILD_HOST_TS "Build the shared host TS client" OFF)
 option(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT "Build the host listener and enclosure Context" OFF)
 option(DTV_USERLAND_BUILD_WINDOWS_WINSCARD
     "Build the optional GPL-2.0-only Windows WinSCard adapter" OFF)
+option(DTV_USERLAND_BUILD_UNIX_PCSC_IFD
+    "Build the optional GPL-2.0-only Unix PC/SC IFD adapter" OFF)
+option(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE
+    "Build the Unix PC/SC IFD adapter with the ASICEN product profile" OFF)
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
@@ -438,6 +442,73 @@ endif()
 if(DTV_USERLAND_BUILD_WINDOWS_WINSCARD)
     include(adapters/windows_winscard/CMakeLists.txt)
 endif()
+if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
+    if(WIN32)
+        message(FATAL_ERROR "DTV_USERLAND_BUILD_UNIX_PCSC_IFD requires a Unix platform")
+    endif()
+    if(NOT DTV_USERLAND_BUILD_HOST_RUNTIME OR NOT DTV_USERLAND_BUILD_CONTROL)
+        message(FATAL_ERROR
+            "DTV_USERLAND_BUILD_UNIX_PCSC_IFD requires DTV_USERLAND_BUILD_HOST_RUNTIME and DTV_USERLAND_BUILD_CONTROL")
+    endif()
+    find_path(DTV_USERLAND_PCSC_IFD_INCLUDE_DIR ifdhandler.h
+        PATH_SUFFIXES PCSC PCSC.framework/Headers)
+    if(NOT DTV_USERLAND_PCSC_IFD_INCLUDE_DIR)
+        message(FATAL_ERROR
+            "PC/SC IFD header ifdhandler.h was not found; install the PC/SC development headers")
+    endif()
+    add_library(dtv_userland_unix_pcsc_ifd SHARED
+        adapters/unix_pcsc_ifd/src/pcsc_ifd.cpp
+        adapters/unix_pcsc_ifd/src/pcsc_ifd_adapter.cpp)
+    add_library(dtv::unix_pcsc_ifd ALIAS dtv_userland_unix_pcsc_ifd)
+    set_target_properties(dtv_userland_unix_pcsc_ifd PROPERTIES
+        EXPORT_NAME unix_pcsc_ifd
+        CXX_STANDARD 17
+        CXX_STANDARD_REQUIRED YES
+        CXX_EXTENSIONS OFF
+        CXX_VISIBILITY_PRESET hidden
+        VISIBILITY_INLINES_HIDDEN YES)
+    target_compile_features(dtv_userland_unix_pcsc_ifd PUBLIC cxx_std_17)
+    target_include_directories(dtv_userland_unix_pcsc_ifd PRIVATE
+        adapters/unix_pcsc_ifd/include
+        ${DTV_USERLAND_PCSC_IFD_INCLUDE_DIR})
+    target_link_libraries(dtv_userland_unix_pcsc_ifd PRIVATE
+        dtv::host_runtime dtv::control)
+    if(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE)
+        target_compile_definitions(dtv_userland_unix_pcsc_ifd PRIVATE
+            DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE=1)
+    endif()
+    foreach(_target dtv_userland_core dtv_userland_wire dtv_userland_identity
+            dtv_userland_control dtv_userland_receiver dtv_userland_status_projection
+            dtv_userland_authority dtv_userland_host_tuner dtv_userland_host_workers
+            dtv_userland_host_runtime)
+        if(TARGET ${_target})
+            set_property(TARGET ${_target} PROPERTY POSITION_INDEPENDENT_CODE ON)
+        endif()
+    endforeach()
+    if(MSVC)
+        target_compile_options(dtv_userland_unix_pcsc_ifd PRIVATE /EHs-c- /GR- /W4)
+    else()
+        target_compile_options(dtv_userland_unix_pcsc_ifd PRIVATE
+            -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
+    endif()
+    if(DTV_USERLAND_BUILD_TESTING)
+        add_executable(unix_pcsc_ifd_tests
+            tests/unix_pcsc_ifd/pcsc_ifd_tests.cpp
+            adapters/unix_pcsc_ifd/src/pcsc_ifd_adapter.cpp)
+        target_include_directories(unix_pcsc_ifd_tests PRIVATE
+            adapters/unix_pcsc_ifd/include)
+        target_link_libraries(unix_pcsc_ifd_tests PRIVATE
+            dtv::host_runtime dtv::control)
+        add_test(NAME unix_pcsc_ifd_tests COMMAND unix_pcsc_ifd_tests)
+        add_executable(unix_pcsc_ifd_abi_tests
+            tests/unix_pcsc_ifd/pcsc_ifd_abi_tests.cpp)
+        target_include_directories(unix_pcsc_ifd_abi_tests PRIVATE
+            ${DTV_USERLAND_PCSC_IFD_INCLUDE_DIR})
+        target_link_libraries(unix_pcsc_ifd_abi_tests PRIVATE
+            dtv::unix_pcsc_ifd)
+        add_test(NAME unix_pcsc_ifd_abi_tests COMMAND unix_pcsc_ifd_abi_tests)
+    endif()
+endif()
 if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
     install(TARGETS dtv_userland_host_listener_context
         EXPORT dtv_userland_host_listener_contextTargets)
@@ -782,6 +853,20 @@ if(DTV_USERLAND_BUILD_HOST_RUNTIME)
         adapters/host_daemon/COPYING
         adapters/host_runtime/CLIENT_RUNTIME_PROVENANCE.json
         DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/host_runtime)
+endif()
+if(DTV_USERLAND_BUILD_UNIX_PCSC_IFD)
+    install(TARGETS dtv_userland_unix_pcsc_ifd
+        EXPORT dtv_userland_unix_pcsc_ifdTargets
+        LIBRARY DESTINATION ${CMAKE_INSTALL_LIBDIR}
+        ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+    install(EXPORT dtv_userland_unix_pcsc_ifdTargets
+        FILE dtv_userland_unix_pcsc_ifdTargets.cmake
+        NAMESPACE dtv::
+        DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/dtv_userland_core)
+    install(FILES
+        adapters/unix_pcsc_ifd/COPYING
+        adapters/unix_pcsc_ifd/UNIX_PCSC_IFD_PROVENANCE.json
+        DESTINATION ${CMAKE_INSTALL_DATADIR}/licenses/dtv_userland_core/unix_pcsc_ifd)
 endif()
 if(DTV_USERLAND_BUILD_HOST_TS)
     install(TARGETS dtv_userland_host_ts

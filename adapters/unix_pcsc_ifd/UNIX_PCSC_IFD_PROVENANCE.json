@@ -1,0 +1,31 @@
+{
+  "component": "Unix PC/SC IFD adapter",
+  "license": "GPL-2.0-only",
+  "sources": [
+    {
+      "repository": "Khronos31/px4-userland",
+      "commit": "5c91e8c57b288c0f490061789829e42dbbf61b3d",
+      "paths": [
+        "userland/src/pcsc_ifd.cpp",
+        "userland/src/pcsc_ifd_adapter.cpp",
+        "userland/include/px4/pcsc_ifd_adapter.h",
+        "userland/tests/pcsc_ifd_tests.cpp"
+      ]
+    },
+    {
+      "repository": "Khronos31/asicen-userland",
+      "commit": "e2a86ca194b60f1111ecfa0a020cd0944c351c76",
+      "paths": [
+        "third_party/px4-userland/userland/src/pcsc_ifd_adapter.cpp",
+        "third_party/px4-userland/userland/tests/pcsc_ifd_tests.cpp"
+      ],
+      "preserved_profile_differences": [
+        "reader type",
+        "maximum baud rate",
+        "device prefix and producer identity",
+        "presence error interpretation"
+      ]
+    }
+  ],
+  "implementation": "One Core GPL adapter implementation in dtv::userland::unix_pcsc_ifd; product differences are represented by IfdProfile."
+}
