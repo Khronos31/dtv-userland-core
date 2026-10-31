@@ -35,8 +35,8 @@ template <typename T> HMODULE module_of(T address)
 template <typename T> void check_function_import(HMODULE proxy, const char* name, T address)
 {
     // MinGW can expose the EXE's import thunk as a function's C++ address;
-    // MSVC normally exposes the resolved DLL address. The build-time PE audit
-    // requires every named import below under the WinSCard.dll descriptor.
+    // MSVC normally exposes the resolved DLL address. The checks below require
+    // each named import to resolve through the WinSCard.dll descriptor.
     const HMODULE linked = module_of(address);
     CHECK(linked == proxy || linked == ::GetModuleHandleW(nullptr));
     const auto resolved = ::GetProcAddress(proxy,name);
