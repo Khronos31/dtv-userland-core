@@ -8,6 +8,7 @@ on:
       - 'adapters/host_runtime/**'
       - 'adapters/host_ctl/**'
       - 'adapters/host_ts/**'
+      - 'adapters/windows_winscard/**'
       - 'include/**'
       - 'src/**'
       - 'tests/**'
