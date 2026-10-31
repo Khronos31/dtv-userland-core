@@ -1007,6 +1007,17 @@ if(DTV_USERLAND_BUILD_TESTING)
         add_test(NAME windows_winscard_native_fixture_tests
             COMMAND windows_winscard_native_fixture_tests $<TARGET_FILE:dtv_windows_winscard>)
         set_tests_properties(windows_winscard_native_fixture_tests PROPERTIES TIMEOUT 60)
+
+        # Test-only GPL-2.0-only fixture. Deliberately links the SDK/toolchain
+        # winscard import library, not the Core-generated WinSCard import
+        # library. The built DLL is placed beside this EXE for app-local load.
+        add_executable(windows_winscard_sdk_import_tests
+            tests/windows_winscard_sdk_import_tests.cpp)
+        target_link_libraries(windows_winscard_sdk_import_tests PRIVATE winscard)
+        add_dependencies(windows_winscard_sdk_import_tests dtv_windows_winscard)
+        add_test(NAME windows_winscard_sdk_import_tests
+            COMMAND windows_winscard_sdk_import_tests)
+        set_tests_properties(windows_winscard_sdk_import_tests PROPERTIES TIMEOUT 30)
     endif()
     if(DTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT)
         add_library(dtv_userland_host_listener_context_test STATIC

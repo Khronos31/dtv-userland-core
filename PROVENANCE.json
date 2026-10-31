@@ -5,7 +5,7 @@
     "tree": "025fe2b1f68a341ef83d12eed61d30c20b8b21e8"
   },
   "license_scope": {
-    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset, identity codecs, and tuning subset, and this candidate's new build, packaging, test, and documentation files.",
+    "applies_to": "The root MIT license applies within this candidate to the seven foundation destinations, the two receiver destinations, the card ownership destinations, and the one mechanically transferred SHA-256 class listed below, the independently implemented wire subset, identity codecs, and tuning subset, and this candidate's new build, packaging, test, and documentation files, except the separately licensed GPL-2.0-only SDK import test recorded below.",
     "does_not_apply_to": [
       "The full Khronos31/px4-userland product or unlisted source files",
       "Any future GPL adapter or other separately licensed component",
@@ -445,5 +445,22 @@
       }
     ],
     "scope": "Internal receiver lifecycle and readiness only. The bounded #1 regression fixture, docs/status-projection.md, docs/receiver-v1-stream.md, README test index and this provenance entry document the adopted source and verification behavior; no runtime/API change is made by the follow-up."
+  },
+  "windows_winscard_sdk_import_test": {
+    "method": "Test-only fixture adapted from the PX4 Windows SDK import test. The Core adapter, public API, exported symbols, runtime implementation and native Core fixture were not copied or changed.",
+    "source_commit": "b9c66eddb3f44047a93eff24058b3f8f6b70426b",
+    "source_files": [
+      {
+        "path": "userland/tests/windows_winscard_import_tests.cpp",
+        "sha256": "9ded9de4a650e45a4e0ea049fb21477e3678d84e262f27d6cba8c29bcacdc7a0",
+        "destination_path": "tests/windows_winscard_sdk_import_tests.cpp",
+        "source_spdx": "GPL-2.0-only",
+        "destination_spdx": "GPL-2.0-only",
+        "moved_scope": "SDK winscard import linkage, named function and g_rgSCardT1Pci DATA checks, EXE-adjacent WinSCard.dll identity, context API roundtrip, and System32 provider identity check.",
+        "excluded_scope": "PX4 product paths, daemon/card/USB operations, PX4_WINSCARD_RUNTIME_DIR override, and all non-test product code. The runtime override uses Core DTV_USERLAND_RUNTIME_DIR."
+      }
+    ],
+    "license": "GPL-2.0-only. The full license text is adapters/windows_winscard/COPYING. The root MIT license does not apply to this test source.",
+    "scope": "Build-tree-only Windows test target, enabled only with DTV_USERLAND_BUILD_WINDOWS_WINSCARD and DTV_USERLAND_BUILD_TESTING. It links the toolchain winscard import library, not the Core-generated import library, and adds no adapter/API/export/runtime behavior."
   }
 }
