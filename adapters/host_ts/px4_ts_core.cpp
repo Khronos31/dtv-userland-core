@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -31,6 +32,26 @@ using namespace ipc;
 using namespace ipc::posix;
 
 constexpr std::uint64_t kTsProgressTimeoutMs = 5000U;
+
+std::uint64_t diagnostic_monotonic_ns() noexcept
+{
+    return static_cast<std::uint64_t>(std::chrono::duration_cast<std::chrono::nanoseconds>(
+        std::chrono::steady_clock::now().time_since_epoch()).count());
+}
+
+bool dt295_diagnostics_enabled() noexcept
+{
+    const char* value = std::getenv("PIX_DT295_SETUP_DIAGNOSTICS");
+    return value != nullptr && std::strcmp(value, "1") == 0;
+}
+
+void log_dt295_diagnostic(const char* stage, const char* fields = "") noexcept
+{
+    if (!dt295_diagnostics_enabled()) return;
+    std::fprintf(stderr, "PIX_TS_DIAG mono_ns=%llu stage=%s%s%s\n",
+                 static_cast<unsigned long long>(diagnostic_monotonic_ns()), stage,
+                 fields[0] == '\0' ? "" : " ", fields);
+}
 
 #if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
 std::atomic<bool> fail_next_frame_storage_allocation{false};
@@ -893,6 +914,11 @@ public:
             duration_started_ = true;
             duration_started_ms_ = clock_.monotonic_ms();
             last_progress_ms_ = duration_started_ms_;
+            char fields[96]{};
+            std::snprintf(fields, sizeof(fields), "stream_id=%llu duration_started_ms=%llu",
+                          static_cast<unsigned long long>(stream_id_),
+                          static_cast<unsigned long long>(duration_started_ms_));
+            log_dt295_diagnostic("attach.complete", fields);
             return Result<void>::success();
         }
         if (frame.header.kind == wire::Kind::event &&
@@ -948,6 +974,11 @@ public:
                 return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
             final_ = end.value().final;
             final_valid_ = true;
+            char fields[128]{};
+            std::snprintf(fields, sizeof(fields), "reason=%u packets_written=%llu",
+                          static_cast<unsigned>(end.value().final.reason),
+                          static_cast<unsigned long long>(packets_written_));
+            log_dt295_diagnostic("stream.terminal", fields);
             return Result<void>::success();
         }
         return fail(Error::PROTOCOL_ERROR, Px4TsFailureKind::ipc);
@@ -1515,6 +1546,7 @@ static Result<Px4TsRunResult> run_wire_profile(
     wire::FrameReceiver receiver(
         MutableByteView{frame_storage.get(), wire::kMaxFrameSize});
     bool stop_requested_by_client = false;
+    const char* stop_reason = "none";
     WireTsReceiver reader(output, arguments, clock, signal, session.stream_id,
                           result_failure_kind);
 
@@ -1529,16 +1561,19 @@ static Result<Px4TsRunResult> run_wire_profile(
         const std::uint64_t now = clock.monotonic_ms();
         if (signal.stop_requested()) {
             stop_requested_by_client = true;
+            stop_reason = "signal";
             break;
         }
         if (reader.duration_started() && arguments.duration_set &&
             now >= reader.duration_started_ms() &&
             now - reader.duration_started_ms() >= arguments.duration_seconds * 1000U) {
             stop_requested_by_client = true;
+            stop_reason = "duration";
             break;
         }
         if (reader.limit_reached()) {
             stop_requested_by_client = true;
+            stop_reason = "packet_limit";
             break;
         }
         if (!reader.attached() && now >= first_ts_deadline) {
@@ -1574,15 +1609,30 @@ static Result<Px4TsRunResult> run_wire_profile(
         }
         if (reader.output_stop_requested()) {
             stop_requested_by_client = true;
+            stop_reason = "output_signal";
             break;
         }
         partial_frame_pending = receiver.pending_size() != 0U;
         if (partial_frame_pending) partial_frame_progress_ms = clock.monotonic_ms();
     }
+    if (stop_requested_by_client) {
+        char fields[128]{};
+        std::snprintf(fields, sizeof(fields), "reason=%s attached=%u elapsed_ms=%llu packets=%llu",
+                      stop_reason, reader.attached() ? 1U : 0U,
+                      static_cast<unsigned long long>(reader.duration_started()
+                          ? clock.monotonic_ms() - reader.duration_started_ms() : 0U),
+                      static_cast<unsigned long long>(reader.packets_written()));
+        log_dt295_diagnostic("stop.request", fields);
+    }
 
     if (!reader.final_valid() && data.value().valid()) {
+        log_dt295_diagnostic("stop_recording.begin");
         const auto stopped =
             wire::stop_recording(control_transport, session, Timeout{4000U});
+        char stopped_fields[96]{};
+        std::snprintf(stopped_fields, sizeof(stopped_fields), "result=%u error=%u",
+                      stopped ? 0U : 1U, static_cast<unsigned>(stopped.error));
+        log_dt295_diagnostic("stop_recording.result", stopped_fields);
         if (!stopped && stopped.error != Error::NOT_FOUND && primary == Error::OK) {
             primary = stopped.error;
         }
@@ -1612,10 +1662,19 @@ static Result<Px4TsRunResult> run_wire_profile(
         }
         if (primary == Error::OK && !reader.final_valid()) primary = Error::TIMEOUT;
     }
-    if (data.value().valid()) data.value().close();
+    if (data.value().valid()) {
+        log_dt295_diagnostic("data.close.begin");
+        data.value().close();
+        log_dt295_diagnostic("data.close.done");
+    }
 
+    log_dt295_diagnostic("recording.release.begin");
     const auto released =
         wire::release_recording(control_transport, session, Timeout{4000U});
+    char released_fields[96]{};
+    std::snprintf(released_fields, sizeof(released_fields), "result=%u error=%u",
+                  released ? 0U : 1U, static_cast<unsigned>(released.error));
+    log_dt295_diagnostic("recording.release.result", released_fields);
     if (!released && primary == Error::OK) {
         primary = released.error;
     }
@@ -1635,6 +1694,12 @@ static Result<Px4TsRunResult> run_wire_profile(
         diagnostics->packets_written = reader.packets_written();
     }
     if (reader.failure() != Error::OK) primary = reader.failure();
+    char final_fields[160]{};
+    std::snprintf(final_fields, sizeof(final_fields),
+                  "stop_reason=%s client_stop=%u final_valid=%u primary=%u",
+                  stop_reason, stop_requested_by_client ? 1U : 0U,
+                  reader.final_valid() ? 1U : 0U, static_cast<unsigned>(primary));
+    log_dt295_diagnostic("run.final", final_fields);
     if (primary != Error::OK) return Result<Px4TsRunResult>::failure(primary);
     if (!reader.final_valid())
         return Result<Px4TsRunResult>::failure(Error::PROTOCOL_ERROR);
