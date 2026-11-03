@@ -12,6 +12,7 @@
 #include <array>
 #include <iostream>
 #include <string>
+#include "windows/windows_security.h"
 
 namespace {
 
@@ -158,12 +159,28 @@ bool test_windows_runtime_instance_discovery()
 
 bool test_windows_default_runtime_root()
 {
+    std::array<wchar_t, MAX_PATH> temporary{};
+    std::array<wchar_t, MAX_PATH> unique{};
+    if (::GetTempPathW(static_cast<DWORD>(temporary.size()), temporary.data()) == 0U ||
+        ::GetTempFileNameW(temporary.data(), L"dtv", 0U, unique.data()) == 0U)
+        return false;
+    if (::DeleteFileW(unique.data()) == 0) return false;
+
+    TemporaryTree tree;
+    tree.root = std::wstring(unique.data()) + L"-runtime";
+    if (!make_directory(tree.root)) return false;
+    tree.root_created = true;
+    if (!px4::userland::windows_security::set_current_user_owner_and_dacl(
+            tree.root.c_str())) return false;
+
     std::array<wchar_t, 32768U> original{};
     const DWORD count = ::GetEnvironmentVariableW(L"LOCALAPPDATA", original.data(),
         static_cast<DWORD>(original.size()));
     const bool had_value = count > 0U && count < original.size();
     std::string expected;
-    if (!had_value || !to_utf8(std::wstring(original.data()), expected)) return false;
+    if (!to_utf8(tree.root, expected) ||
+        ::SetEnvironmentVariableW(L"LOCALAPPDATA", tree.root.c_str()) == 0)
+        return false;
 
     const auto roots = px4::userland::ipc::posix::client_runtime_roots();
     const auto publish = px4::userland::ipc::posix::select_publish_runtime_root(
@@ -185,7 +202,8 @@ bool test_windows_default_runtime_root()
     const auto missing = px4::userland::ipc::posix::client_runtime_roots();
     ok = ok && !missing && missing.error() == px4::userland::Error::NOT_FOUND;
     if (missing) std::cerr << "missing LOCALAPPDATA produced a runtime root\n";
-    (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", original.data());
+    (void)::SetEnvironmentVariableW(L"LOCALAPPDATA",
+        had_value ? original.data() : nullptr);
     if (ok) std::cout << "windows_LOCALAPPDATA_default_unsafe_missing=PASS\n";
     return ok;
 }
