@@ -34,6 +34,7 @@
 - L3 の約束は **release ごとの固定** とする。release をまたぐ無期限の安定 ABI を新たに約束しない。
 - L4 から L3 への昇格はユーザー判断とする。WebTS が現在使っている Family 等は L4 にあたる。
 - `include/dtv/userland/detail/` は L4 の印として扱う。
+- 目標構成（ユーザー 6603670549）: Core の共通 library と、同じ共通仕様に適合する各製品 library を持ち、実行 binary はそれらと疎結合にする。入口だけを共通化して library の責務・再利用性が整わない状態や、CLI 側が選局・gate を再実装する状態を完成としない。
 - 契約テストは層ごとに作り、どの層の規範を検査しているかを明記する。
 
 ## 2. 共通の前提
@@ -110,6 +111,7 @@ daemon は筐体ごとに 1 プロセスを基本とする。ctl の `list` は 
 - 全 TS client: `--receiver` の明示が必須。
 - 通常 TS client: `--channel` か `--freq` のどちらか一方が必須。
 - `--freq` 経路では `--system` が必須。`--channel` から system を導出できる場合は省略できる。
+- Torne の通常 native daemon: `--device` を必須とし、最初の筐体を暗黙選択しない。`--fd` を使う場合と metadata（help/version/models）は device を要求しない。models / native device / Windows 限定 EOF / 外部 firmware は採用済み target であり、実装・検証の未完と混同しない（付録 E）。
 - 明示必須を、製品固有の既定値や「接続機器が 1 台なら省略可」で置き換えない。
 
 ### 3.5 短名・重複・排他
@@ -211,6 +213,7 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 - 応答は opcode と request_id が一致する response/error_response のみ受理する。
 - HELLO/LIST/STATUS の後、ACQUIRE→TUNE→START→ATTACH→TS_DATA→STOP→RELEASE の順。
 - epoch は同一 release 内の識別子。LIST と STATUS の epoch を照合する。
+- 制御接続と data 接続を分ける。ATTACH と TS_DATA は data 接続で行い、制御接続は要求/応答だけを運ぶ。
 - 不足 feature は `UNSUPPORTED`。未知 feature bit は運搬し、codec は判定しない。
 
 ### 4.4 payload
@@ -227,16 +230,17 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 ### 4.5 版・互換
 
 - 封筒版は UDTV 1.0。HELLO の min/max で 1.0 を選ぶ。それ以外は `VERSION_MISMATCH`。
-- **未決:** Core の現行文書は「daemon と ctl の UDTV は同一 release 内の内部契約。release をまたぐ安定 wire API ではない」と記す。一方、本 1.0.0 案は denpa の C# 実装のような第三者 client を含む L2 外部契約として wire を位置づける。両者は両立しない。
-  - 推奨: L2 を「同一 major 内は version 交渉で接続可、minor 差は feature で判定」と外部化し、release をまたぐ互換を minor の範囲で約束する。ただし「安定 ABI を約束しない」L3 と混同しない。
-  - 代替: wire を内部のまま維持し、第三者 client には daemon プロセス境界だけを公開する。この場合 denpa の C# 実装はサポート外となる。
-- STATUS の enclosure 観測 field 追加のような layout 変更は、minor ではなく同一 release 前提の非互換変更として扱うか、feature bit で gate するかを決める必要がある（未決）。
+- **L2 は外部契約（採用済み）。** 層モデル採用（Issue23 6603147282 の直前表 6602947137）で、wire の record・opcode と discovery/status JSON は denpa の C# 実装や ctl を含む第三者向け境界とし、version 交渉付きの規範とする。外部化そのものを未決へ戻さない。
+- Core の既存 docs（`control-client.md` / `control-connection.md`）は「同一 release 内の内部契約。release をまたぐ安定 wire API ではない」と記す。これは draft 前の記述であり、本 1.0.0 案の外部境界と整合させる更新対象とする。旧 README/docs の全面改訂を本 PR の追加 gate にしない。
+- **狭い未決:** release をまたぐ具体的な互換範囲。同一 major 内で許す差（layout 変更・feature bit・minor の扱い）と、同一 release 前提を残す範囲を決める。推奨は「minor は feature で gate し、layout 変更は明示 feature または版で区別する。L3 と同様に安定 ABI は約束しない」。
+- layout 変更を feature bit で gate するか、同一 release 前提の非互換変更として扱うかは、上記の狭い未決に含める。
 
 ### 4.6 所有・cancel・close
 
 - ACQUIRE は lease を返す。lease は接続が閉じると daemon が回収する。
 - START は tune revision と attach token を返す。token は data 接続の ATTACH にだけ使う。
-- STOP は terminal result と cleanup owner を返す。`cleanup_owner=true` のときだけ物理 cleanup を実行する。`complete_stream_cleanup_v1()` は metadata のみで、物理 cleanup を代行しない。
+- **wire の STOP 応答は `epoch` / `final` / `quiesced` を返す。** 停止の終結果と静定の有無を外部 client に示す。物理 cleanup の実行責任と所有者の割り当ては daemon 内部（engine/worker）の契約であり、wire の field ではない。`cleanup_owner` や `complete_stream_cleanup_v1()` は内部実装の説明であって、外部 client が読む値ではない。
+- `quiesced=false` は未静定である。final の受信を物理静定と同一視しない。
 - 停止・close は有限期限を持つ。孤立 pending を成功として扱わない。全体 close の秒数は候補値であり、実機認定ではない。
 - error が付いた final は分類に従う。要求停止に結び付かない `owner_closed`/`CANCELLED` は 70。
 - drop は計数するが失敗ではない。
@@ -311,7 +315,7 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 
 - 層モデルを採用し、L3 を埋め込み境界とする。
 - L3 の約束は release ごとに固定する。release をまたぐ安定 ABI を新たに約束しない。
-- L3 の header は MIT を目標とする（ユーザーのライセンス選好: GPL-2.0-or-later 希望、合理的なら MIT も可）。ただし §6.5 の来歴未解決があり、MIT と表示できる状態ではない。
+- 新規 L3 header は MIT を提案する。これはユーザーの選好（GPL-2.0-or-later 希望、合理的なら MIT も可）と新規設計の推奨であり、採用済みのライセンス決定ではない。新規 header 自体の著作者・依存確認は、既存 engine の来歴疑いとは別に扱う。
 - L3 の関数の意味として、少なくとも次を共有する: 入力の単位・範囲の受付判定、identity の文法と case、Error enum の意味、資源所有（FD/buffer/lease）と排他、状態遷移（open→tune→capture→stop→close）、cancel/close の有限期限、drop の非失敗扱い。
 - サポートする埋め込み境界を「Family＋検査付き入口」に限るか、生 `tuner_backend()` まで含めるかは **未決**（設計案の推奨は、既存 Family を L3 と呼ばず、新しい C 面とリンク閉包を分けること）。
 - 具体的な関数名・型・ABI・例外は設計案のまま未決であり、この統合で確定しない。
@@ -365,21 +369,20 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 - L3 を最初に対象とする製品と順序（設計案は PIX DT295 を先発候補とする）。
 - API の symbol、型、enum 採番、構造体 layout、deadline・容量・最大同時数の実測値。
 - buffer 借用期間、cancel 後の遅延 completion、close 期限切れ時の resource 保持/解放の詳細。
+- **B1**: close 期限切れまたは失敗 open の後、遅延 completion を回収してから残留資源を観測・最終解放する手順。
+- **B2**: 同期 USB を待つ worker が塞がっても、cancel と close 期限通知を独立して進める担当関係。
+- B1/B2 は architecture 担当が設計補足中である。ここで関数名・ticket 方式・新しい API を発明せず、到着後に統合する。
 - L3 の契約テストをどの層で回すか。
 - release ごとの互換保証の表現（source 固定の範囲）。
 
 ### 6.5 ライセンス来歴（未決、法的判断ではない）
 
 - Core の `adapters/` の host 系は GPL-2.0-only、`src/` と `include/dtv/userland/` は MIT。
-- ただし MIT 側の `src/receiver_engine.cpp` に、第三者（siketyan）が px4-userland へ出した GPL-2.0-only の PR とほぼ同じ文面が約 15 行ある。本人から MIT で出す許可を得た記録は見当たらない。
-- そのため「Core の MIT 側なら AGPL の利用者と組める」という前提は、この行を処理するまで成り立たない。L3 の header を MIT と表示することも、この確認まで確定しない。
-- 選択肢:
-  1. 本人の許可を得る。
-  2. 約 15 行を独立に書き直し、由来を記録する。
-  3. L3 をユーザーしか書いていない Core MIT 部品と PIX C 層（すでに or-later）だけで構成する。
-  4. PX4/Torne/ASICEN の組み込みはプロセス境界（daemon IPC）に限る。
-- 推奨: 1 または 2 を先に片付け、3 を進め、4 を現実的な既定とする。ライセンス変更を許諾済みとして扱わない。
-- 製品ごとの link closure を release 時に列挙し、未許諾成分のある target を AGPL 向けに案内しない。
+- **新規 header と既存 engine を分ける。** 新規に書く L3 header（型・語彙・受付/完了/取消しの宣言）は、その著作者と依存が確認できれば MIT 提案を独立に進められる。既存 engine の来歴疑いを理由に、engine を含まない header や target まで一律に停止しない。
+- 既存 `src/receiver_engine.cpp` には、第三者（siketyan）が px4-userland へ出した GPL-2.0-only の PR とほぼ同じ文面が約 15 行ある。本人から MIT で出す許可を得た記録は見当たらない。**この engine をリンクする target** については、release ごとの link closure と来歴・許諾を確認する。
+- 約 15 行の独立書換えは候補の一つであり、書き換えれば権利問題が当然に消えると断定しない。本人の許可を得る案、その engine をリンクしない構成にする案、既存の or-later 部分だけで構成する案を並べる。
+- 製品ごとの link closure を release 時に列挙し、未許諾成分のある target を AGPL 向けに案内しない。PX4/Torne/ASICEN の組み込みは、当面プロセス境界（daemon IPC）を現実的な既定とする。
+- ライセンス変更を許諾済みとして扱わない。侵害を確定したとも書かない。法的判断は行わない。
 - 関連する未確認: GPLv3/AGPLv3 本文の該当条項、第三者の同意範囲、firmware の再配布権。
 
 ---
@@ -388,12 +391,12 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 
 | # | 未決 | 選択肢 | 推奨 |
 |---:|---|---|---|
-| 1 | L2 wire を外部契約にするか内部のままにするか | (a) 外部化し version 交渉で minor 互換を約束 (b) 内部維持し daemon 境界だけ公開 | (a)。denpa の C# client を明示的にサポートするなら必要 |
+| 1 | L2 wire の release 間互換の具体範囲 | (a) minor は feature で gate し layout 変更は明示 feature/版で区別 (b) 同一 major 内は layout 固定 | L2 の外部化は採用済み。互換範囲だけを狭く決める。(a) を推奨 |
 | 2 | L3 のサポート境界 | (a) 新しい C 面＋検査付き入口 (b) 既存 Family を薄く包む (c) 生 backend まで | (a)。設計案の推奨。生 backend は L4 内部 |
 | 3 | L3 の I/O モデル | 案 A/B/C（§6.2） | 案 C（非同期 USB 核＋worker 同期橋）。未採用 |
 | 4 | L3 の対応製品と順序 | PIX DT295 先発 / PX4 先発 | PIX DT295（C 層がすでに or-later）を先発候補 |
 | 4b | L3 の API 詳細 | symbol・型・enum 採番・layout・deadline・容量 | 設計案のまま。実測後に release ごとに凍結 |
-| 5 | Core MIT の siketyan 行 | 許可 / 書き直し / L3 を user-only MIT で構成 | 許可または書き直しを先に。並行して user-only 構成 |
+| 5 | engine をリンクする target の来歴確認 | 許可 / 書き直し / engine をリンクしない | 新規 header は独立に確認する。疑義 engine をリンクする target だけ条件とする。約15行の書換えは候補で、権利問題が自動で消えるとはしない |
 | 6 | `--models`/`--list-json` の metadata 優先 | help/version と同じ単独特権 / 通常解析 | 単独要求として同じ優先を与える |
 | 7 | `--verbose`/`-v` の共通必須化 | 全製品必須 / 既存のみ | 全製品必須にしない。既存を維持し、必要なら別決定 |
 | 8 | `--pid`/`-p` の共通化 | 全製品 / 必要製品のみ | 必要製品のみ。PID filter は capability |
@@ -402,9 +405,10 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 | 11 | `--packet-count` の共通提供 | 全製品 / 実装可能な製品のみ | 全製品で無理なく実装できる場合だけ提供 |
 | 12 | 全体 close の期限 | 10 秒案 / 15 秒（Siano 既存） | 有限期限を採用済み。秒数は実機で決定 |
 | 13 | runtime 省略時の共通解決 | 別 PR 設計 | 明示 `--runtime-dir` を先に確定し、既定解決は別設計 |
-| 14 | Torne の `--models`/`--device`/EOF | 先方担当 PR / 本書で確定 | 先方担当の設計に委ね、本書は共通規則だけ持つ |
+| 14 | （採用済み）Torne の models/native device/Windows EOF/外部 firmware | — | 既決 target。実装・検証の未完とは分ける。詳細は付録 E |
 | 15 | JSON `userland.status` の schema 名の文書化 | Core docs に明記 / 実装のみ | Core docs に明記する（現状 docs に literal がない） |
 | 16 | exit の Error→code 細部 | 採用済み分類 / 個別表 | 分類は採用済み。細部は実装と照合して別途確定 |
+| 17 | B1/B2 の設計補足 | architecture 到着待ち | 関数名・ticket 方式を発明せず、到着後に統合する |
 
 ---
 
