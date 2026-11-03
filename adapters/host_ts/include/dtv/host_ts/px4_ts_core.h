@@ -53,6 +53,8 @@ struct Px4TsArguments final {
     bool product_cli = false;
     bool common_profile = false;
     bool receiver_explicit = false;
+    bool tuning_explicit = false;
+    bool time_explicit = false;
     bool group = false;
     std::string device;
     std::string instance;
@@ -81,7 +83,8 @@ struct TsClientProfile final {
     const char* product_slug = nullptr;
     dtv::userland::identity::Product product = dtv::userland::identity::Product::px4;
     bool serial_selector_supported = false;
-    bool preserve_instance_case = false;
+    // Retained for source compatibility; the shared CLI always preserves case.
+    bool preserve_instance_case = true;
     // Product-specific validation after common serial checks; PX4 requires it, PIX uses common checks.
     bool (*matches_serial_identity)(
         const dtv::userland::wire::ListResponse&,
@@ -94,6 +97,10 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
 Px4TsArguments parse_px4_ts_product_arguments(int argc,
                                               const char* const* argv) noexcept;
 Px4TsArguments parse_px4_ts_product_arguments(
+    int argc, const char* const* argv, const TsClientProfile& profile) noexcept;
+// Parses the shared TS options for a control adapter. Initial tuning may be
+// omitted when --time or --packet-count is explicit; run_wire still requires tuning.
+Px4TsArguments parse_px4_ts_control_arguments(
     int argc, const char* const* argv, const TsClientProfile& profile) noexcept;
 void print_px4_ts_usage(void* output) noexcept;
 void print_px4_ts_usage(const TsClientProfile& profile, void* output) noexcept;

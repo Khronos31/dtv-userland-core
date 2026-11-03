@@ -877,6 +877,23 @@ struct TestOutput final : px4::userland::cli::Px4TsOutput {
     }
 };
 
+bool test_untuned_control_arguments_are_not_recordable()
+{
+    px4::userland::cli::TsClientProfile profile{};
+    profile.tool_name = "siano-ts";
+    profile.product_slug = "siano-userland";
+    const char* arguments[] = {"siano-ts", "--instance", "RoomA", "--receiver", "0"};
+    const auto parsed = px4::userland::cli::parse_px4_ts_control_arguments(
+        5, arguments, profile);
+    if (!parsed.valid || parsed.tuning_explicit) return false;
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    const auto result = px4::userland::cli::Px4TsRunner::run_wire(
+        parsed, profile, output, clock, signal);
+    return !result && result.error() == Error::INVALID_ARGUMENT && output.bytes.empty();
+}
+
 bool add_root(const std::string& value,
               px4::userland::ipc::posix::RuntimeRootCandidates& roots)
 {
@@ -884,6 +901,20 @@ bool add_root(const std::string& value,
         return false;
     std::memcpy(roots.paths[roots.count].data(), value.c_str(), value.size() + 1U);
     ++roots.count;
+    return true;
+}
+
+bool lowercase_instance(std::string_view input,
+                        dtv::userland::identity::InstanceText& output) noexcept
+{
+    const auto value = dtv::userland::identity::canonicalize_instance(input);
+    if (!value) return false;
+    output = value.value();
+    for (std::size_t index = 0U; index < output.length; ++index) {
+        char& character = output.bytes[index];
+        if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+    }
     return true;
 }
 
@@ -1379,15 +1410,15 @@ bool test_host_ctl_real_server()
     if (!make_directory(tree.root)) return false;
     tree.directories.push_back(tree.root);
 #endif
-    if (!tree.create_instance("ctl-live")) return false;
+    if (!tree.create_instance("CtlLive")) return false;
 #if !defined(_WIN32)
     EnvironmentValue saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
     if (!saved_xdg.set(empty_root.root.c_str()) || !saved_tmp.set(parent_root.c_str()))
         return false;
 #endif
     Listener control;
-    if (!control.bind(tree.root, "ctl-live", "control.sock")) return false;
-    FakeService service("ctl-live");
+    if (!control.bind(tree.root, "CtlLive", "control.sock")) return false;
+    FakeService service("CtlLive");
     service.list.functions.count = 2U;
     service.list.functions.items[0U].id = 1U;
     service.list.functions.items[1U] = service.list.functions.items[0U];
@@ -1414,10 +1445,12 @@ bool test_host_ctl_real_server()
     profile.product_slug = "test-product";
     profile.product_version = "1.0.0-test";
     profile.product = dtv::userland::identity::Product::px4;
+    dtv::userland::host_ctl::Profile case_profile = profile;
+    case_profile.normalize_instance = lowercase_instance;
     const char* list_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
-                               "--instance", "ctl-live", "list"};
+                               "--instance", "CtlLive", "list"};
     const char* status_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
-                                 "--instance", "ctl-live", "status"};
+                                 "--instance", "CtlLive", "status"};
     FILE* list_output = std::tmpfile();
     if (list_output == nullptr || std::fflush(stdout) != 0) return false;
 #if defined(_WIN32)
@@ -1443,7 +1476,7 @@ bool test_host_ctl_real_server()
         return false;
     }
     const int list_status = dtv::userland::host_ctl::run_control_cli(
-        6, list_args, profile);
+        6, list_args, case_profile);
     const bool flushed = std::fflush(stdout) == 0;
 #if defined(_WIN32)
     const bool restored = ::_dup2(saved_stdout, stdout_fd) == 0;
@@ -1459,12 +1492,12 @@ bool test_host_ctl_real_server()
     std::fclose(list_output);
     const std::string list_text(listed.data(), listed_size);
     const int status_status = dtv::userland::host_ctl::run_control_cli(
-        6, status_args, profile);
+        6, status_args, case_profile);
 #if !defined(_WIN32)
     const char* missing_explicit_args[] = {"fake-ctl", "--runtime-dir",
         empty_root.root.c_str(), "--instance", "ctl-live", "list"};
-    const char* default_list_args[] = {"fake-ctl", "--instance", "ctl-live", "list"};
-    const char* default_status_args[] = {"fake-ctl", "--instance", "ctl-live", "status"};
+    const char* default_list_args[] = {"fake-ctl", "--instance", "CtlLive", "list"};
+    const char* default_status_args[] = {"fake-ctl", "--instance", "CtlLive", "status"};
     const int missing_explicit_status =
         dtv::userland::host_ctl::run_control_cli(6, missing_explicit_args, profile);
     const int default_list_status =
@@ -2097,6 +2130,7 @@ int main()
     const bool ts_missing_endpoint = true;
 #endif
     const bool output_timeouts = test_host_ts_output_timeouts();
+    const bool untuned_control = test_untuned_control_arguments_are_not_recordable();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
 #else
@@ -2139,6 +2173,8 @@ int main()
         std::puts("explicit_instance_ts_missing_endpoint_diagnostic=PASS");
     if (output_timeouts)
         std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
+    if (untuned_control)
+        std::puts("host_ts_control_parse_cannot_start_untuned_recording=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
     if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
@@ -2152,6 +2188,6 @@ int main()
            ts && eof && ts_receiver_ambiguity && ts_tune_rejection &&
            ts_stream_endpoint &&
            ts_missing_endpoint &&
-           output_timeouts && overlong &&
+           output_timeouts && untuned_control && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }

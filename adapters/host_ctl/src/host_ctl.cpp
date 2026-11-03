@@ -9,6 +9,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstring>
 #include <memory>
 #include <string>
@@ -200,10 +201,31 @@ Arguments parse(int argc, const char* const* argv) noexcept
     return value;
 }
 
-bool normalized_instance(std::string_view input, identity::InstanceText& output,
-                         const Profile& profile) noexcept
+enum class MetadataRequest : std::uint8_t { none, help, version };
+
+MetadataRequest find_metadata_request(int argc, const char* const* argv) noexcept
 {
-    if (profile.normalize_instance != nullptr) return profile.normalize_instance(input, output);
+    if (argc < 0 || argv == nullptr) return MetadataRequest::none;
+    MetadataRequest request = MetadataRequest::none;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) continue;
+        const std::string_view token(argv[index]);
+        if (token == "-h" || token == "--help") request = MetadataRequest::help;
+        else if (token == "--version" && request == MetadataRequest::none)
+            request = MetadataRequest::version;
+        if ((token == "--instance" || token == "--runtime-dir" ||
+             token == "--device" || token == "-d" || token == "card-apdu") &&
+            index + 1 < argc && argv[index + 1] != nullptr &&
+            std::strcmp(argv[index + 1], "-h") != 0 &&
+            std::strcmp(argv[index + 1], "--help") != 0 &&
+            std::strcmp(argv[index + 1], "--version") != 0)
+            ++index;
+    }
+    return request;
+}
+
+bool normalized_instance(std::string_view input, identity::InstanceText& output) noexcept
+{
     const auto result = identity::canonicalize_instance(input);
     if (!result) return false;
     output = result.value();
@@ -383,9 +405,13 @@ static int run_control_cli_impl(
     int argc, const char* const* argv, const Profile& profile,
     const px4::userland::ipc::posix::RuntimeRootCandidates* roots_override) noexcept
 {
-    if (argc == 2 && argv != nullptr && argv[1] != nullptr &&
-        std::strcmp(argv[1], "--version") == 0) {
+    const MetadataRequest metadata = find_metadata_request(argc, argv);
+    if (metadata == MetadataRequest::version) {
         std::printf("%s %s\n", profile.product_slug, profile.product_version);
+        return 0;
+    }
+    if (metadata == MetadataRequest::help) {
+        usage(stdout, profile);
         return 0;
     }
     const Arguments arguments = parse(argc, argv);
@@ -447,7 +473,7 @@ static int run_control_cli_impl(
     }
     std::string instance = arguments.instance;
     identity::InstanceText normalized{};
-    if (!instance.empty() && !normalized_instance(instance, normalized, profile)) {
+    if (!instance.empty() && !normalized_instance(instance, normalized)) {
         std::fprintf(stderr, "%s: --instance is required and must be valid\n",
                      profile.tool_name);
         return 2;
