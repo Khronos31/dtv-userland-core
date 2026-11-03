@@ -32,6 +32,29 @@ typedef enum dtv_l3_op_state {
     DTV_L3_OP_FAILED = 3
 } dtv_l3_op_state;
 
+typedef enum dtv_l3_transfer_kind {
+    DTV_L3_TRANSFER_BULK = 1,
+    DTV_L3_TRANSFER_CONTROL = 2
+} dtv_l3_transfer_kind;
+
+typedef enum dtv_l3_claim_residual_state {
+    DTV_L3_CLAIM_NONE = 0,
+    DTV_L3_CLAIM_RETAINED = 1,
+    DTV_L3_CLAIM_UNKNOWN = 2
+} dtv_l3_claim_residual_state;
+
+typedef enum dtv_l3_release_quiescence {
+    DTV_L3_RELEASE_QUIESCENCE_UNKNOWN = 0,
+    DTV_L3_RELEASE_QUIESCED = 1
+} dtv_l3_release_quiescence;
+
+typedef enum dtv_l3_restore_result {
+    DTV_L3_RESTORE_NOT_ATTEMPTED = 0,
+    DTV_L3_RESTORE_SUCCEEDED = 1,
+    DTV_L3_RESTORE_FAILED = 2,
+    DTV_L3_RESTORE_UNKNOWN = 3
+} dtv_l3_restore_result;
+
 typedef enum dtv_l3_open_state {
     DTV_L3_OPEN_OPENING = 0,
     DTV_L3_OPEN_READY = 1,
@@ -47,6 +70,13 @@ typedef struct dtv_l3_transfer_request {
     const uint8_t *out_data;
     size_t out_size;
     size_t in_capacity;
+    uint32_t claim_index;
+    struct {
+        uint8_t request_type;
+        uint8_t request;
+        uint16_t value;
+        uint16_t index;
+    } control;
 } dtv_l3_transfer_request;
 
 typedef struct dtv_l3_transfer_completion {
@@ -83,12 +113,26 @@ typedef dtv_l3_result (*dtv_l3_transfer_cancel_fn)(
 
 /* Cancellation acceptance is not terminal; a raced normal completion is valid. */
 
-typedef dtv_l3_result (*dtv_l3_claim_fn)(
+typedef struct dtv_l3_claim_result {
+    dtv_l3_result result;
+    dtv_l3_claim_residual_state residual_state;
+} dtv_l3_claim_result;
+
+/* Quiescence, ownership, restoration, and the reported error are independent. */
+typedef struct dtv_l3_release_result {
+    dtv_l3_release_quiescence quiescence;
+    dtv_l3_claim_residual_state residual_state;
+    dtv_l3_restore_result restoration;
+    dtv_l3_result error;
+} dtv_l3_release_result;
+
+/* OK+RETAINED is transfer-ready; FAILED residuals still belong to the owner. */
+typedef dtv_l3_claim_result (*dtv_l3_claim_fn)(
     void *provider_context,
     dtv_l3_provider_binding *binding,
     uint32_t claim_index);
 
-typedef void (*dtv_l3_release_claim_fn)(
+typedef dtv_l3_release_result (*dtv_l3_release_claim_fn)(
     void *provider_context,
     dtv_l3_provider_binding *binding,
     uint32_t claim_index);
@@ -109,7 +153,11 @@ typedef struct dtv_l3_open_result {
 typedef struct dtv_l3_open_status {
     dtv_l3_open_state state;
     uint32_t claims_acquired;
-    uint32_t reserved;
+    uint32_t claims_attempted;
+    uint32_t cleanup_claims_remaining;
+    dtv_l3_result last_cleanup_error;
+    uint8_t restoration_failed;
+    uint8_t reserved[3];
 } dtv_l3_open_status;
 
 typedef struct dtv_l3_close_status {
