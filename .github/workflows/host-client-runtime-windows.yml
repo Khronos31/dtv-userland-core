@@ -51,6 +51,14 @@ jobs:
           ctest --test-dir build -C Release -R '^(windows_stdin_monitor_tests|host_runtime_tests|host_runtime_discovery_windows_tests|host_ctl_tests|host_ts_tests|host_client_integration_tests|windows_winscard_sdk_import_tests)$' --verbose 2>&1 |
             Tee-Object -FilePath host-client-runtime-tests.log
           if ($LASTEXITCODE -ne 0) { throw "client/runtime test exit=$LASTEXITCODE" }
+      - name: Summarize default LOCALAPPDATA diagnostic
+        if: always()
+        shell: pwsh
+        run: |
+          if (Test-Path host-client-runtime-tests.log) {
+            Select-String -Path host-client-runtime-tests.log -Pattern 'Windows default LOCALAPPDATA diagnostic|DACL ACE|Windows default LOCALAPPDATA use' |
+              ForEach-Object { Add-Content -Path $env:GITHUB_STEP_SUMMARY -Value $_.Line }
+          }
       - name: Install
         run: cmake --install build --config Release --prefix '${{ runner.temp }}\dtv-client-runtime-install'
       - name: Configure installed consumer
