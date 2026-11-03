@@ -4,9 +4,7 @@
 #include "detail/listener_io.h"
 #include "dtv/userland/host_daemon/card_service.h"
 #include "dtv/userland/host_daemon/host_authority_bridge.h"
-#if !defined(_WIN32)
 #include "dtv/userland/host_runtime/posix_ipc.h"
-#endif
 
 #include <algorithm>
 #include <array>

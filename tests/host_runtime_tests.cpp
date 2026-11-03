@@ -730,14 +730,20 @@ bool unsafe_ancestor_runtime_candidate_test()
     const std::string shared = base + "/shared";
     const std::string branch = shared + "/a";
     const std::string parent = branch + "/t";
-    const std::string root = parent + "/dtv-userland-" +
+    const std::string root_path = parent + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
+    const std::string product_path = root_path + "/fake-native";
+    const std::string version_path = product_path + "/v1";
+    const std::string instance_path = version_path + "/x";
+    bool ok = make_directory(shared) && ::chmod(shared.c_str(), 0777) == 0 &&
+        make_directory(branch) && make_directory(parent) && make_directory(root_path) &&
+        make_directory(product_path) && make_directory(version_path) &&
+        make_directory(instance_path);
+    const std::string root = canonical_path(root_path);
     const std::string product = root + "/fake-native";
     const std::string version = product + "/v1";
     const std::string instance = version + "/x";
-    bool ok = make_directory(shared) && ::chmod(shared.c_str(), 0777) == 0 &&
-        make_directory(branch) && make_directory(parent) && make_directory(root) &&
-        make_directory(product) && make_directory(version) && make_directory(instance);
+    ok = ok && !root.empty();
     EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
     EnvironmentValue saved_tmp("TMPDIR");
     const std::string missing = base + "/missing";

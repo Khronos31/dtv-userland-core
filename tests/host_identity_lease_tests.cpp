@@ -51,6 +51,15 @@ bool make_root(std::string& output) noexcept
     return true;
 }
 
+std::string canonical_path(const std::string& path)
+{
+    char* value = ::realpath(path.c_str(), nullptr);
+    if (value == nullptr) return {};
+    const std::string result(value);
+    std::free(value);
+    return result;
+}
+
 class RootGuard final {
 public:
     explicit RootGuard(std::string path) noexcept : path_(std::move(path)) {}
@@ -153,6 +162,10 @@ bool test_runtime_and_lease_root_separation()
     RootGuard guard(base);
     const std::string xdg = base + "/" + std::string(30U, 'x');
     CHECK(::mkdir(xdg.c_str(), 0700) == 0);
+    char* canonical_xdg_value = ::realpath(xdg.c_str(), nullptr);
+    CHECK(canonical_xdg_value != nullptr);
+    const std::string canonical_xdg(canonical_xdg_value);
+    std::free(canonical_xdg_value);
     EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
     EnvironmentValue saved_tmp("TMPDIR");
     CHECK(saved_xdg.set(xdg.c_str()) && saved_tmp.set(base.c_str()));
@@ -167,12 +180,12 @@ bool test_runtime_and_lease_root_separation()
             "asicen-userland", "abcdefghijklmnopqrst");
     const auto long_lease_root =
         px4::userland::ipc::posix::select_lease_runtime_root();
-    const std::string temporary_root = base + "/dtv-userland-" +
+    const std::string temporary_root = canonical_path(base) + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
-    CHECK(short_endpoint && short_endpoint.value() == xdg);
-    CHECK(short_lease_root && short_lease_root.value() == xdg);
+    CHECK(short_endpoint && short_endpoint.value() == canonical_xdg);
+    CHECK(short_lease_root && short_lease_root.value() == canonical_xdg);
     CHECK(long_endpoint && long_endpoint.value() == temporary_root);
-    CHECK(long_lease_root && long_lease_root.value() == xdg);
+    CHECK(long_lease_root && long_lease_root.value() == canonical_xdg);
 
     auto first = acquire(short_lease_root.value(), "same-device");
     CHECK(first);
