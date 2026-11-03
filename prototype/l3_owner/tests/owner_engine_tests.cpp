@@ -195,6 +195,22 @@ dtv_l3_transfer_request request_for(const std::vector<std::uint8_t> &payload) {
     return dtv_l3_transfer_request{1, 0x81, 1000, payload.data(), payload.size(), 64};
 }
 
+bool wait_for_physical_quiescence(OwnerEngine &owner) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    OwnerEngine::Snapshot snapshot{};
+    do {
+        if (owner.close_status(&snapshot) != DTV_L3_OK) {
+            return false;
+        }
+        if (snapshot.physical_quiesced && snapshot.cleanup_complete) {
+            return true;
+        }
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
 void test_failed_open_and_partial_claim_cleanup() {
     ProviderMock provider;
     provider.claim_results[1] = DTV_L3_FAILED;
@@ -397,7 +413,7 @@ void test_r1_completion_does_not_drain_blocked_cancel_or_submit() {
         CHECK(close_future.get() == DTV_L3_TIMEOUT);
         canceller.join();
         CHECK(cancel_result == DTV_L3_ACCEPTED);
-        CHECK(owner.close(2000) == DTV_L3_OK);
+        CHECK(wait_for_physical_quiescence(owner));
         CHECK(provider.released_claim_count() == 1);
         CHECK(owner.cleanup_count() == 1);
     }
@@ -433,7 +449,7 @@ void test_r1_completion_does_not_drain_blocked_cancel_or_submit() {
         submitter.join();
         CHECK(start_result == DTV_L3_ACCEPTED);
         CHECK(operation->state == DTV_L3_OP_DONE);
-        CHECK(owner.close(2000) == DTV_L3_OK);
+        CHECK(wait_for_physical_quiescence(owner));
         CHECK(provider.released_claim_count() == 1);
         CHECK(owner.cleanup_count() == 1);
     }
@@ -471,7 +487,7 @@ void test_r2_close_deadline_and_status_outlive_blocking_provider_calls() {
         cancel_barrier->release();
         CHECK(close_future.get() == DTV_L3_TIMEOUT);
         CHECK(provider.fire(binding.get(), operation->id, DTV_L3_OK));
-        CHECK(owner.close(2000) == DTV_L3_OK);
+        CHECK(wait_for_physical_quiescence(owner));
         CHECK(provider.released_claim_count() == 1);
     }
 
@@ -502,7 +518,7 @@ void test_r2_close_deadline_and_status_outlive_blocking_provider_calls() {
         CHECK(!status.second.cleanup_complete);
         cleanup_barrier->release();
         CHECK(close_future.get() == DTV_L3_TIMEOUT);
-        CHECK(owner.close(2000) == DTV_L3_OK);
+        CHECK(wait_for_physical_quiescence(owner));
         CHECK(owner.cleanup_count() == 1);
     }
 }
