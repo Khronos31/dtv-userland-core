@@ -79,7 +79,7 @@
 - Capabilities（機能情報）は、`controls` ビットフィールドの直下に存在フラグタグを**伴わずに** LNA/LNB データを直接配置する。したがって、最小構成の capabilities は 4 バイトのゼロ値となる。
 - 発行される lease、stream、card handle、generation の各 ID は必ず 0 以外（nonzero）とする。ストリームスコープの対象 ID も同様に 0 以外とする。存在する `Error` 構造体は必ず 0 以外のコードを持つ。
 - `overflow=true` の場合は必ず `value == UINT64_MAX` とする。飽和したカウンタ値が周回（ラップアラウンド）することはない。
-- `quiesced=false`（ハードウェア未静定）を伴う STOP 完了通知は、必ず `final.error` を保持しなければならない。
+- `quiesced=false`（ハードウェア停止処理未完了）を伴う STOP 完了通知は、必ず `final.error` を保持しなければならない。
 - TRANSMIT コマンドのデータ長は 1〜4096 バイトとする。
 - ISDB-T では TSID または slot を選択できない（`selection` は常に `automatic` とする）。
 - `UsbFunction.model` が存在しない場合は、`none` 以外の識別理由（identification reason）を要求する。既知のコールドモデルは `cold_model` を保持してよい。
