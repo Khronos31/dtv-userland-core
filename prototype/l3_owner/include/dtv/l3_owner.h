@@ -1,0 +1,117 @@
+/* SPDX-License-Identifier: GPL-2.0-or-later */
+#ifndef DTV_L3_OWNER_H
+#define DTV_L3_OWNER_H
+
+#include <stddef.h>
+#include <stdint.h>
+
+#ifdef __cplusplus
+extern "C" {
+#endif
+
+typedef struct dtv_l3_context dtv_l3_context;
+typedef struct dtv_l3_op dtv_l3_op;
+typedef struct dtv_l3_provider_binding dtv_l3_provider_binding;
+
+typedef enum dtv_l3_result {
+    DTV_L3_OK = 0,
+    DTV_L3_ACCEPTED = 1,
+    DTV_L3_BUSY = 2,
+    DTV_L3_TIMEOUT = 3,
+    DTV_L3_CANCELLED = 4,
+    DTV_L3_UNSUPPORTED = 5,
+    DTV_L3_INVALID = 6,
+    DTV_L3_FAILED = 7
+} dtv_l3_result;
+
+typedef enum dtv_l3_op_state {
+    DTV_L3_OP_OPENING = 0,
+    DTV_L3_OP_RUNNING = 1,
+    DTV_L3_OP_DONE = 2,
+    DTV_L3_OP_FAILED = 3
+} dtv_l3_op_state;
+
+typedef struct dtv_l3_transfer_request {
+    uint32_t kind;
+    uint32_t endpoint;
+    uint32_t timeout_ms;
+    const uint8_t *out_data;
+    size_t out_size;
+    size_t in_capacity;
+} dtv_l3_transfer_request;
+
+typedef struct dtv_l3_transfer_completion {
+    dtv_l3_result result;
+    const uint8_t *data;
+    size_t size;
+} dtv_l3_transfer_completion;
+
+/* Provider operations identify a transfer with the same binding and local ID. */
+typedef void (*dtv_l3_transfer_complete_fn)(
+    dtv_l3_provider_binding *binding,
+    uint64_t transfer_id,
+    const dtv_l3_transfer_completion *completion,
+    void *callback_context);
+
+typedef dtv_l3_result (*dtv_l3_transfer_submit_fn)(
+    void *provider_context,
+    dtv_l3_provider_binding *binding,
+    uint64_t transfer_id,
+    const dtv_l3_transfer_request *request,
+    dtv_l3_transfer_complete_fn complete,
+    void *callback_context);
+
+typedef dtv_l3_result (*dtv_l3_transfer_cancel_fn)(
+    void *provider_context,
+    dtv_l3_provider_binding *binding,
+    uint64_t transfer_id);
+
+typedef struct dtv_l3_provider {
+    void *provider_context;
+    dtv_l3_transfer_submit_fn submit;
+    dtv_l3_transfer_cancel_fn cancel;
+} dtv_l3_provider;
+
+typedef struct dtv_l3_open_result {
+    dtv_l3_result result;
+    dtv_l3_context *owner;
+} dtv_l3_open_result;
+
+typedef struct dtv_l3_close_status {
+    dtv_l3_result result;
+    uint8_t physical_quiesced;
+    uint8_t all_ops_recovered;
+    uint8_t cleanup_complete;
+    uint8_t reserved;
+} dtv_l3_close_status;
+
+/* ACCEPTED transfers an owner even when later initialization fails. */
+dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider);
+
+/* A timeout is an observation; it does not release owner or transfer storage. */
+dtv_l3_result dtv_l3_close(dtv_l3_context *owner, uint32_t timeout_ms);
+dtv_l3_result dtv_l3_close_status_get(
+    dtv_l3_context *owner,
+    dtv_l3_close_status *status);
+
+/*
+ * The host stops issuing calls and drains calls already being issued before
+ * final release. Release is not concurrent with another call on this owner.
+ * BUSY preserves owner; success retires it once. Use of the pointer afterward
+ * is outside this contract.
+ */
+dtv_l3_result dtv_l3_context_release(dtv_l3_context *owner);
+
+dtv_l3_result dtv_l3_transfer_start(
+    dtv_l3_context *owner,
+    const dtv_l3_transfer_request *request,
+    dtv_l3_op **op);
+dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op);
+dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_state *state);
+dtv_l3_result dtv_l3_op_release(dtv_l3_op *op);
+
+#ifdef __cplusplus
+}
+#endif
+
+#endif
