@@ -1,11 +1,13 @@
 // SPDX-License-Identifier: GPL-2.0-only
 #include "dtv/userland/host_listener_context/identity_lease.h"
+#include "dtv/userland/host_runtime/posix_ipc.h"
 #include "detail/directory_security.h"
 
 #include <array>
 #include <cerrno>
 #include <cstdio>
 #include <cstring>
+#include <cstdlib>
 #include <filesystem>
 #include <fcntl.h>
 #include <string>
@@ -47,6 +49,15 @@ bool make_root(std::string& output) noexcept
     if (created == nullptr) return false;
     output = created;
     return true;
+}
+
+std::string canonical_path(const std::string& path)
+{
+    char* value = ::realpath(path.c_str(), nullptr);
+    if (value == nullptr) return {};
+    const std::string result(value);
+    std::free(value);
+    return result;
 }
 
 class RootGuard final {
@@ -91,6 +102,27 @@ bool file_exists(const std::string& path) noexcept
     return ::stat(path.c_str(), &status) == 0;
 }
 
+class EnvironmentValue final {
+public:
+    explicit EnvironmentValue(const char* name) : name_(name)
+    {
+        const char* value = std::getenv(name);
+        had_value_ = value != nullptr;
+        if (had_value_) value_ = value;
+    }
+    ~EnvironmentValue()
+    {
+        if (had_value_) (void)::setenv(name_.c_str(), value_.c_str(), 1);
+        else (void)::unsetenv(name_.c_str());
+    }
+    bool set(const char* value) const { return ::setenv(name_.c_str(), value, 1) == 0; }
+
+private:
+    std::string name_;
+    std::string value_;
+    bool had_value_ = false;
+};
+
 bool test_busy_and_independence()
 {
     std::string root;
@@ -120,6 +152,48 @@ bool test_busy_and_independence()
     CHECK(!file_exists(lock_path(root, "identity-a")));
     auto reacquired = acquire(root, "identity-a");
     CHECK(reacquired);
+    return true;
+}
+
+bool test_runtime_and_lease_root_separation()
+{
+    std::string base;
+    CHECK(make_root(base));
+    RootGuard guard(base);
+    const std::string xdg = base + "/" + std::string(30U, 'x');
+    CHECK(::mkdir(xdg.c_str(), 0700) == 0);
+    char* canonical_xdg_value = ::realpath(xdg.c_str(), nullptr);
+    CHECK(canonical_xdg_value != nullptr);
+    const std::string canonical_xdg(canonical_xdg_value);
+    std::free(canonical_xdg_value);
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
+    EnvironmentValue saved_tmp("TMPDIR");
+    CHECK(saved_xdg.set(xdg.c_str()) && saved_tmp.set(base.c_str()));
+
+    const auto short_endpoint =
+        px4::userland::ipc::posix::select_publish_runtime_root(
+            "asicen-userland", "a");
+    const auto short_lease_root =
+        px4::userland::ipc::posix::select_lease_runtime_root();
+    const auto long_endpoint =
+        px4::userland::ipc::posix::select_publish_runtime_root(
+            "asicen-userland", "abcdefghijklmnopqrst");
+    const auto long_lease_root =
+        px4::userland::ipc::posix::select_lease_runtime_root();
+    const std::string temporary_root = canonical_path(base) + "/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
+    CHECK(short_endpoint && short_endpoint.value() == canonical_xdg);
+    CHECK(short_lease_root && short_lease_root.value() == canonical_xdg);
+    CHECK(long_endpoint && long_endpoint.value() == temporary_root);
+    CHECK(long_lease_root && long_lease_root.value() == canonical_xdg);
+
+    auto first = acquire(short_lease_root.value(), "same-device");
+    CHECK(first);
+    auto duplicate = acquire(long_lease_root.value(), "same-device");
+    CHECK(!duplicate && duplicate.error() == Error::BUSY);
+    auto independent = acquire(long_lease_root.value(), "other-device");
+    CHECK(independent);
+    std::printf("lease_root_independent_of_endpoint_instance_length=PASS\n");
     return true;
 }
 
@@ -429,7 +503,8 @@ bool test_cross_process_busy()
 
 int main()
 {
-    if (!test_busy_and_independence() || !test_raii_and_move() ||
+    if (!test_busy_and_independence() || !test_runtime_and_lease_root_separation() ||
+        !test_raii_and_move() ||
         !test_invalid_identity_and_prefix() ||
         !test_runtime_directory_diagnostics() ||
         !test_lock_file_diagnostics() || !test_cross_process_busy() ||

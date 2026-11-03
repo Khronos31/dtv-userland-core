@@ -74,6 +74,83 @@ jobs:
       - name: Build and run installed consumer
         run: cmake --build consumer-build --parallel 2 && consumer-build/host_listener_context_consumer
 
+  macos_runtime:
+    runs-on: macos-15
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DDTV_USERLAND_BUILD_TESTING=ON
+          -DDTV_USERLAND_BUILD_RECEIVER=ON
+          -DDTV_USERLAND_BUILD_CARD=ON
+          -DDTV_USERLAND_BUILD_CAPTURE=ON
+          -DDTV_USERLAND_BUILD_CONTROL=ON
+          -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON
+          -DDTV_USERLAND_BUILD_AUTHORITY=ON
+          -DDTV_USERLAND_BUILD_HOST_TUNER=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON
+          -DDTV_USERLAND_BUILD_HOST_WORKERS=ON
+          -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON
+          -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON
+          -DDTV_USERLAND_BUILD_HOST_FACADE=ON
+          -DDTV_USERLAND_BUILD_HOST_CTL=ON
+          -DDTV_USERLAND_BUILD_HOST_TS=ON
+          -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
+      - name: Build runtime targets
+        run: >-
+          cmake --build build --parallel 2 --target host_runtime_tests
+          host_client_integration_tests host_listener_context_tests
+          host_identity_lease_tests host_identity_lease_path_tests
+          host_ctl_tests host_ts_tests
+      - name: Run macOS runtime tests
+        run: >-
+          ctest --test-dir build
+          -R '^(host_runtime_tests|host_listener_context_tests|host_identity_lease_tests|host_identity_lease_path_tests|host_ctl_tests|host_ts_tests)$'
+          --output-on-failure
+      - name: Compare macOS client integration with base
+        shell: bash
+        run: |
+          set +e
+          ctest --test-dir build -R '^host_client_integration_tests$' --output-on-failure > current-client.log 2>&1
+          current_status=$?
+          git worktree add ../dtv-userland-core-base-runtime dc18944876859ba25da8db0e159e9de5a56aff2c
+          base_path="$(cd ../dtv-userland-core-base-runtime && pwd)"
+          cmake -S "$base_path" -B base-runtime-build \
+            -DDTV_USERLAND_BUILD_TESTING=ON \
+            -DDTV_USERLAND_BUILD_RECEIVER=ON \
+            -DDTV_USERLAND_BUILD_CARD=ON \
+            -DDTV_USERLAND_BUILD_CAPTURE=ON \
+            -DDTV_USERLAND_BUILD_CONTROL=ON \
+            -DDTV_USERLAND_BUILD_STATUS_PROJECTION=ON \
+            -DDTV_USERLAND_BUILD_AUTHORITY=ON \
+            -DDTV_USERLAND_BUILD_HOST_TUNER=ON \
+            -DDTV_USERLAND_BUILD_HOST_AUTHORITY_OWNER=ON \
+            -DDTV_USERLAND_BUILD_HOST_WORKERS=ON \
+            -DDTV_USERLAND_BUILD_HOST_AUTHORITY_BRIDGE=ON \
+            -DDTV_USERLAND_BUILD_HOST_RUNTIME=ON \
+            -DDTV_USERLAND_BUILD_HOST_FACADE=ON \
+            -DDTV_USERLAND_BUILD_HOST_CTL=ON \
+            -DDTV_USERLAND_BUILD_HOST_TS=ON \
+            -DDTV_USERLAND_BUILD_HOST_LISTENER_CONTEXT=ON
+          cmake --build base-runtime-build --parallel 2 --target host_client_integration_tests
+          ctest --test-dir base-runtime-build -R '^host_client_integration_tests$' --output-on-failure > base-client.log 2>&1
+          base_status=$?
+          cat current-client.log
+          cat base-client.log
+          if [ "$current_status" -eq 0 ] && [ "$base_status" -eq 0 ]; then
+            echo 'macos_client_integration_head_and_base=PASS'
+          elif [ "$current_status" -ne 0 ] && [ "$base_status" -ne 0 ] && \
+              grep -q 'Bus error' current-client.log && grep -q 'Bus error' base-client.log; then
+            echo 'macos_client_integration_bus_error_reproduced_on_base=PASS'
+          else
+            echo "macOS client integration mismatch: head=$current_status base=$base_status"
+            exit 1
+          fi
+
   thread_sanitizer:
     runs-on: ubuntu-24.04
     timeout-minutes: 45

@@ -202,21 +202,30 @@ inline bool acl_allows_only_trusted_writers(const ACL* dacl, PSID current) noexc
     return current_user_can_write;
 }
 
+enum class RuntimeParentStatus : std::uint8_t {
+    accepted,
+    invalid_attributes,
+    current_user_sid_unavailable,
+    security_query_failed,
+    owner_mismatch,
+    dacl_rejected
+};
+
 // Verifies a caller-owned runtime parent: a directory (not a reparse point)
 // owned by the current user, with the current user able to write and no
 // untrusted SID able to write/delete children.
-inline bool verify_runtime_parent(const wchar_t* path) noexcept
+inline RuntimeParentStatus runtime_parent_status(const wchar_t* path) noexcept
 {
     const DWORD attributes = ::GetFileAttributesW(path);
     if (attributes == INVALID_FILE_ATTRIBUTES ||
         (attributes & FILE_ATTRIBUTE_DIRECTORY) == 0U ||
         (attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U) {
-        return false;
+        return RuntimeParentStatus::invalid_attributes;
     }
     SidBuffer storage{};
     PSID current = current_user_sid(storage);
     if (current == nullptr) {
-        return false;
+        return RuntimeParentStatus::current_user_sid_unavailable;
     }
     PSID owner = nullptr;
     PACL dacl = nullptr;
@@ -226,12 +235,19 @@ inline bool verify_runtime_parent(const wchar_t* path) noexcept
         OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr,
         &dacl, nullptr, &descriptor);
     if (status != ERROR_SUCCESS) {
-        return false;
+        return RuntimeParentStatus::security_query_failed;
     }
-    const bool ok =
-        sid_equal(owner, current) && acl_allows_only_trusted_writers(dacl, current);
+    const RuntimeParentStatus result = !sid_equal(owner, current)
+        ? RuntimeParentStatus::owner_mismatch
+        : (acl_allows_only_trusted_writers(dacl, current)
+            ? RuntimeParentStatus::accepted : RuntimeParentStatus::dacl_rejected);
     (void)::LocalFree(descriptor);
-    return ok;
+    return result;
+}
+
+inline bool verify_runtime_parent(const wchar_t* path) noexcept
+{
+    return runtime_parent_status(path) == RuntimeParentStatus::accepted;
 }
 
 }  // namespace px4::userland::windows_security

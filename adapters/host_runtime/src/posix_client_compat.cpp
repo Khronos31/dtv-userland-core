@@ -15,6 +15,7 @@
 #include <windows.h>
 #include <array>
 #include <cwchar>
+#include "windows/windows_security.h"
 #else
 #include <dirent.h>
 #include <fcntl.h>
@@ -22,6 +23,9 @@
 #include <sys/types.h>
 #include <sys/un.h>
 #include <unistd.h>
+#if defined(DTV_USERLAND_HOST_RUNTIME_TEST_ACCESS)
+#include "posix_client_compat_test.h"
+#endif
 #endif
 
 namespace px4::userland::ipc::posix {
@@ -56,13 +60,35 @@ bool valid_absolute_path(const char* path) noexcept
     return true;
 }
 
-bool safe_parent_directory(const struct stat& info, uid_t owner) noexcept
+bool trusted_uid(uid_t value, uid_t owner, bool android_policy) noexcept
 {
-    if (!S_ISDIR(info.st_mode) || (info.st_uid != owner && info.st_uid != 0U))
+    return value == owner || value == 0U || (android_policy && value == 1000U);
+}
+
+bool safe_parent_directory(const struct stat& info, uid_t owner,
+                           gid_t effective_group, bool android_policy) noexcept
+{
+    if (!S_ISDIR(info.st_mode) || !trusted_uid(info.st_uid, owner, android_policy)) return false;
+    if (android_policy) {
+        const bool trusted_group_write = (info.st_gid == 1000U) ||
+            (info.st_gid == effective_group && effective_group == owner);
+        if ((info.st_mode & 0020) != 0 && !trusted_group_write) return false;
+    } else if ((info.st_mode & 0020) != 0 &&
+               (info.st_uid != 0U || (info.st_mode & S_ISVTX) == 0)) {
         return false;
-    if ((info.st_mode & 0022) == 0) return true;
-    return info.st_uid == 0U && (info.st_mode & S_ISVTX) != 0 &&
-        (info.st_mode & 0002) != 0;
+    }
+    if ((info.st_mode & 0002) != 0)
+        return info.st_uid == 0U && (info.st_mode & S_ISVTX) != 0;
+    return true;
+}
+
+bool android_policy_enabled() noexcept
+{
+#if defined(__ANDROID__)
+    return true;
+#else
+    return false;
+#endif
 }
 
 bool safe_private_directory(const struct stat& info, uid_t owner) noexcept
@@ -75,7 +101,12 @@ int open_directory_path(const char* path, bool require_private_final,
                         uid_t owner) noexcept
 {
     if (!valid_absolute_path(path)) return -1;
-    int current = ::open("/", O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+#if defined(__ANDROID__)
+    constexpr int directory_access = O_PATH;
+#else
+    constexpr int directory_access = O_RDONLY;
+#endif
+    int current = ::open("/", directory_access | O_DIRECTORY | O_CLOEXEC);
     if (current < 0) return -1;
     const char* cursor = path + 1;
     bool saw_component = false;
@@ -86,7 +117,7 @@ int open_directory_path(const char* path, bool require_private_final,
         while (*cursor != '\0' && *cursor != '/') ++cursor;
         const std::string component(start, static_cast<std::size_t>(cursor - start));
         const int next = ::openat(current, component.c_str(),
-            O_RDONLY | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
+            directory_access | O_DIRECTORY | O_NOFOLLOW | O_CLOEXEC);
         if (next < 0) {
             const int error = errno;
             (void)::close(current);
@@ -94,18 +125,26 @@ int open_directory_path(const char* path, bool require_private_final,
             return -1;
         }
         struct stat info{};
+        struct stat parent_info{};
         const char* after = cursor;
         while (*after == '/') ++after;
-        if (::fstat(next, &info) != 0) {
+        if (::fstat(next, &info) != 0 || ::fstat(current, &parent_info) != 0) {
             const int error = errno;
             (void)::close(next);
             (void)::close(current);
             errno = error;
             return -1;
         }
+        if ((parent_info.st_mode & S_ISVTX) != 0 &&
+            !trusted_uid(info.st_uid, owner, android_policy_enabled())) {
+            (void)::close(next);
+            (void)::close(current);
+            errno = EPERM;
+            return -1;
+        }
         if ((require_private_final && *after == '\0'
                 ? !safe_private_directory(info, owner)
-                : !safe_parent_directory(info, owner))) {
+                : !safe_parent_directory(info, owner, ::getegid(), android_policy_enabled()))) {
             (void)::close(next);
             (void)::close(current);
             errno = EPERM;
@@ -129,6 +168,60 @@ bool validate_private_root(const char* path, uid_t owner) noexcept
     if (root < 0) return false;
     (void)::close(root);
     return true;
+}
+
+bool trusted_symlinks(const char* path, uid_t owner, unsigned int depth = 0U) noexcept
+{
+    if (depth > 8U) return false;
+    std::string prefix;
+    const char* cursor = path;
+    while (*cursor == '/') ++cursor;
+    while (*cursor != '\0') {
+        const char* start = cursor;
+        while (*cursor != '\0' && *cursor != '/') ++cursor;
+        prefix.push_back('/');
+        prefix.append(start, static_cast<std::size_t>(cursor - start));
+        struct stat info{};
+        if (::lstat(prefix.c_str(), &info) != 0) return false;
+        if (S_ISLNK(info.st_mode)) {
+            if (!trusted_uid(info.st_uid, owner, android_policy_enabled())) return false;
+            const std::size_t slash = prefix.rfind('/');
+            const std::string parent = slash == 0U ? "/" : prefix.substr(0U, slash);
+            std::array<char, kStoredPathCapacity> target{};
+            const ssize_t length = ::readlink(prefix.c_str(), target.data(), target.size() - 1U);
+            if (length <= 0 || static_cast<std::size_t>(length) >= target.size() - 1U)
+                return false;
+            target[static_cast<std::size_t>(length)] = '\0';
+            std::string target_path(target.data());
+            if (target_path.empty()) return false;
+            if (target_path[0] != '/') target_path = parent + "/" + target_path;
+            target_path.append(cursor);
+            return trusted_symlinks(target_path.c_str(), owner, depth + 1U);
+        }
+        char* canonical_prefix = ::realpath(prefix.c_str(), nullptr);
+        if (canonical_prefix == nullptr) return false;
+        const int directory_fd = open_directory_path(canonical_prefix, false, owner);
+        std::free(canonical_prefix);
+        if (directory_fd < 0) return false;
+        (void)::close(directory_fd);
+        while (*cursor == '/') ++cursor;
+    }
+    return true;
+}
+
+bool canonical_private_root(const char* path, uid_t owner,
+                            std::array<char, kStoredPathCapacity>& output) noexcept
+{
+    if (!valid_absolute_path(path) || !trusted_symlinks(path, owner)) return false;
+    struct stat final_info{};
+    if (::lstat(path, &final_info) != 0 || S_ISLNK(final_info.st_mode)) return false;
+    char* canonical = ::realpath(path, nullptr);
+    if (canonical == nullptr) return false;
+    const std::size_t length = std::strlen(canonical);
+    const bool fits = length < output.size();
+    if (fits) std::memcpy(output.data(), canonical, length + 1U);
+    std::free(canonical);
+    return fits && validate_private_root(output.data(), owner);
 }
 
 enum class PrivateRootStatus : std::uint8_t { valid, missing, overlong, refused };
@@ -199,6 +292,42 @@ bool is_private_uid_root_candidate(const char* path, uid_t owner) noexcept
 }
 #endif
 
+Result<RuntimeRootCandidates> automatic_runtime_roots() noexcept
+{
+    RuntimeRootCandidates roots{};
+#if defined(_WIN32)
+    std::array<wchar_t, 512U> wide{};
+    const DWORD count = ::GetEnvironmentVariableW(L"LOCALAPPDATA", wide.data(),
+                                                   static_cast<DWORD>(wide.size()));
+    if (count > 0U && count < wide.size() &&
+        px4::userland::windows_security::verify_runtime_parent(wide.data())) {
+        const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
+            wide.data(), -1, nullptr, 0, nullptr, nullptr);
+        if (bytes > 0 && bytes < static_cast<int>(kStoredPathCapacity)) {
+            std::array<char, kStoredPathCapacity> path{};
+            if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), -1,
+                    path.data(), static_cast<int>(path.size()), nullptr, nullptr) == bytes)
+                (void)put_root(roots, path.data());
+        }
+    }
+#else
+    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
+    if (valid_absolute_path(xdg) && std::strlen(xdg) < kStoredPathCapacity)
+        (void)put_root(roots, xdg);
+    const uid_t owner = ::geteuid();
+    const char* temporary = std::getenv("TMPDIR");
+    if (valid_absolute_path(temporary))
+        (void)put_private_candidate(roots, temporary, owner);
+    std::array<char, kStoredPathCapacity> os_temporary{};
+    const int length = std::snprintf(os_temporary.data(), os_temporary.size(),
+        "/tmp/dtv-userland-%lu", static_cast<unsigned long>(owner));
+    if (length > 0 && static_cast<std::size_t>(length) < os_temporary.size())
+        (void)put_root(roots, os_temporary.data());
+#endif
+    if (roots.count == 0U) return Result<RuntimeRootCandidates>::failure(Error::NOT_FOUND);
+    return Result<RuntimeRootCandidates>::success(roots);
+}
+
 bool valid_instance(const char* value) noexcept
 {
     if (value == nullptr || value[0] == '\0' || std::strcmp(value, ".") == 0 ||
@@ -236,38 +365,37 @@ void add_instance(RuntimeInstanceDiscovery& result, const char* name) noexcept
 
 }  // namespace
 
+#if defined(DTV_USERLAND_HOST_RUNTIME_TEST_ACCESS) && !defined(_WIN32)
+bool test_auto_root_parent_policy(std::uint32_t directory_owner,
+                                  std::uint32_t directory_group,
+                                  std::uint32_t mode,
+                                  std::uint32_t effective_user,
+                                  std::uint32_t effective_group,
+                                  bool android_policy) noexcept
+{
+    struct stat info{};
+    info.st_mode = static_cast<mode_t>(S_IFDIR | mode);
+    info.st_uid = static_cast<uid_t>(directory_owner);
+    info.st_gid = static_cast<gid_t>(directory_group);
+    return safe_parent_directory(info, static_cast<uid_t>(effective_user),
+        static_cast<gid_t>(effective_group), android_policy);
+}
+#endif
+
 Result<RuntimeRootCandidates> client_runtime_roots() noexcept
 {
+    const auto raw = automatic_runtime_roots();
+    if (!raw) return Result<RuntimeRootCandidates>::failure(raw.error());
     RuntimeRootCandidates roots{};
+    for (std::size_t index = 0U; index < raw.value().count; ++index) {
 #if defined(_WIN32)
-    std::array<wchar_t, 512U> wide{};
-    const DWORD count = ::GetEnvironmentVariableW(L"LOCALAPPDATA", wide.data(),
-                                                   static_cast<DWORD>(wide.size()));
-    if (count > 0U && count < wide.size()) {
-        const int bytes = ::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS,
-            wide.data(), -1, nullptr, 0, nullptr, nullptr);
-        if (bytes > 0 && bytes < static_cast<int>(kStoredPathCapacity)) {
-            std::array<char, kStoredPathCapacity> path{};
-            if (::WideCharToMultiByte(CP_UTF8, WC_ERR_INVALID_CHARS, wide.data(), -1,
-                    path.data(), static_cast<int>(path.size()), nullptr, nullptr) == bytes)
-                (void)put_root(roots, path.data());
-        }
-    }
-    (void)put_root(roots, "C:\\Windows\\Temp");
+        (void)put_root(roots, raw.value().paths[index].data());
 #else
-    const char* xdg = std::getenv("XDG_RUNTIME_DIR");
-    if (valid_absolute_path(xdg) && std::strlen(xdg) < kStoredPathCapacity)
-        (void)put_root(roots, xdg);
-    const uid_t owner = ::geteuid();
-    const char* temporary = std::getenv("TMPDIR");
-    if (valid_absolute_path(temporary))
-        (void)put_private_candidate(roots, temporary, owner);
-    std::array<char, kStoredPathCapacity> os_temporary{};
-    const int length = std::snprintf(os_temporary.data(), os_temporary.size(),
-        "/tmp/dtv-userland-%lu", static_cast<unsigned long>(owner));
-    if (length > 0 && static_cast<std::size_t>(length) < os_temporary.size())
-        (void)put_root(roots, os_temporary.data());
+        std::array<char, kStoredPathCapacity> canonical{};
+        if (canonical_private_root(raw.value().paths[index].data(), ::geteuid(), canonical))
+            (void)put_root(roots, canonical.data());
 #endif
+    }
     if (roots.count == 0U) return Result<RuntimeRootCandidates>::failure(Error::NOT_FOUND);
     return Result<RuntimeRootCandidates>::success(roots);
 }
@@ -278,7 +406,9 @@ Result<std::string> select_publish_runtime_root(const char* product_slug,
 #if defined(_WIN32)
     (void)product_slug;
     (void)instance;
-    return Result<std::string>::failure(Error::UNSUPPORTED);
+    const auto roots = client_runtime_roots();
+    if (!roots) return Result<std::string>::failure(roots.error());
+    return Result<std::string>::success(roots.value().paths[0].data());
 #else
     if (product_slug == nullptr || instance == nullptr)
         return Result<std::string>::failure(Error::INVALID_ARGUMENT);
@@ -294,14 +424,41 @@ Result<std::string> select_publish_runtime_root(const char* product_slug,
         dtv::userland::host_runtime::endpoint_path(minimum_stream);
     if (!minimum_stream_path)
         return Result<std::string>::failure(minimum_stream_path.error());
-    const auto roots = client_runtime_roots();
+    const auto roots = automatic_runtime_roots();
     if (!roots) return Result<std::string>::failure(roots.error());
     const uid_t owner = ::geteuid();
     bool path_usable = false;
     for (std::size_t index = 0U; index < roots.value().count; ++index) {
         const char* path = roots.value().paths[index].data();
+        std::array<char, kStoredPathCapacity> canonical{};
+        bool ready = canonical_private_root(path, owner, canonical);
+        bool create = false;
+        const char* endpoint_root = ready ? canonical.data() : path;
+        if (!ready && is_private_uid_root_candidate(path, owner) && errno == ENOENT) {
+            const std::string full(path);
+            const std::size_t slash = full.rfind('/');
+            const std::string parent = slash == 0U ? "/" : full.substr(0U, slash);
+            if (trusted_symlinks(parent.c_str(), owner)) {
+                char* canonical_parent = ::realpath(parent.c_str(), nullptr);
+                if (canonical_parent != nullptr) {
+                    const int parent_fd = open_directory_path(canonical_parent, false, owner);
+                    if (parent_fd >= 0) {
+                        const std::string resolved = std::string(canonical_parent) + "/" +
+                            full.substr(slash + 1U);
+                        const bool fits = resolved.size() < canonical.size();
+                        if (fits) {
+                            std::memcpy(canonical.data(), resolved.c_str(), resolved.size() + 1U);
+                            endpoint_root = canonical.data();
+                            create = true;
+                        }
+                        (void)::close(parent_fd);
+                    }
+                    std::free(canonical_parent);
+                }
+            }
+        }
         const dtv::userland::host_runtime::EndpointConfig control{
-            path, product_slug, instance};
+            endpoint_root, product_slug, instance};
         const auto control_path =
             dtv::userland::host_runtime::control_endpoint_path(control);
         auto stream = control;
@@ -309,11 +466,48 @@ Result<std::string> select_publish_runtime_root(const char* product_slug,
         const auto stream_path = dtv::userland::host_runtime::endpoint_path(stream);
         if (!control_path || !stream_path) continue;
         path_usable = true;
-        const bool ready = is_private_uid_root_candidate(path, owner)
-            ? create_private_root(path, owner) : validate_private_root(path, owner);
-        if (ready) return Result<std::string>::success(path);
+        if (create) {
+            ready = create_private_root(canonical.data(), owner) &&
+                canonical_private_root(canonical.data(), owner, canonical);
+        }
+        if (ready) return Result<std::string>::success(canonical.data());
     }
     if (!path_usable) return Result<std::string>::failure(Error::INVALID_ARGUMENT);
+    return Result<std::string>::failure(Error::UNSUPPORTED);
+#endif
+}
+
+Result<std::string> select_lease_runtime_root() noexcept
+{
+#if defined(_WIN32)
+    const auto roots = client_runtime_roots();
+    if (!roots) return Result<std::string>::failure(roots.error());
+    return Result<std::string>::success(roots.value().paths[0].data());
+#else
+    const auto roots = automatic_runtime_roots();
+    if (!roots) return Result<std::string>::failure(roots.error());
+    const uid_t owner = ::geteuid();
+    for (std::size_t index = 0U; index < roots.value().count; ++index) {
+        const char* path = roots.value().paths[index].data();
+        std::array<char, kStoredPathCapacity> canonical{};
+        if (canonical_private_root(path, owner, canonical))
+            return Result<std::string>::success(canonical.data());
+        if (is_private_uid_root_candidate(path, owner) && errno == ENOENT) {
+            const std::string full(path);
+            const std::size_t slash = full.rfind('/');
+            const std::string parent = slash == 0U ? "/" : full.substr(0U, slash);
+            char* canonical_parent = trusted_symlinks(parent.c_str(), owner)
+                ? ::realpath(parent.c_str(), nullptr) : nullptr;
+            if (canonical_parent != nullptr) {
+                const std::string resolved = std::string(canonical_parent) + "/" +
+                    full.substr(slash + 1U);
+                std::free(canonical_parent);
+                if (create_private_root(resolved.c_str(), owner) &&
+                    canonical_private_root(resolved.c_str(), owner, canonical))
+                    return Result<std::string>::success(canonical.data());
+            }
+        }
+    }
     return Result<std::string>::failure(Error::UNSUPPORTED);
 #endif
 }
