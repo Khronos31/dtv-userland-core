@@ -6,14 +6,14 @@
 - 規範材料: ユーザー決定記録、Core の `docs/`、全5製品 CLI 共通契約の §0（確定 target 表）に限る。
 - 規範にしないもの: 現行製品実装、旧 draft の数値、既存利用者の呼び出し方。これらは移行メモと点検にだけ使う。
 - 製品ごとの能力差は各製品 SPEC の付録案として分離する。本書は共通規則だけを持つ。
-- L3（埋め込み）の具体 API は別途 architecture 設計中であり、本書は確定済みの約束と未決だけを記す。関数名・ABI・例外型を発明して確定扱いにしない。
+- L3（埋め込み）は別途の architecture 設計案を §6 に要約して統合した。設計案は未採用であり、関数名・ABI・例外型・数値を確定扱いにしない。
 
 ## 0. 読み方: 6つの観点との対応
 
 | 依頼観点 | 本書の節 |
 |---|---|
 | argv の共通項と製品別追加・除外 | §3 L1、製品 SPEC 付録 |
-| ライブラリとして静的リンクする際の API | §6 L3（設計中） |
+| ライブラリとして静的リンクする際の API | §6 L3（設計案。未採用） |
 | JSON の書式 | §4.8、[json-discovery](json-discovery.md)、[json-status](json-status.md) |
 | wire IPC | §4、[wire-subset](wire-subset.md)、[wire-records](wire-records.md) |
 | runtime / FD の受け渡し | §5、[control-client-runtime](control-client-runtime.md)、[identity](identity.md) |
@@ -303,34 +303,72 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 
 ---
 
-## 6. L3: 埋め込み契約（設計中）
+## 6. L3: 埋め込み契約（設計案。未採用）
 
-**この節は確定 API ではない。** 採用済みの約束と、architecture 設計へ渡す境界だけを記す。
+**この節は確定 API ではない。** 別途の architecture 設計案を公開契約案へ統合した要約であり、関数名・型・数値・ライセンスは未採用。設計案そのものは実装済み API・許諾済みライセンス・受入済み数値を示さない。
 
 ### 6.1 採用済み
 
 - 層モデルを採用し、L3 を埋め込み境界とする。
 - L3 の約束は release ごとに固定する。release をまたぐ安定 ABI を新たに約束しない。
-- L3 の header は MIT を目標とする（ユーザーのライセンス選好: GPL-2.0-or-later 希望、合理的なら MIT も可）。ただし §6.4 の来歴未解決があり、MIT と表示できる状態ではない。
+- L3 の header は MIT を目標とする（ユーザーのライセンス選好: GPL-2.0-or-later 希望、合理的なら MIT も可）。ただし §6.5 の来歴未解決があり、MIT と表示できる状態ではない。
 - L3 の関数の意味として、少なくとも次を共有する: 入力の単位・範囲の受付判定、identity の文法と case、Error enum の意味、資源所有（FD/buffer/lease）と排他、状態遷移（open→tune→capture→stop→close）、cancel/close の有限期限、drop の非失敗扱い。
-- サポートする埋め込み境界を「Family＋検査付き入口」に限るか、生 `tuner_backend()` まで含めるかは **未決**（推奨: 前者。生 backend は L4 内部扱い）。
-- 具体的な関数名・型・ABI・例外は architecture 設計の成果を待つ。本書で発明しない。
+- サポートする埋め込み境界を「Family＋検査付き入口」に限るか、生 `tuner_backend()` まで含めるかは **未決**（設計案の推奨は、既存 Family を L3 と呼ばず、新しい C 面とリンク閉包を分けること）。
+- 具体的な関数名・型・ABI・例外は設計案のまま未決であり、この統合で確定しない。
 
-### 6.2 利用者から出ている要件（入力であり、採用決定ではない）
+### 6.2 設計案の要約（推奨: 共通 C 面＋非同期 USB 核）
+
+設計案は 3 案を比較し、次を推奨している（**採用ではない**）。
+
+- **A**: 既存 `Family`/backend を薄く C で包む。5 製品の I/O・所有・選局順が揃わず、Core host の GPL-only 閉包を引き込む。
+- **B**: 共通 C 面＋同期 USB callback だけ。PIX の `dt295_io` と denpa には近いが、連続 TS とブラウザの取消し・有限停止を共通規則にしにくい。
+- **C（推奨）**: 共通 C 面＋ `submit`/`completion`/`cancel` の USB 核。同期 callback は worker 上の橋で接続する。denpa の USB 所有と WebTS のイベントループ非阻塞を両立し、libusb/WebUSB/WinUSB の所有を host に残す。
+
+責務の分離:
+
+| 構成要素 | 責務 | 持たない責務 |
+|---|---|---|
+| Core L3 契約 header（MIT 提案） | 共通の型、Error、release 照合、受付/完了/取消し、所有・状態、能力照会の語彙 | USB 列挙、daemon、OS socket、カード復号器、製品固有の選局順 |
+| Core の純粋な共通部分（MIT 候補） | channel/Hz 解決、受付判定、lease/revision/stream 世代と結果意味 | 未整理の `detail/receiver_engine` の権利確認前の流用。L4 class の公開 |
+| 製品 L3 adapter | 型変換、能力と実機観測、firmware 検証、cold/warm、電源/選局/lock/settle/取得 gate、TS、CARD/LNB、USB 切断の影響範囲 | 呼出側 UI、OS 権限取得、daemon 管理 |
+| 呼出側 USB provider | 許可済み device token の列挙、descriptor 取得、open/claim/release、control/bulk/interrupt の submit/completion/cancel、単調時計と起床 | 機種の選局・firmware 可否判断。無許可の USB permission 要求を L3 へ隠さない |
+| host executor/同期橋 | 製品処理を worker へ実行し、sync I/O しかない利用者の呼出しを submit/completion へ変換 | UI/main thread の同期 join。無制限の worker 増加 |
+| L1/L2 adapter | 同じ製品 L3 意味を CLI/wire へ写し、runtime dir、argv、認証、FD 受渡しを所有 | L3 と別の選局順・firmware 検証の再実装 |
+
+データの流れ（設計案）: host が許可済み USB token/descriptor を provider へ登録 → `catalog`（静的）または `discover`（登録済み token だけを観測、claim しない）→ 明示候補で `open` → adapter が同じ device を再照合・必要 function を claim し、firmware を検証して初期化 → `acquire` → `tune` が給電 transaction、slot/TSID 前後順、lock/settle、取得 gate を一つの deadline で実行 → `start`/`attach` で TS plane を有効化 → `read` で 188 byte packet を渡す → `stop`/`release`/`close` で完了回収。
+
+API の形（**名称・採番・構造体 layout はすべて未決**）:
+
+- 製品ごとに同じ `dtv_l3_api` を返す factory（例 `px4_l3_get_api_rX`）。複数製品の静的リンクで裸 symbol を競合させず、異 release の header/実装を混ぜたら link または package 照合で失敗させる。
+- `release_id`、`catalog`、`discover`、`submit_open`、`capabilities`、`acquire`、`submit_tune`、`submit_start`、`submit_attach`、`read`、`submit_stop`、`submit_release`、`submit_close`、`poll`、`cancel`、`op_release`、CARD 系、LNB 系。
+- `dtv_l3_result`（受付/照会）と `dtv_l3_completion`（操作の終結果）を分ける。`submit_*` 成功は受付のみ。`poll` の `PENDING` は未終了。終結果 `TIMEOUT` は deadline 超過。受付だけで物理完了や USB 静定を推定しない。
+- completion は操作種別の tagged union。open→context、tune→`{revision, requested_hz, programmed_hz?, verification, lock_measurement}`、start→armed stream、attach→active stream、card reset→ATR、APDU→応答 bytes、close→`{quiesced, retained_scope}`。
+- `op_release` は終 completion の取得後だけ許す。結果 buffer と handle は取得側が明示解放する。
+- `read` は `DATA(n)` / `WAIT` / `EOF` / `TERMINAL(error)` を別タグで返す。buffer は呼出し中だけ借り、内部保持しない。`drop_total_packets`（queue で正確に捨てた数）と `upstream_loss_unknown`（USB/復元段で個数不明）を区別し、前者の増加だけで stream を失敗させない。
+- 状態: context `opening/ready/closing/closed/failed/disconnected`、receiver `free/leased/tuned/streaming/error`、stream `none/armed/attaching/active/closing/ended`、card `closed/open/reset/transaction/closed`。owner handle は context 世代を持ち、閉鎖後の旧 handle を stale として拒否する。
+- `tune` は system、`uint64_t` Hz、`auto|slot|tsid` の一択、LNB 電圧/許可、有限 deadline を持つ。channel 文字列の解決は Core の純粋関数で 1 回行い、要求 Hz と実際に program した Hz を分ける。lock を測れない製品に架空の true を作らない。
+- firmware source は `path`、呼出側 `bytes`、上限付き `read(offset, buffer)` callback の排他的三形。三形とも library 管理領域へ copy してから検証・USB 書込みへ進む。各製品の manifest/format/model/SHA-256 を USB 書込み前に検証し、呼出側の自己申告 hash だけで任意 image を承認しない。cold で必要なら `FIRMWARE_REJECTED`、warm で不要なら無転送。L1 の daemon `--firmware` 明示必須は維持する。
+- provider は host 所有。`submit` は受付だけ、transfer には正常/失敗/取消しを問わず一つの終 completion を返す。`cancel` 成功は取消し要求の受付であり、buffer 解放の許可ではない。timeout・部分転送の副作用は不明な場合があり、自動再送しない。library は別の libusb event owner を起こさない。
+- `close` は新規受付停止→全 op/stream の cancel 要求→callback 回収→card/receiver/USB claim 解放、の有限 end-to-end budget。期限内に静定したときだけ `quiesced=true`。期限切れは `quiesced=false` と未解放 scope を返し、context/provider/buffer/元 FD/USBDevice を保持して遅延 completion を回収する。旧 context を閉じず同じ token/FD を新 context へ再貸出ししない。
+- release 固定: 各製品 release の header、source manifest、Core pin、製品 adapter の組を固定する。build/package 時に照合し、製品名・release 識別付き factory で異版の静的 link を失敗させる。`release_id` は一致した組の診断表示であり、異 release binary との安全な runtime 交渉には使わない。
+- 検証は**提案であり未実行**: fake IO で L1/L2/L3 の受付判定が同じ不正値を hardware へ一度も届けないこと、late completion 後の buffer 保持、cancel 受付と静定完了の分離、各製品の非対応機能と共有資源の BUSY、TS drop と終端。WASM link/browser と denpa P/Invoke、対象 OS の USB・受信品質は別の実装後検証。
+
+### 6.3 利用者から出ている要件（入力であり、採用決定ではない）
 
 - WebTS: PX4 のみを現在使用。Family ではなく部品を自前で組み立てている。非同期の submit/completion/cancel を基本にしたいが、worker 上の同期 facade でも受け入れる。main と worker の相互待ちを作らないこと、buffer を借りる期間、cancel 後に遅れて来る completion、close 期限切れ時の資源扱いを明記してほしい。内部で thread を作ることは要求しない。card+B25 と PIX の機器内復元を同じ API に押し込まないでほしい。
 - denpa: in-process 利用を希望（AGPL-3.0-or-later のプロセス内）。USB 転送は呼び出し側が渡す形を想定。
-- 既存の Family/`EnclosureFamily` は GPL-2.0-only の adapter に依存するため、全利用者の共通境界にはできない。L3 は MIT 側の受付判定・Error・engine と、製品 adapter（呼び出し側が渡す I/O）＋製品間で同じ形の C header で構成する案が有力（未決）。
+- 既存の Family/`EnclosureFamily` は GPL-2.0-only の adapter に依存するため、全利用者の共通境界にはできない。L3 は新しい C 面とリンク閉包を分ける設計案を採る。
 
-### 6.3 設計上の未決
+### 6.4 設計上の未決
 
-- I/O モデル: 非同期 submit/completion/cancel を第一とするか、同期 facade を第一とするか。
-- 対応製品と順序（PIX DT295 を最初とする案）。
-- buffer 借用期間、cancel 後の遅延 completion、close 期限切れ時の resource 保持/解放。
+- 推奨案 C（非同期 USB 核＋worker 同期橋）を採用するか。
+- L3 を最初に対象とする製品と順序（設計案は PIX DT295 を先発候補とする）。
+- API の symbol、型、enum 採番、構造体 layout、deadline・容量・最大同時数の実測値。
+- buffer 借用期間、cancel 後の遅延 completion、close 期限切れ時の resource 保持/解放の詳細。
 - L3 の契約テストをどの層で回すか。
-- 安定性の表現: 「release ごとの source 固定」の具体的な互換保証範囲。
+- release ごとの互換保証の表現（source 固定の範囲）。
 
-### 6.4 ライセンス来歴（未決、法的判断ではない）
+### 6.5 ライセンス来歴（未決、法的判断ではない）
 
 - Core の `adapters/` の host 系は GPL-2.0-only、`src/` と `include/dtv/userland/` は MIT。
 - ただし MIT 側の `src/receiver_engine.cpp` に、第三者（siketyan）が px4-userland へ出した GPL-2.0-only の PR とほぼ同じ文面が約 15 行ある。本人から MIT で出す許可を得た記録は見当たらない。
@@ -341,6 +379,7 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
   3. L3 をユーザーしか書いていない Core MIT 部品と PIX C 層（すでに or-later）だけで構成する。
   4. PX4/Torne/ASICEN の組み込みはプロセス境界（daemon IPC）に限る。
 - 推奨: 1 または 2 を先に片付け、3 を進め、4 を現実的な既定とする。ライセンス変更を許諾済みとして扱わない。
+- 製品ごとの link closure を release 時に列挙し、未許諾成分のある target を AGPL 向けに案内しない。
 - 関連する未確認: GPLv3/AGPLv3 本文の該当条項、第三者の同意範囲、firmware の再配布権。
 
 ---
@@ -350,9 +389,10 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 | # | 未決 | 選択肢 | 推奨 |
 |---:|---|---|---|
 | 1 | L2 wire を外部契約にするか内部のままにするか | (a) 外部化し version 交渉で minor 互換を約束 (b) 内部維持し daemon 境界だけ公開 | (a)。denpa の C# client を明示的にサポートするなら必要 |
-| 2 | L3 のサポート境界 | (a) Family＋検査付き入口 (b) 生 backend まで | (a)。生 backend は L4 内部 |
-| 3 | L3 の I/O モデル | 非同期 submit/completion/cancel / 同期 facade | 非同期を第一、同期 facade を許容。WebTS 要件に合わせる |
-| 4 | L3 の対応製品と順序 | PIX DT295 先発 / PX4 先発 | PIX DT295（C 層がすでに or-later） |
+| 2 | L3 のサポート境界 | (a) 新しい C 面＋検査付き入口 (b) 既存 Family を薄く包む (c) 生 backend まで | (a)。設計案の推奨。生 backend は L4 内部 |
+| 3 | L3 の I/O モデル | 案 A/B/C（§6.2） | 案 C（非同期 USB 核＋worker 同期橋）。未採用 |
+| 4 | L3 の対応製品と順序 | PIX DT295 先発 / PX4 先発 | PIX DT295（C 層がすでに or-later）を先発候補 |
+| 4b | L3 の API 詳細 | symbol・型・enum 採番・layout・deadline・容量 | 設計案のまま。実測後に release ごとに凍結 |
 | 5 | Core MIT の siketyan 行 | 許可 / 書き直し / L3 を user-only MIT で構成 | 許可または書き直しを先に。並行して user-only 構成 |
 | 6 | `--models`/`--list-json` の metadata 優先 | help/version と同じ単独特権 / 通常解析 | 単独要求として同じ優先を与える |
 | 7 | `--verbose`/`-v` の共通必須化 | 全製品必須 / 既存のみ | 全製品必須にしない。既存を維持し、必要なら別決定 |
