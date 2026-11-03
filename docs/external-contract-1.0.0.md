@@ -126,14 +126,14 @@
 |---|---|---|---|
 | `list` | なし | 採用済み | 全 5 製品。選択した稼働中デーモンの筐体・受信機・カードリーダー構成を人間向けに表示（デーモンの `--list-json` とは別） |
 | `status` | なし | 採用済み | 全 5 製品。稼働中デーモンの動的スナップショットを共通 JSON（`userland.status`）で出力 |
-| `card-status` | なし | 提案 | PX4/ASICEN（内蔵リーダーおよび挿入状態）、PIX（内部カードの挿入状態のみ）。Siano は非対応、torne は最新契約・profile との整合を確認中（現行 tornectl profile では unsupported、カード機能全体の非対応とはしない） |
-| `card-atr` | なし | 提案 | PX4/ASICEN。外部カードセッションから ATR 取得。PIX/Siano は非対応、torne は確認中 |
-| `card-reset` | なし | 提案 | PX4/ASICEN。外部カードリーダーでカードをリセットして ATR 取得。PIX/Siano は非対応、torne は確認中 |
-| `card-apdu` | HEX | 提案 | PX4/ASICEN。外部カードセッションで 1 APDU 送受信。PIX/Siano は非対応、torne は確認中 |
+| `card-status` | なし | 提案 | PX4/ASICEN（内蔵リーダーおよび挿入状態）、PIX（内部カードの挿入状態のみ）。Siano は非対応、torne は製品 CARD UART→daemon IPC 経路が存在する一方、現行 tornectl profile では CLI から拒否される（製品全体のカード能力と現行 ctl 実装状況を区別し、実カード試験結果とは扱わない） |
+| `card-atr` | なし | 提案 | PX4/ASICEN。外部カードセッションから ATR 取得。PIX/Siano は非対応、torne は現行 profile で拒否（経路存在と ctl 実装状況を区別） |
+| `card-reset` | なし | 提案 | PX4/ASICEN。外部カードリーダーでカードをリセットして ATR 取得。PIX/Siano は非対応、torne は現行 profile で拒否（経路存在と ctl 実装状況を区別） |
+| `card-apdu` | HEX | 提案 | PX4/ASICEN。外部カードセッションで 1 APDU 送受信。PIX/Siano は非対応、torne は現行 profile で拒否（経路存在と ctl 実装状況を区別） |
 | `lnb-on` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を直接 ON（デーモンの `--allow-lnb-power` が必要）。PIX/Siano/torne は非対応 |
 | `lnb-off` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を OFF。PIX/Siano/torne は非対応 |
 
-注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
+注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である（既決 CLI 記録およびレビュー 7f086b8e の採用範囲を維持し、未決へ戻さない）。torne においては、製品の CARD UART→Core CardService→daemon IPC 経路が存在する一方、現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）では CLI から拒否される。PC/SC IFD は別経路であり、製品全体のカード能力と現行 ctl 実装状況を明確に区別する（最新 main の実カード試験結果とは扱わない）。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
 
 #### 3.2.4 Termux ランチャー（`*-termux`）の共通オプション
 
