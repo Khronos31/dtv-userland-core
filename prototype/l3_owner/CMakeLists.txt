@@ -30,7 +30,8 @@ target_include_directories(l3_public_contract_c PRIVATE include)
 target_include_directories(l3_public_contract_c PRIVATE src)
 target_link_libraries(l3_public_contract_c PRIVATE l3_owner_model Threads::Threads)
 target_link_options(l3_public_contract_c PRIVATE
-    "LINKER:--wrap=_ZN18l3_owner_prototype11OwnerEngine17initialize_claimsEj")
+    "LINKER:--wrap=_ZN18l3_owner_prototype11OwnerEngine17initialize_claimsEj"
+    "LINKER:--wrap=pthread_mutex_unlock")
 target_compile_options(l3_public_contract_c PRIVATE -Wall -Wextra -Werror)
 set_target_properties(l3_public_contract_c PROPERTIES
     C_STANDARD 11
@@ -60,4 +61,5 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_open_cancel_preinit COMMAND l3_public_contract_c preinit-cancel)
     add_test(NAME l3_c_open_cancel_repeat COMMAND l3_public_contract_c repeat-cancel)
     add_test(NAME l3_c_open_epoch_stable COMMAND l3_public_contract_c epoch)
+    add_test(NAME l3_c_open_cancel_after_setup COMMAND l3_public_contract_c after-setup)
 endif()

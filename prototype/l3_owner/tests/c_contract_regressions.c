@@ -29,6 +29,7 @@ struct fixture {
 };
 
 extern void l3_test_hold_initialize(void);
+extern void l3_test_hold_initialize_after_setup(void);
 extern int l3_test_wait_initialize(void);
 extern void l3_test_release_initialize(void);
 
@@ -459,6 +460,50 @@ static int test_open_cancel_before_initialize(void) {
     return observed && !cleanup_before_initialize ? 0 : 3;
 }
 
+static int test_open_cancel_after_setup_before_claim(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_close_status status;
+    unsigned int attempt;
+    int observed;
+    int cleanup_before_claim = 0;
+
+    l3_test_hold_initialize_after_setup();
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED || !l3_test_wait_initialize()) {
+        l3_test_release_initialize();
+        return 1;
+    }
+    observed = dtv_l3_op_cancel(opened.op) == DTV_L3_ACCEPTED &&
+               dtv_l3_op_poll(opened.op, &result) == DTV_L3_OK &&
+               result.state == DTV_L3_OP_RUNNING;
+    for (attempt = 0; attempt < 1000000; ++attempt) {
+        if (dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK) {
+            cleanup_before_claim = 1;
+            break;
+        }
+        if (status.cleanup_complete) {
+            cleanup_before_claim = 1;
+            break;
+        }
+        sched_yield();
+    }
+    l3_test_release_initialize();
+    if (!wait_open(opened.op, &result) ||
+        result.state != DTV_L3_OP_FAILED ||
+        result.result != DTV_L3_CANCELLED ||
+        dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK ||
+        !status.cleanup_complete || !status.all_ops_recovered ||
+        fixture.release_calls != 0 ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK ||
+        release_context_after_open(opened.owner) != DTV_L3_OK) {
+        return 2;
+    }
+    return observed && !cleanup_before_claim ? 0 : 3;
+}
+
 static int test_repeated_open_cancel_keeps_request(void) {
     struct fixture fixture = fixture_new();
     dtv_l3_provider provider = provider_for(&fixture);
@@ -581,6 +626,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "epoch") == 0) {
         return test_open_terminal_epoch_is_stable_during_retry();
+    }
+    if (strcmp(argv[1], "after-setup") == 0) {
+        return test_open_cancel_after_setup_before_claim();
     }
     return 64;
 }

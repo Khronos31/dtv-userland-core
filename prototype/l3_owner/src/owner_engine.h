@@ -116,6 +116,13 @@ public:
     std::weak_ptr<void> stream_lifetime() const;
 
 private:
+    enum class InitializationPhase {
+        NotStarted,
+        InProgress,
+        ResponsibilitiesRegistered,
+        Returned
+    };
+
     class Borrow {
     public:
         explicit Borrow(OwnerEngine &owner);
@@ -151,7 +158,7 @@ private:
     bool released_ = false;
     std::size_t active_borrows_ = 0;
     OpenState open_state_ = OpenState::Opening;
-    bool claims_initialized_ = false;
+    InitializationPhase initialization_phase_ = InitializationPhase::NotStarted;
     bool close_requested_ = false;
     bool physical_quiesced_ = false;
     bool cleanup_complete_ = false;
