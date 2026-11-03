@@ -882,10 +882,9 @@ bool test_untuned_control_arguments_are_not_recordable()
     px4::userland::cli::TsClientProfile profile{};
     profile.tool_name = "siano-ts";
     profile.product_slug = "siano-userland";
-    const char* arguments[] = {"siano-ts", "--instance", "RoomA", "--receiver", "0",
-        "--time", "-"};
+    const char* arguments[] = {"siano-ts", "--instance", "RoomA", "--receiver", "0"};
     const auto parsed = px4::userland::cli::parse_px4_ts_control_arguments(
-        7, arguments, profile);
+        5, arguments, profile);
     if (!parsed.valid || parsed.tuning_explicit) return false;
     TestOutput output;
     TestClock clock;

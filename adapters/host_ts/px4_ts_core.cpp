@@ -429,6 +429,11 @@ static bool takes_product_value(std::string_view option) noexcept
            option == "--tune-timeout-ms";
 }
 
+static bool product_value_accepts_short_help(std::string_view option) noexcept
+{
+    return option == "--runtime-dir" || option == "-o" || option == "--output";
+}
+
 static Px4TsArguments parse_product_arguments(int argc,
                                               const char* const* argv,
                                               const TsClientProfile* profile,
@@ -450,7 +455,9 @@ static Px4TsArguments parse_product_arguments(int argc,
         else if (token == "--version") request_version = true;
         if (takes_product_value(token) && index + 1 < argc && argv[index + 1] != nullptr) {
             const std::string_view value(argv[index + 1]);
-            if (value != "--help" && value != "--version") ++index;
+            if (value != "--help" && value != "--version" &&
+                (value != "-h" || product_value_accepts_short_help(token)))
+                ++index;
         }
     }
     if (request_help || request_version) {
@@ -608,9 +615,6 @@ static Px4TsArguments parse_product_arguments(int argc,
         }
     }
     if (result.system == System::ISDB_S) result.bandwidth_hz = 0U;
-    if (!result.tuning_explicit && mode == Px4TsParseMode::control &&
-        !result.time_explicit && !result.packet_count_set)
-        return invalid("control mode requires --time or --packet-count");
     if (!valid_arguments(result, mode == Px4TsParseMode::control))
         return invalid("argument value is out of range");
     result.valid = true;

@@ -103,6 +103,14 @@ bool cli_contract()
         "--channel", "T13", "--output", "-h"};
     const auto output_value = parse_px4_ts_product_arguments(9, output_named_help, profile);
     CLI_CHECK(output_value.valid && !output_value.help && output_value.output == "-h");
+    const char* invalid_receiver_help[] = {"siano-ts", "--instance", "RoomA", "--receiver", "-h"};
+    const char* invalid_receiver_help_and_version[] = {"siano-ts", "--instance", "RoomA",
+        "--receiver", "-h", "--version"};
+    const auto receiver_help = parse_px4_ts_product_arguments(5, invalid_receiver_help, profile);
+    const auto receiver_help_first = parse_px4_ts_product_arguments(
+        6, invalid_receiver_help_and_version, profile);
+    CLI_CHECK(receiver_help.valid && receiver_help.help &&
+        receiver_help_first.valid && receiver_help_first.help && !receiver_help_first.version);
 
     const char* case_upper[] = {"siano-ts", "--instance", "RoomA", "--receiver", "0",
         "--channel", "T13"};
@@ -158,8 +166,9 @@ bool cli_contract()
     const auto invalid_control = parse_px4_ts_control_arguments(8, control_with_invalid, profile);
     const auto no_control_receiver = parse_px4_ts_control_arguments(5, control_without_receiver, profile);
     const auto no_normal_tuning = parse_px4_ts_product_arguments(5, control_without_limit, profile);
-    CLI_CHECK(!no_limit.valid && !invalid_control.valid && !no_control_receiver.valid &&
-        !no_normal_tuning.valid);
+    CLI_CHECK(no_limit.valid && !no_limit.tuning_explicit && !no_limit.time_explicit &&
+        !no_limit.duration_set && !no_limit.packet_count_set && !invalid_control.valid &&
+        !no_control_receiver.valid && !no_normal_tuning.valid);
 #undef CLI_CHECK
     return true;
 }
