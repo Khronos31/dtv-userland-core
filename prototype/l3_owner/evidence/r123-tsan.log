@@ -1,10 +1,10 @@
-source= a97efb66e544f989af4326c0cac4d656df2b1ba3
+source= ac2ee3ead43b9546337d31d34d17b2cb0743edac
 mode=ThreadSanitizer
 -- Configuring done (0.0s)
 -- Generating done (0.0s)
 -- Build files have been written to: /tmp/l3-owner-r123-tsan
-[ 25%] Built target l3_header_c
-[ 50%] Built target l3_owner_model
+[ 37%] Built target l3_owner_model
+[ 50%] Built target l3_header_c
 [ 75%] Built target l3_header_cpp
 [100%] Built target l3_owner_tests
 Test project /tmp/l3-owner-r123-tsan
@@ -17,4 +17,4 @@ Test project /tmp/l3-owner-r123-tsan
 
 100% tests passed out of 3
 
-Total Test time (real) =   0.03 sec
+Total Test time (real) =   0.04 sec
