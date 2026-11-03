@@ -511,6 +511,11 @@ bool default_runtime_roots_test()
         unsafe_info.st_mode == unsafe_info_before.st_mode &&
         ::lstat(selected_path.c_str(), &selected_info) == 0 &&
         selected_info.st_uid == ::geteuid() && (selected_info.st_mode & 0077) == 0;
+    if (!ok) std::fprintf(stderr,
+        "runtime default initial selection failed: roots=%d selected=%d first=%s expected=%s\n",
+        static_cast<bool>(roots), static_cast<bool>(selected),
+        roots && roots.value().count > 0U ? roots.value().paths[0U].data() : "",
+        selected_path.c_str());
 
     const bool removed_selected = ::rmdir(selected_path.c_str()) == 0;
     const bool duplicate_xdg_set = saved_xdg.set(selected_path.c_str());
@@ -526,6 +531,10 @@ bool default_runtime_roots_test()
         duplicate_selected &&
         duplicate_selected.value() == selected_path &&
         saved_xdg.set(unsafe_xdg.c_str());
+    if (!ok) std::fprintf(stderr,
+        "runtime default duplicate selection failed: removed=%d roots=%d selected=%d\n",
+        removed_selected, static_cast<bool>(duplicate_roots),
+        static_cast<bool>(duplicate_selected));
 
     const std::string long_xdg_path = base + "/" + std::string(90U, 'x');
     ok = ok && make_directory(long_xdg_path);
@@ -538,6 +547,11 @@ bool default_runtime_roots_test()
             "asicen-userland", "abcdefghijklmnopqrst");
     ok = ok && long_lease_root && long_lease_root.value() == long_xdg &&
         long_publish_root && long_publish_root.value() == selected_path;
+    if (!ok) std::fprintf(stderr,
+        "runtime default long-path selection failed: lease=%s expected=%s publish=%s expected=%s\n",
+        long_lease_root ? long_lease_root.value().c_str() : "",
+        long_xdg.c_str(), long_publish_root ? long_publish_root.value().c_str() : "",
+        selected_path.c_str());
     dtv::userland::host_runtime::EndpointConfig long_endpoint{
         long_xdg, "siano-userland", "test"};
     dtv::userland::host_runtime::EndpointDiagnostic long_path_diagnostic{};
@@ -777,8 +791,12 @@ bool unsafe_ancestor_runtime_candidate_test()
         {nullptr, "x", "control.sock", px4::userland::ipc::posix::EndpointAccess::private_user,
          "fake-native"}, px4::userland::Timeout{100U});
     pollfd pending{listener, POLLIN, 0};
-    ok = ok && candidates && !unsafe_root_listed && !client &&
-        ::poll(&pending, 1U, 0) == 0;
+    const int pending_count = ::poll(&pending, 1U, 0);
+    ok = ok && candidates && !unsafe_root_listed && !client && pending_count == 0;
+    if (!ok) std::fprintf(stderr,
+        "unsafe ancestor check failed: setup=%d candidates=%d listed=%d client=%d poll=%d root=%s\n",
+        listener >= 0, static_cast<bool>(candidates), unsafe_root_listed,
+        static_cast<bool>(client), pending_count, root.c_str());
     if (listener >= 0) (void)::close(listener);
     if (!socket_path.empty()) (void)::unlink(socket_path.c_str());
     (void)::rmdir(instance.c_str());

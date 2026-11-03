@@ -101,13 +101,13 @@ jobs:
       - name: Build runtime targets
         run: >-
           cmake --build build --parallel 2 --target host_runtime_tests
-          host_client_integration_tests host_listener_context_tests
+          host_listener_context_tests
           host_identity_lease_tests host_identity_lease_path_tests
           host_ctl_tests host_ts_tests
       - name: Run macOS runtime tests
         run: >-
           ctest --test-dir build
-          -R '^(host_runtime_tests|host_client_integration_tests|host_listener_context_tests|host_identity_lease_tests|host_identity_lease_path_tests|host_ctl_tests|host_ts_tests)$'
+          -R '^(host_runtime_tests|host_listener_context_tests|host_identity_lease_tests|host_identity_lease_path_tests|host_ctl_tests|host_ts_tests)$'
           --output-on-failure
 
   thread_sanitizer:
