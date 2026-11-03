@@ -27,12 +27,12 @@
 |---|---|---|---|
 | L1 プロセス | 引数（argv）、stdout への TS 出力、終了コード、シグナル・EOF、FD の受け渡し、runtime ディレクトリ | mirakc、dtv-android、各製品ランチャー | 1.0.0 の規範。メジャーバージョンで固定 |
 | L2 wire と JSON | IPC レコード・opcode、discovery・status JSON | C# 実装などの外部クライアント、ctl | 規範。バージョンネゴシエーション付き（§4.5 の未決を含む） |
-| L3 組込み | 製品間で共通シグネチャの C ヘッダー、各関数のセマンティクス（受付判定、ゲート、Error、所有権、取り消し・切断の期限） | WebTS、プロセス内組み込み利用者 | リリースごとに固定するソース契約。安定 ABI は約束しない |
+| L3 組込み | 製品間で共通シグネチャの C ヘッダー、各関数のセマンティクス（受付判定、ゲート、Error、所有権、取り消し・切断の期限） | WebTS.app、プロセス内組み込み利用者 | リリースごとに固定するソース契約。安定 ABI は約束しない |
 | L4 内部 | Family、TunerServiceBackend、Core host アダプター、`detail/`、製品内部クラス | 製品自身のみ | 契約ではない。予告なく変更してよい |
 
 - 層分けは採用済みである。L3 の構成は採用済みだが、個別 API の具体契約は設計対象であり、本採用だけで API を確定しない。
 - L3 の約束は **リリースごとの固定** とする。リリースをまたぐ無期限の安定 ABI は新たに約束しない。
-- L4 から L3 への昇格はユーザー判断とする。WebTS が現在使っている Family 等は L4 にあたる。
+- L4 から L3 への昇格はユーザー判断とする。WebTS.app が現在使っている Family 等は L4 にあたる。
 - `include/dtv/userland/detail/` は L4 の印として扱う。
 - 目標構成（ユーザー 6603670549）: Core の共通ライブラリと、同じ共通仕様に適合する各製品ライブラリを持ち、実行バイナリはそれらと疎結合にする。入口だけを共通化してライブラリの責務・再利用性が整わない状態や、CLI 側が選局・ゲートを再実装する状態を完成としない。
 - 契約テストは層ごとに作成し、どの層の規範を検査しているかを明記する。
@@ -133,7 +133,7 @@
 | `lnb-on` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を直接 ON（デーモンの `--allow-lnb-power` が必要）。PIX/Siano/torne は非対応 |
 | `lnb-off` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を OFF。PIX/Siano/torne は非対応 |
 
-注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である（既決 CLI 記録およびレビュー 7f086b8e の採用範囲を維持し、未決へ戻さない）。torne においては、製品の CARD UART→Core CardService→daemon IPC 経路が存在する一方、現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）では CLI から拒否される。PC/SC IFD は別経路であり、製品全体のカード能力と現行 ctl 実装状況を明確に区別する（最新 main の実カード試験結果とは扱わない）。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
+注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である。通常 CARD 維持の根拠は PX4/ASICEN の外部カード操作および PIX の内部カード挿入状態照会等に基づき、4 名称の全製品共通承認へ拡張しない一方、名称全体を白紙へ戻さず設計選定案として記載する。torne 製品には CARD 経路が存在する一方、現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）は CARD 操作を拒否し、PC/SC IFD は別経路である。これを製品全体の非対応や恒久除外仕様、あるいは確定契約違反と断定せず、現行 ctl 実装状況と製品の CARD 能力を区別する（最新 main の実カード試験結果とは扱わない）。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
 
 #### 3.2.4 Termux ランチャー（`*-termux`）の共通オプション
 
@@ -387,7 +387,7 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 - **案 A**: 既存の `Family` / バックエンドに薄い C ラッパーを被せる。5 製品の I/O・所有権・選局順序が揃わず、GPL-2.0-only のアダプターに依存する。
 - **案 B**: 共通 C API ＋ 同期 USB コールバックのみ。特定の同期型利用者には近いが、連続 TS 受信やブラウザー環境での取り消し・有限停止を共通規則にしにくい。
-- **案 C（採用）**: 共通 C API ＋ `submit`/`completion`/`cancel` による非同期 USB コア。同期コールバックはワーカー上の同期ブリッジで接続する。呼び出し側の USB 所有権と WebTS などのイベントループ非ブロッキング性を両立し、libusb/WebUSB/WinUSB の管理責任をホスト側に残す。
+- **案 C（採用）**: 共通 C API ＋ `submit`/`completion`/`cancel` による非同期 USB コア。同期コールバックはワーカー上の同期ブリッジで接続する。呼び出し側の USB 所有権と WebTS.app などのイベントループ非ブロッキング性を両立し、libusb/WebUSB/WinUSB の管理責任をホスト側に残す。
 
 責務の分離:
 
