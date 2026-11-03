@@ -35,8 +35,9 @@ struct TransferKey {
 class Provider {
 public:
     virtual ~Provider() = default;
-    virtual dtv_l3_result claim(Binding *binding, std::uint32_t index) = 0;
-    virtual void release_claim(Binding *binding, std::uint32_t index) = 0;
+    virtual dtv_l3_claim_result claim(Binding *binding, std::uint32_t index) = 0;
+    virtual dtv_l3_release_result release_claim(
+        Binding *binding, std::uint32_t index) = 0;
     virtual dtv_l3_result submit(
         Binding *binding,
         std::uint64_t id,
@@ -56,7 +57,14 @@ public:
         bool all_ops_recovered;
         bool cleanup_complete;
         std::size_t active_borrows;
+        std::size_t claims_attempted;
+        std::size_t transfer_ready_claims;
+        std::size_t cleanup_claims_remaining;
+        dtv_l3_result last_cleanup_error;
+        bool restoration_failed;
     };
+
+    enum class ClaimState { NotAttempted, InFlight, Ready, Retained, Unknown, Released };
 
     struct Operation {
         OwnerEngine *owner = nullptr;
@@ -80,6 +88,7 @@ public:
     OwnerEngine &operator=(const OwnerEngine &) = delete;
 
     void initialize_claims(std::uint32_t count);
+    dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
     dtv_l3_result cancel(const std::shared_ptr<Operation> &operation);
@@ -122,6 +131,7 @@ private:
     void run_cancel(const std::shared_ptr<Operation> &operation,
                     bool before_submit);
     void run_cleanup();
+    bool cleanup_claims_locked() const;
     void worker_loop();
     void enqueue_locked(std::function<void()> work);
     bool all_ops_recovered_locked() const;
@@ -136,11 +146,16 @@ private:
     bool physical_quiesced_ = false;
     bool cleanup_complete_ = false;
     bool cleanup_started_ = false;
+    bool cleanup_attempted_ = false;
     bool worker_stopping_ = false;
     std::size_t provider_calls_in_flight_ = 0;
     std::size_t cleanup_count_ = 0;
     std::size_t release_count_ = 0;
     std::uint32_t claimed_count_ = 0;
+    std::vector<ClaimState> claims_;
+    bool claim_in_flight_ = false;
+    dtv_l3_result last_cleanup_error_ = DTV_L3_OK;
+    bool restoration_failed_ = false;
     std::uint64_t next_transfer_id_ = 1;
     std::shared_ptr<Binding> binding_;
     std::shared_ptr<void> stream_ = std::make_shared<int>(1);
