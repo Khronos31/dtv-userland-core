@@ -344,16 +344,20 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 API の形（**名称・採番・構造体 layout はすべて未決**）:
 
 - 製品ごとに同じ `dtv_l3_api` を返す factory（例 `px4_l3_get_api_rX`）。複数製品の静的リンクで裸 symbol を競合させず、異 release の header/実装を混ぜたら link または package 照合で失敗させる。
-- `release_id`、`catalog`、`discover`、`submit_open`、`capabilities`、`acquire`、`submit_tune`、`submit_start`、`submit_attach`、`read`、`submit_stop`、`submit_release`、`submit_close`、`poll`、`cancel`、`op_release`、CARD 系、LNB 系。
+- `release_id`、`catalog`、`discover`、`submit_open`、`capabilities`、`acquire`、`submit_tune`、`submit_start`、`submit_attach`、`read`、`submit_stop`、`submit_release`、`submit_close`、`close_status`、`context_release`、`poll`、`cancel`、`op_release`、CARD 系、LNB 系。`close_status` と `context_release` は設計案の名称であり、採用済み API ではない。
 - `dtv_l3_result`（受付/照会）と `dtv_l3_completion`（操作の終結果）を分ける。`submit_*` 成功は受付のみ。`poll` の `PENDING` は未終了。終結果 `TIMEOUT` は deadline 超過。受付だけで物理完了や USB 静定を推定しない。
-- completion は操作種別の tagged union。open→context、tune→`{revision, requested_hz, programmed_hz?, verification, lock_measurement}`、start→armed stream、attach→active stream、card reset→ATR、APDU→応答 bytes、close→`{quiesced, retained_scope}`。
-- `op_release` は終 completion の取得後だけ許す。結果 buffer と handle は取得側が明示解放する。
+- completion は操作種別の tagged union。open→成功・失敗を問わず所有者 context、tune→`{revision, requested_hz, programmed_hz?, verification, lock_measurement}`、start→armed stream、attach→active stream、card reset→ATR、APDU→応答 bytes、close→`{quiesced, retained_scope}`。受付前の検証失敗は副作用なしで op/context を作らない。一度受理した open は部分的な claim/I/O を残す失敗でも回収可能な context を返し、host が close と最終解放を行う。
+- `op_release` は終 completion の取得後だけ許す。解放するのは操作結果と op handle であり、内部 I/O 参照・context・provider・buffer の最終解放とは別である。結果 buffer と handle は取得側が明示解放する。
 - `read` は `DATA(n)` / `WAIT` / `EOF` / `TERMINAL(error)` を別タグで返す。buffer は呼出し中だけ借り、内部保持しない。`drop_total_packets`（queue で正確に捨てた数）と `upstream_loss_unknown`（USB/復元段で個数不明）を区別し、前者の増加だけで stream を失敗させない。
 - 状態: context `opening/ready/closing/closed/failed/disconnected`、receiver `free/leased/tuned/streaming/error`、stream `none/armed/attaching/active/closing/ended`、card `closed/open/reset/transaction/closed`。owner handle は context 世代を持ち、閉鎖後の旧 handle を stale として拒否する。
 - `tune` は system、`uint64_t` Hz、`auto|slot|tsid` の一択、LNB 電圧/許可、有限 deadline を持つ。channel 文字列の解決は Core の純粋関数で 1 回行い、要求 Hz と実際に program した Hz を分ける。lock を測れない製品に架空の true を作らない。
 - firmware source は `path`、呼出側 `bytes`、上限付き `read(offset, buffer)` callback の排他的三形。三形とも library 管理領域へ copy してから検証・USB 書込みへ進む。各製品の manifest/format/model/SHA-256 を USB 書込み前に検証し、呼出側の自己申告 hash だけで任意 image を承認しない。cold で必要なら `FIRMWARE_REJECTED`、warm で不要なら無転送。L1 の daemon `--firmware` 明示必須は維持する。
 - provider は host 所有。`submit` は受付だけ、transfer には正常/失敗/取消しを問わず一つの終 completion を返す。`cancel` 成功は取消し要求の受付であり、buffer 解放の許可ではない。timeout・部分転送の副作用は不明な場合があり、自動再送しない。library は別の libusb event owner を起こさない。
-- `close` は新規受付停止→全 op/stream の cancel 要求→callback 回収→card/receiver/USB claim 解放、の有限 end-to-end budget。期限内に静定したときだけ `quiesced=true`。期限切れは `quiesced=false` と未解放 scope を返し、context/provider/buffer/元 FD/USBDevice を保持して遅延 completion を回収する。旧 context を閉じず同じ token/FD を新 context へ再貸出ししない。
+- `close` は新規受付停止→全 op/stream の cancel 要求→callback 回収→card/receiver/USB claim 解放、の有限 end-to-end budget。ここで **操作の期限結果** と **資源の最終静定** を別に観測する。期限内に静定したときだけ `quiesced=true`。期限切れ close op は `TIMEOUT/quiesced=false` と未解放 scope を返して終結し、host はその op を release できるが、context・provider・buffer・元 FD/USBDevice と内部 I/O 参照は保持する。既に close 中の context への重複 `submit_close` は新しい停止/release を行わず既存の closing 状態を返す。
+- `close_status` は同じ owner handle で非阻塞に再照会し、`{phase, quiesced, retained_scope, cleanup_error}` の snapshot を返す。`quiesced=true` は全受理済み I/O の終 completion 回収と card/receiver/claim の後始末が終わったときだけ単調に成立する。保持中の scope がなければ `context_release` を一回だけ許す。`context_release` は静定前なら拒否し、成功後の pointer は無効になる。内部は一回限りの release 遷移で二重 callback/二重解放を防ぐ。
+- 進行担当を分ける。driver 実行 lane は製品の同期手順で待機し得る。USB completion/event pump、cancel 受付、deadline 通知、`close_status` の読出しを、その占有 lane に積まない。driver と独立した event pump が終 completion を進め、control/deadline 担当が `TIMEOUT/quiesced=false` を公開する。cleanup は最終 transfer completion 後に進み、完了後だけ `quiesced=true` へ遷移する。専用 thread を一律必須にしない。
+- 例: 受理した open が claim 後に失敗しても、終結果の owner context で close を依頼する。close budget 中に同期 provider が戻らなければ control/deadline 担当が `TIMEOUT/quiesced=false` を返し、main は join せず応答を続ける。host が close op を release しても資源は残る。遅延した USB 終 completion と driver 復帰の後に cleanup が一回完了し、`close_status` が初めて `quiesced=true` を返す。host は全 op handle を回収したうえで `context_release` を一回だけ実行し、provider と元 device/FD を解放できる。遅延 completion だけで後始末が終わらない場合、または provider が終 completion を失った場合は静定を偽らず保持を続ける。
+- 旧 context を閉じず同じ token/FD を新 context へ再貸出ししない。USB断は関係 function の generation を無効にし、依存 receiver/card を terminal にする。再接続は新 token/新 context で明示的に行い、旧 handle を復活させない。
 - release 固定: 各製品 release の header、source manifest、Core pin、製品 adapter の組を固定する。build/package 時に照合し、製品名・release 識別付き factory で異版の静的 link を失敗させる。`release_id` は一致した組の診断表示であり、異 release binary との安全な runtime 交渉には使わない。
 - 検証は**提案であり未実行**: fake IO で L1/L2/L3 の受付判定が同じ不正値を hardware へ一度も届けないこと、late completion 後の buffer 保持、cancel 受付と静定完了の分離、各製品の非対応機能と共有資源の BUSY、TS drop と終端。WASM link/browser と denpa P/Invoke、対象 OS の USB・受信品質は別の実装後検証。
 
@@ -369,9 +373,9 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 - L3 を最初に対象とする製品と順序（設計案は PIX DT295 を先発候補とする）。
 - API の symbol、型、enum 採番、構造体 layout、deadline・容量・最大同時数の実測値。
 - buffer 借用期間、cancel 後の遅延 completion、close 期限切れ時の resource 保持/解放の詳細。
-- **B1**: close 期限切れまたは失敗 open の後、遅延 completion を回収してから残留資源を観測・最終解放する手順。
-- **B2**: 同期 USB を待つ worker が塞がっても、cancel と close 期限通知を独立して進める担当関係。
-- B1/B2 は architecture 担当が設計補足中である。ここで関数名・ticket 方式・新しい API を発明せず、到着後に統合する。
+- **B1（設計補足を統合済み。採用未決）**: close 期限切れまたは失敗 open の後、遅延 completion を回収してから残留資源を観測・最終解放する手順。`close_status` の再照会と `context_release` の一回限り解放を提案している。
+- **B2（設計補足を統合済み。採用未決）**: 同期 USB を待つ worker が塞がっても、cancel と close 期限通知を独立して進める担当関係。driver lane と USB pump / control-deadline / cleanup を分ける。
+- B1/B2 の関数名・snapshot 形式・進行担当の配置は設計案であり、採用済み API ではない。
 - L3 の契約テストをどの層で回すか。
 - release ごとの互換保証の表現（source 固定の範囲）。
 
@@ -408,7 +412,7 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 | 14 | （採用済み）Torne の models/native device/Windows EOF/外部 firmware | — | 既決 target。実装・検証の未完とは分ける。詳細は付録 E |
 | 15 | JSON `userland.status` の schema 名の文書化 | Core docs に明記 / 実装のみ | Core docs に明記する（現状 docs に literal がない） |
 | 16 | exit の Error→code 細部 | 採用済み分類 / 個別表 | 分類は採用済み。細部は実装と照合して別途確定 |
-| 17 | B1/B2 の設計補足 | architecture 到着待ち | 関数名・ticket 方式を発明せず、到着後に統合する |
+| 17 | B1/B2 の設計補足 | 提案どおり採用 / 修正 | 設計補足（46c6ec2b）を統合済み。`close_status`/`context_release` と進行担当の分離は採用未決 |
 
 ---
 
