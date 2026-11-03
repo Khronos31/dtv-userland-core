@@ -830,6 +830,59 @@ bool unsafe_ancestor_runtime_candidate_test()
     return ok;
 }
 
+bool unsafe_symlink_target_runtime_candidate_test()
+{
+    std::array<char, 64U> temporary{};
+    const char pattern[] = "/tmp/dtv-unsafe-symlink-target-XXXXXX";
+    std::memcpy(temporary.data(), pattern, sizeof(pattern));
+    char* base_value = ::mkdtemp(temporary.data());
+    if (base_value == nullptr) return false;
+    const std::string base(base_value);
+    const std::string trusted_link = base + "/trusted";
+    const std::string world = base + "/world";
+    const std::string route = world + "/route";
+    const std::string target = base + "/target";
+    const std::string runtime = target + "/runtime";
+    bool ok = ::chmod(base.c_str(), 0700) == 0 && make_directory(world) &&
+        ::chmod(world.c_str(), 0777) == 0 && make_directory(target) &&
+        ::chmod(target.c_str(), 0700) == 0 && make_directory(runtime) &&
+        ::chmod(runtime.c_str(), 0700) == 0 &&
+        ::symlink(target.c_str(), route.c_str()) == 0 &&
+        ::symlink((world + "/route/runtime").c_str(), trusted_link.c_str()) == 0;
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
+    EnvironmentValue saved_tmp("TMPDIR");
+    ok = ok && saved_xdg.set(trusted_link.c_str()) && saved_tmp.set(base.c_str());
+    if (!ok) {
+        (void)::unlink(trusted_link.c_str());
+        (void)::unlink(route.c_str());
+        (void)::rmdir(runtime.c_str());
+        (void)::rmdir(target.c_str());
+        (void)::rmdir(world.c_str());
+        (void)::rmdir(base.c_str());
+        return false;
+    }
+    const auto candidates = px4::userland::ipc::posix::client_runtime_roots();
+    bool trusted_link_listed = false;
+    if (candidates) {
+        for (std::size_t index = 0U; index < candidates.value().count; ++index)
+            trusted_link_listed = trusted_link_listed ||
+                std::strcmp(candidates.value().paths[index].data(), runtime.c_str()) == 0;
+    }
+    ok = ok && !trusted_link_listed;
+    if (!ok) std::fprintf(stderr,
+        "unsafe symlink target check failed: setup=%d candidates=%d listed=%d path=%s\n",
+        static_cast<int>(::access(runtime.c_str(), F_OK) == 0),
+        static_cast<bool>(candidates), trusted_link_listed, runtime.c_str());
+    (void)::unlink(trusted_link.c_str());
+    (void)::unlink(route.c_str());
+    (void)::rmdir(runtime.c_str());
+    (void)::rmdir(target.c_str());
+    (void)::rmdir(world.c_str());
+    (void)::rmdir(base.c_str());
+    if (ok) std::puts("posix_unsafe_symlink_target_not_connected=PASS");
+    return ok;
+}
+
 bool socket_transport_test()
 {
     std::array<char, 64U> temporary{};
@@ -1253,6 +1306,10 @@ int main()
     }
     if (!unsafe_ancestor_runtime_candidate_test()) {
         std::fputs("POSIX unsafe-ancestor runtime fixture failed\n", stderr);
+        return 1;
+    }
+    if (!unsafe_symlink_target_runtime_candidate_test()) {
+        std::fputs("POSIX unsafe-symlink-target runtime fixture failed\n", stderr);
         return 1;
     }
 #endif

@@ -8,6 +8,8 @@
 #define WIN32_LEAN_AND_MEAN
 #endif
 #include <windows.h>
+#include <sddl.h>
+#include <aclapi.h>
 
 #include <array>
 #include <iostream>
@@ -17,6 +19,75 @@
 namespace {
 
 using px4::userland::ipc::posix::EndpointAccess;
+
+const char* runtime_parent_status_name(
+    px4::userland::windows_security::RuntimeParentStatus status)
+{
+    using Status = px4::userland::windows_security::RuntimeParentStatus;
+    switch (status) {
+    case Status::accepted: return "accepted";
+    case Status::invalid_attributes: return "invalid_attributes";
+    case Status::current_user_sid_unavailable: return "current_user_sid_unavailable";
+    case Status::security_query_failed: return "security_query_failed";
+    case Status::owner_mismatch: return "owner_mismatch";
+    case Status::dacl_rejected: return "dacl_rejected";
+    }
+    return "unknown";
+}
+
+void print_default_localappdata_diagnostic(const wchar_t* path)
+{
+    const DWORD attributes = ::GetFileAttributesW(path);
+    px4::userland::windows_security::SidBuffer current_storage{};
+    PSID current = px4::userland::windows_security::current_user_sid(current_storage);
+    PSID owner = nullptr;
+    PACL dacl = nullptr;
+    PSECURITY_DESCRIPTOR descriptor = nullptr;
+    const DWORD status = ::GetNamedSecurityInfoW(const_cast<wchar_t*>(path), SE_FILE_OBJECT,
+        OWNER_SECURITY_INFORMATION | DACL_SECURITY_INFORMATION, &owner, nullptr,
+        &dacl, nullptr, &descriptor);
+    LPWSTR current_text = nullptr;
+    LPWSTR owner_text = nullptr;
+    if (current != nullptr) (void)::ConvertSidToStringSidW(current, &current_text);
+    if (status == ERROR_SUCCESS && owner != nullptr)
+        (void)::ConvertSidToStringSidW(owner, &owner_text);
+    std::wcerr << L"Windows default LOCALAPPDATA diagnostic: path=" << path
+        << L" attributes=" << attributes
+        << L" directory=" << ((attributes & FILE_ATTRIBUTE_DIRECTORY) != 0U)
+        << L" reparse=" << ((attributes & FILE_ATTRIBUTE_REPARSE_POINT) != 0U)
+        << L" owner=" << (owner_text == nullptr ? L"unavailable" : owner_text)
+        << L" token_user=" << (current_text == nullptr ? L"unavailable" : current_text)
+        << L" security_query=" << status
+        << L" verifier=" << runtime_parent_status_name(
+            px4::userland::windows_security::runtime_parent_status(path)) << L"\n";
+    if (status == ERROR_SUCCESS && dacl != nullptr) {
+        ACL_SIZE_INFORMATION information{};
+        if (::GetAclInformation(dacl, &information, sizeof(information), AclSizeInformation)) {
+            for (DWORD index = 0U; index < information.AceCount; ++index) {
+                void* raw = nullptr;
+                if (::GetAce(dacl, index, &raw) == 0 || raw == nullptr) continue;
+                const auto* header = static_cast<const ACE_HEADER*>(raw);
+                if (header->AceType == ACCESS_ALLOWED_ACE_TYPE) {
+                    const auto* ace = static_cast<const ACCESS_ALLOWED_ACE*>(raw);
+                    PSID sid = reinterpret_cast<PSID>(
+                        const_cast<DWORD*>(&ace->SidStart));
+                    LPWSTR sid_text = nullptr;
+                    (void)::ConvertSidToStringSidW(sid, &sid_text);
+                    std::wcerr << L"  DACL ACE type=" << header->AceType
+                        << L" mask=0x" << std::hex << ace->Mask << std::dec
+                        << L" sid=" << (sid_text == nullptr ? L"unavailable" : sid_text)
+                        << L"\n";
+                    if (sid_text != nullptr) (void)::LocalFree(sid_text);
+                } else {
+                    std::wcerr << L"  DACL ACE type=" << header->AceType << L"\n";
+                }
+            }
+        }
+    }
+    if (current_text != nullptr) (void)::LocalFree(current_text);
+    if (owner_text != nullptr) (void)::LocalFree(owner_text);
+    if (descriptor != nullptr) (void)::LocalFree(descriptor);
+}
 
 std::wstring child_path(const std::wstring& parent, const wchar_t* child)
 {
@@ -177,6 +248,15 @@ bool test_windows_default_runtime_root()
     const DWORD count = ::GetEnvironmentVariableW(L"LOCALAPPDATA", original.data(),
         static_cast<DWORD>(original.size()));
     const bool had_value = count > 0U && count < original.size();
+    if (had_value) print_default_localappdata_diagnostic(original.data());
+    const auto default_roots = px4::userland::ipc::posix::client_runtime_roots();
+    const auto default_publish = px4::userland::ipc::posix::select_publish_runtime_root(
+        "px4-userland", "windows-default");
+    const auto default_lease = px4::userland::ipc::posix::select_lease_runtime_root();
+    std::cerr << "Windows default LOCALAPPDATA use: roots="
+        << static_cast<bool>(default_roots) << " publish="
+        << static_cast<bool>(default_publish) << " lease="
+        << static_cast<bool>(default_lease) << "\n";
     std::string expected;
     if (!to_utf8(tree.root, expected) ||
         ::SetEnvironmentVariableW(L"LOCALAPPDATA", tree.root.c_str()) == 0)

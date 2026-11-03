@@ -170,8 +170,9 @@ bool validate_private_root(const char* path, uid_t owner) noexcept
     return true;
 }
 
-bool trusted_symlinks(const char* path, uid_t owner) noexcept
+bool trusted_symlinks(const char* path, uid_t owner, unsigned int depth = 0U) noexcept
 {
+    if (depth > 8U) return false;
     std::string prefix;
     const char* cursor = path;
     while (*cursor == '/') ++cursor;
@@ -186,13 +187,23 @@ bool trusted_symlinks(const char* path, uid_t owner) noexcept
             if (!trusted_uid(info.st_uid, owner, android_policy_enabled())) return false;
             const std::size_t slash = prefix.rfind('/');
             const std::string parent = slash == 0U ? "/" : prefix.substr(0U, slash);
-            char* canonical_parent = ::realpath(parent.c_str(), nullptr);
-            if (canonical_parent == nullptr) return false;
-            const int parent_fd = open_directory_path(canonical_parent, false, owner);
-            std::free(canonical_parent);
-            if (parent_fd < 0) return false;
-            (void)::close(parent_fd);
+            std::array<char, kStoredPathCapacity> target{};
+            const ssize_t length = ::readlink(prefix.c_str(), target.data(), target.size() - 1U);
+            if (length <= 0 || static_cast<std::size_t>(length) >= target.size() - 1U)
+                return false;
+            target[static_cast<std::size_t>(length)] = '\0';
+            std::string target_path(target.data());
+            if (target_path.empty()) return false;
+            if (target_path[0] != '/') target_path = parent + "/" + target_path;
+            target_path.append(cursor);
+            return trusted_symlinks(target_path.c_str(), owner, depth + 1U);
         }
+        char* canonical_prefix = ::realpath(prefix.c_str(), nullptr);
+        if (canonical_prefix == nullptr) return false;
+        const int directory_fd = open_directory_path(canonical_prefix, false, owner);
+        std::free(canonical_prefix);
+        if (directory_fd < 0) return false;
+        (void)::close(directory_fd);
         while (*cursor == '/') ++cursor;
     }
     return true;
