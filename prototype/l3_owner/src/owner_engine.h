@@ -156,6 +156,7 @@ private:
     std::uint32_t claimed_count_ = 0;
     std::vector<ClaimState> claims_;
     std::vector<bool> claim_quiesced_;
+    std::vector<dtv_l3_result> claim_cleanup_errors_;
     bool claim_in_flight_ = false;
     dtv_l3_result last_cleanup_error_ = DTV_L3_OK;
     dtv_l3_result open_result_ = DTV_L3_ACCEPTED;

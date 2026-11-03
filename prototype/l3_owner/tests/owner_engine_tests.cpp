@@ -847,6 +847,40 @@ void test_failed_claim_residual_recovery_and_release_result_visibility() {
 
     {
         ProviderMock provider;
+        provider.release_results[1] = {
+            {DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_RETAINED,
+             DTV_L3_RESTORE_SUCCEEDED, DTV_L3_FAILED},
+            {DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
+             DTV_L3_RESTORE_SUCCEEDED, DTV_L3_OK}};
+        provider.release_results[0] = {
+            {DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
+             DTV_L3_RESTORE_FAILED, DTV_L3_UNSUPPORTED}};
+        OwnerEngine owner(provider, 59);
+        owner.initialize_claims(2);
+        CHECK(owner.close(2000) == DTV_L3_OK);
+        OwnerEngine::Snapshot snapshot{};
+        CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+        CHECK(snapshot.last_cleanup_error == DTV_L3_UNSUPPORTED);
+        CHECK(snapshot.cleanup_result == DTV_L3_UNSUPPORTED);
+        CHECK(snapshot.restoration_failed);
+        CHECK(snapshot.cleanup_claims_remaining == 1);
+        CHECK(owner.retry_cleanup() == DTV_L3_ACCEPTED);
+        CHECK(wait_for_cleanup_pass(owner, 2));
+        CHECK(provider.released_claims.size() == 3);
+        CHECK(provider.released_claims[0] == 1);
+        CHECK(provider.released_claims[1] == 0);
+        CHECK(provider.released_claims[2] == 1);
+        CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+        CHECK(snapshot.last_cleanup_error == DTV_L3_UNSUPPORTED);
+        CHECK(snapshot.cleanup_result == DTV_L3_UNSUPPORTED);
+        CHECK(snapshot.restoration_failed);
+        CHECK(snapshot.cleanup_complete);
+        CHECK(snapshot.physical_quiesced);
+        CHECK(owner.release() == DTV_L3_OK);
+    }
+
+    {
+        ProviderMock provider;
         provider.release_results[0] = {
             {DTV_L3_RELEASE_QUIESCENCE_UNKNOWN, DTV_L3_CLAIM_NONE,
              DTV_L3_RESTORE_SUCCEEDED, DTV_L3_TIMEOUT}};

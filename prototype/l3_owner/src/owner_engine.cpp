@@ -44,6 +44,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
         open_state_ = OpenState::Opening;
         claims_.assign(count, ClaimState::NotAttempted);
         claim_quiesced_.assign(count, true);
+        claim_cleanup_errors_.assign(count, DTV_L3_OK);
         open_result_ = DTV_L3_ACCEPTED;
     }
 
@@ -549,7 +550,6 @@ void OwnerEngine::run_cleanup() {
     std::vector<std::uint32_t> release_indices;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        last_cleanup_error_ = DTV_L3_OK;
         binding = binding_;
         for (std::uint32_t index = 0; index < claims_.size(); ++index) {
             if (claims_[index] == ClaimState::Ready ||
@@ -572,14 +572,12 @@ void OwnerEngine::run_cleanup() {
         } else {
             claims_[*index] = ClaimState::Unknown;
         }
-        if (result.error != DTV_L3_OK) {
-            last_cleanup_error_ = result.error;
-        }
+        claim_cleanup_errors_[*index] = result.error;
         if (result.restoration == DTV_L3_RESTORE_FAILED ||
             result.restoration == DTV_L3_RESTORE_UNKNOWN) {
             restoration_failed_ = true;
-            if (last_cleanup_error_ == DTV_L3_OK) {
-                last_cleanup_error_ = DTV_L3_FAILED;
+            if (claim_cleanup_errors_[*index] == DTV_L3_OK) {
+                claim_cleanup_errors_[*index] = DTV_L3_FAILED;
             }
         }
     }
@@ -591,6 +589,13 @@ void OwnerEngine::run_cleanup() {
         physical_quiesced_ = std::all_of(
             claim_quiesced_.begin(), claim_quiesced_.end(),
             [](bool quiesced) { return quiesced; });
+        last_cleanup_error_ = DTV_L3_OK;
+        for (auto error = claim_cleanup_errors_.rbegin();
+             error != claim_cleanup_errors_.rend(); ++error) {
+            if (*error != DTV_L3_OK) {
+                last_cleanup_error_ = *error;
+            }
+        }
         cleanup_complete_ = !cleanup_claims_locked();
         if (open_state_ != OpenState::Failed) {
             open_state_ = OpenState::Closed;
