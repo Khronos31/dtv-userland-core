@@ -1,4 +1,5 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
+/* Experimental prototype; names and layouts are not a stable ABI promise. */
 #ifndef DTV_L3_OWNER_H
 #define DTV_L3_OWNER_H
 
@@ -31,6 +32,14 @@ typedef enum dtv_l3_op_state {
     DTV_L3_OP_FAILED = 3
 } dtv_l3_op_state;
 
+typedef enum dtv_l3_open_state {
+    DTV_L3_OPEN_OPENING = 0,
+    DTV_L3_OPEN_READY = 1,
+    DTV_L3_OPEN_FAILED = 2,
+    DTV_L3_OPEN_CLOSING = 3,
+    DTV_L3_OPEN_CLOSED = 4
+} dtv_l3_open_state;
+
 typedef struct dtv_l3_transfer_request {
     uint32_t kind;
     uint32_t endpoint;
@@ -46,13 +55,19 @@ typedef struct dtv_l3_transfer_completion {
     size_t size;
 } dtv_l3_transfer_completion;
 
-/* Provider operations identify a transfer with the same binding and local ID. */
+/*
+ * A binding is context-local. Request, completion, and cancel identify a
+ * transfer with this binding plus its local ID. Keep it alive until accepted
+ * transfers have a terminal callback, their storage is recovered, and the
+ * owner is released.
+ */
 typedef void (*dtv_l3_transfer_complete_fn)(
     dtv_l3_provider_binding *binding,
     uint64_t transfer_id,
     const dtv_l3_transfer_completion *completion,
     void *callback_context);
 
+/* ACCEPTED means exactly one terminal callback later; rejection means none. */
 typedef dtv_l3_result (*dtv_l3_transfer_submit_fn)(
     void *provider_context,
     dtv_l3_provider_binding *binding,
@@ -66,8 +81,22 @@ typedef dtv_l3_result (*dtv_l3_transfer_cancel_fn)(
     dtv_l3_provider_binding *binding,
     uint64_t transfer_id);
 
+/* Cancellation acceptance is not terminal; a raced normal completion is valid. */
+
+typedef dtv_l3_result (*dtv_l3_claim_fn)(
+    void *provider_context,
+    dtv_l3_provider_binding *binding,
+    uint32_t claim_index);
+
+typedef void (*dtv_l3_release_claim_fn)(
+    void *provider_context,
+    dtv_l3_provider_binding *binding,
+    uint32_t claim_index);
+
 typedef struct dtv_l3_provider {
     void *provider_context;
+    dtv_l3_claim_fn claim;
+    dtv_l3_release_claim_fn release_claim;
     dtv_l3_transfer_submit_fn submit;
     dtv_l3_transfer_cancel_fn cancel;
 } dtv_l3_provider;
@@ -77,6 +106,12 @@ typedef struct dtv_l3_open_result {
     dtv_l3_context *owner;
 } dtv_l3_open_result;
 
+typedef struct dtv_l3_open_status {
+    dtv_l3_open_state state;
+    uint32_t claims_acquired;
+    uint32_t reserved;
+} dtv_l3_open_status;
+
 typedef struct dtv_l3_close_status {
     dtv_l3_result result;
     uint8_t physical_quiesced;
@@ -85,8 +120,12 @@ typedef struct dtv_l3_close_status {
     uint8_t reserved;
 } dtv_l3_close_status;
 
-/* ACCEPTED transfers an owner even when later initialization fails. */
-dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider);
+/* ACCEPTED transfers an owner before claim work; later failure keeps it recoverable. */
+dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
+                               uint32_t claim_count);
+dtv_l3_result dtv_l3_open_status_get(
+    dtv_l3_context *owner,
+    dtv_l3_open_status *status);
 
 /* A timeout is an observation; it does not release owner or transfer storage. */
 dtv_l3_result dtv_l3_close(dtv_l3_context *owner, uint32_t timeout_ms);
