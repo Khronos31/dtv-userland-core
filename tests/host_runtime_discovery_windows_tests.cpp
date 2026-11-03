@@ -79,10 +79,18 @@ bool test_windows_runtime_instance_discovery()
 {
     std::array<wchar_t, MAX_PATH> temporary{};
     std::array<wchar_t, MAX_PATH> unique{};
-    if (::GetTempPathW(static_cast<DWORD>(temporary.size()), temporary.data()) == 0U ||
-        ::GetTempFileNameW(temporary.data(), L"dtv", 0U, unique.data()) == 0U)
+    if (::GetTempPathW(static_cast<DWORD>(temporary.size()), temporary.data()) == 0U) {
+        std::cerr << "Windows test GetTempPathW failed: " << ::GetLastError() << "\n";
         return false;
-    if (::DeleteFileW(unique.data()) == 0) return false;
+    }
+    if (::GetTempFileNameW(temporary.data(), L"dtv", 0U, unique.data()) == 0U) {
+        std::cerr << "Windows test GetTempFileNameW failed: " << ::GetLastError() << "\n";
+        return false;
+    }
+    if (::DeleteFileW(unique.data()) == 0) {
+        std::cerr << "Windows test DeleteFileW failed: " << ::GetLastError() << "\n";
+        return false;
+    }
 
     TemporaryTree tree;
     tree.root = std::wstring(unique.data()) + L"-検査";
@@ -91,11 +99,17 @@ bool test_windows_runtime_instance_discovery()
     tree.valid = child_path(tree.version, L"Live-01");
     tree.invalid = child_path(tree.version, L"invalid name");
     tree.file = child_path(tree.version, L"not-a-directory");
-    if (!make_directory(tree.root)) return false;
+    if (!make_directory(tree.root)) {
+        std::cerr << "Windows test CreateDirectoryW(root) failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.root_created = true;
 
     std::string runtime_directory;
-    if (!to_utf8(tree.root, runtime_directory)) return false;
+    if (!to_utf8(tree.root, runtime_directory)) {
+        std::cerr << "Windows test root UTF-8 conversion failed\n";
+        return false;
+    }
     const auto missing = px4::userland::ipc::posix::discover_runtime_instances(
         runtime_directory.c_str(), EndpointAccess::private_user, "px4-userland");
     if (missing || missing.error() != px4::userland::Error::NOT_FOUND) {
@@ -103,15 +117,30 @@ bool test_windows_runtime_instance_discovery()
         return false;
     }
 
-    if (!make_directory(tree.product)) return false;
+    if (!make_directory(tree.product)) {
+        std::cerr << "Windows test CreateDirectoryW(product) failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.product_created = true;
-    if (!make_directory(tree.version)) return false;
+    if (!make_directory(tree.version)) {
+        std::cerr << "Windows test CreateDirectoryW(version) failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.version_created = true;
-    if (!make_directory(tree.valid)) return false;
+    if (!make_directory(tree.valid)) {
+        std::cerr << "Windows test CreateDirectoryW(valid) failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.valid_created = true;
-    if (!make_directory(tree.invalid)) return false;
+    if (!make_directory(tree.invalid)) {
+        std::cerr << "Windows test CreateDirectoryW(invalid) failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.invalid_created = true;
-    if (!create_file(tree.file)) return false;
+    if (!create_file(tree.file)) {
+        std::cerr << "Windows test CreateFileW failed: " << ::GetLastError() << "\n";
+        return false;
+    }
     tree.file_created = true;
 
     const auto discovered = px4::userland::ipc::posix::discover_runtime_instances(
