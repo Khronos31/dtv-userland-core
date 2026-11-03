@@ -119,7 +119,9 @@ bool test_windows_runtime_instance_discovery()
     if (!discovered || discovered.value().count != 1U ||
         discovered.value().canonical_collision ||
         std::string(discovered.value().instances[0U].data()) != "Live-01") {
-        std::cerr << "Windows discovery did not return only the valid live instance\n";
+        std::cerr << "Windows discovery did not return only the valid live instance: success="
+                  << static_cast<bool>(discovered) << " count="
+                  << (discovered ? discovered.value().count : 0U) << "\n";
         return false;
     }
     return true;
@@ -141,13 +143,19 @@ bool test_windows_default_runtime_root()
     bool ok = roots && roots.value().count == 1U &&
         std::string(roots.value().paths[0U].data()) == expected && publish && lease &&
         publish.value() == expected && lease.value() == expected;
+    if (!ok) std::cerr << "Windows LOCALAPPDATA default mismatch: roots="
+        << static_cast<bool>(roots) << " count=" << (roots ? roots.value().count : 0U)
+        << " publish=" << static_cast<bool>(publish) << " lease=" << static_cast<bool>(lease)
+        << " expected=" << expected << "\n";
 
     (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", L"C:\\Windows\\Temp");
     const auto unsafe = px4::userland::ipc::posix::client_runtime_roots();
     ok = ok && !unsafe && unsafe.error() == px4::userland::Error::NOT_FOUND;
+    if (unsafe) std::cerr << "unsafe LOCALAPPDATA was accepted\n";
     (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", nullptr);
     const auto missing = px4::userland::ipc::posix::client_runtime_roots();
     ok = ok && !missing && missing.error() == px4::userland::Error::NOT_FOUND;
+    if (missing) std::cerr << "missing LOCALAPPDATA produced a runtime root\n";
     (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", original.data());
     if (ok) std::cout << "windows_LOCALAPPDATA_default_unsafe_missing=PASS\n";
     return ok;
