@@ -23,7 +23,7 @@
 | `receivers[].stream` | 10 進文字列の `id` と `tune_revision`、および `phase` を保持する null 許容のアクティブストリームオブジェクト |
 | `receivers[].last_stream` | 10 進文字列の `id` と `tune_revision`、`reason`、null 許容の `error`、`statistics` カウンタマップを保持する null 許容の終端ストリームオブジェクト |
 | `receivers[].measurements`, `receivers[].statistics` | サポート対象の測定値オブジェクトおよび名前付きカウンタ。各コレクションは型付き STATUS 値で実際に観測されたエントリのみを反映する |
-| `receivers[].statistics.receiver`, `receivers[].statistics.stream` | レシーバカウンタマップおよび null 許容のストリームカウンタマップ。各カウンタオブジェクトは `value`、`sampled_at_ns`、`reason`、`overflow` を保持する |
+| `receivers[].statistics.receiver`, `receivers[].statistics.stream` | 受信機カウンタマップおよび null 許容のストリームカウンタマップ。各カウンタオブジェクトは `value`、`sampled_at_ns`、`reason`、`overflow` を保持する |
 | `readers[]` | `descriptor`、`present`、`card`、`operation`、`handles_open`、`transaction_active`、`last_error` を保持するオブジェクト配列。`card` は `state`、`sampled_at_ns`、`reason` を含む |
 | Core の `Error` enum に定義されたエラー `code` | 定義済みのエラー識別文字列 |
 | 上記 enum の定義外のエラー `code` | `code: "UNKNOWN"` および元の数値 `numeric_code` |
