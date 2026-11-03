@@ -905,6 +905,20 @@ bool add_root(const std::string& value,
     return true;
 }
 
+bool lowercase_instance(std::string_view input,
+                        dtv::userland::identity::InstanceText& output) noexcept
+{
+    const auto value = dtv::userland::identity::canonicalize_instance(input);
+    if (!value) return false;
+    output = value.value();
+    for (std::size_t index = 0U; index < output.length; ++index) {
+        char& character = output.bytes[index];
+        if (character >= 'A' && character <= 'Z')
+            character = static_cast<char>(character - 'A' + 'a');
+    }
+    return true;
+}
+
 bool matches_fake_serial(const wire::ListResponse& list,
                          const dtv::userland::identity::ResolvedIdentity& expected) noexcept
 {
@@ -1397,15 +1411,15 @@ bool test_host_ctl_real_server()
     if (!make_directory(tree.root)) return false;
     tree.directories.push_back(tree.root);
 #endif
-    if (!tree.create_instance("ctl-live")) return false;
+    if (!tree.create_instance("CtlLive")) return false;
 #if !defined(_WIN32)
     EnvironmentValue saved_xdg("XDG_RUNTIME_DIR"), saved_tmp("TMPDIR");
     if (!saved_xdg.set(empty_root.root.c_str()) || !saved_tmp.set(parent_root.c_str()))
         return false;
 #endif
     Listener control;
-    if (!control.bind(tree.root, "ctl-live", "control.sock")) return false;
-    FakeService service("ctl-live");
+    if (!control.bind(tree.root, "CtlLive", "control.sock")) return false;
+    FakeService service("CtlLive");
     service.list.functions.count = 2U;
     service.list.functions.items[0U].id = 1U;
     service.list.functions.items[1U] = service.list.functions.items[0U];
@@ -1432,10 +1446,12 @@ bool test_host_ctl_real_server()
     profile.product_slug = "test-product";
     profile.product_version = "1.0.0-test";
     profile.product = dtv::userland::identity::Product::px4;
+    dtv::userland::host_ctl::Profile case_profile = profile;
+    case_profile.normalize_instance = lowercase_instance;
     const char* list_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
-                               "--instance", "ctl-live", "list"};
+                               "--instance", "CtlLive", "list"};
     const char* status_args[] = {"fake-ctl", "--runtime-dir", tree.root.c_str(),
-                                 "--instance", "ctl-live", "status"};
+                                 "--instance", "CtlLive", "status"};
     FILE* list_output = std::tmpfile();
     if (list_output == nullptr || std::fflush(stdout) != 0) return false;
 #if defined(_WIN32)
@@ -1461,7 +1477,7 @@ bool test_host_ctl_real_server()
         return false;
     }
     const int list_status = dtv::userland::host_ctl::run_control_cli(
-        6, list_args, profile);
+        6, list_args, case_profile);
     const bool flushed = std::fflush(stdout) == 0;
 #if defined(_WIN32)
     const bool restored = ::_dup2(saved_stdout, stdout_fd) == 0;
@@ -1477,12 +1493,12 @@ bool test_host_ctl_real_server()
     std::fclose(list_output);
     const std::string list_text(listed.data(), listed_size);
     const int status_status = dtv::userland::host_ctl::run_control_cli(
-        6, status_args, profile);
+        6, status_args, case_profile);
 #if !defined(_WIN32)
     const char* missing_explicit_args[] = {"fake-ctl", "--runtime-dir",
         empty_root.root.c_str(), "--instance", "ctl-live", "list"};
-    const char* default_list_args[] = {"fake-ctl", "--instance", "ctl-live", "list"};
-    const char* default_status_args[] = {"fake-ctl", "--instance", "ctl-live", "status"};
+    const char* default_list_args[] = {"fake-ctl", "--instance", "CtlLive", "list"};
+    const char* default_status_args[] = {"fake-ctl", "--instance", "CtlLive", "status"};
     const int missing_explicit_status =
         dtv::userland::host_ctl::run_control_cli(6, missing_explicit_args, profile);
     const int default_list_status =
