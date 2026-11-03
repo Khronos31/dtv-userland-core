@@ -1,12 +1,24 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "owner_engine.h"
 
+#include <chrono>
+
 namespace l3_owner_prototype {
 
 OwnerEngine::OwnerEngine(Provider &provider, std::uint64_t binding_value)
-    : provider_(provider), binding_(std::make_shared<Binding>(binding_value)) {}
+    : provider_(provider), binding_(std::make_shared<Binding>(binding_value)),
+      worker_([this] { worker_loop(); }) {}
 
-OwnerEngine::~OwnerEngine() = default;
+OwnerEngine::~OwnerEngine() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        worker_stopping_ = true;
+        work_condition_.notify_all();
+    }
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+}
 
 OwnerEngine::Borrow::Borrow(OwnerEngine &owner)
     : owner_(owner), admitted_(false) {
@@ -73,6 +85,8 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
 
     if (must_finish_close) {
         finish_close();
+        std::unique_lock<std::mutex> lock(mutex_);
+        state_condition_.wait(lock, [this] { return cleanup_complete_; });
     }
 }
 
@@ -109,19 +123,31 @@ dtv_l3_result OwnerEngine::start(
         *operation = op;
     }
 
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ++provider_calls_in_flight_;
+    }
     const auto result = provider_.submit(
         binding.get(), op->id, provider_request, &OwnerEngine::completion_thunk,
         op.get());
-    if (result != DTV_L3_ACCEPTED) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        if (result == DTV_L3_ACCEPTED) {
+            op->submitted = true;
+            if (op->cancel_requested) {
+                queue_cancel_locked(op);
+            }
+        } else {
             if (op->state == DTV_L3_OP_OPENING) {
                 op->state = DTV_L3_OP_FAILED;
                 op->result = result;
             }
+            op->submitted = true;
         }
-        finish_close();
+        state_condition_.notify_all();
     }
+    finish_close();
     return result;
 }
 
@@ -133,6 +159,7 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
     if (!borrow) {
         return DTV_L3_BUSY;
     }
+    bool before_submit = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = operations_.find(operation->id);
@@ -143,8 +170,28 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
             operation->state != DTV_L3_OP_RUNNING) {
             return DTV_L3_OK;
         }
+        operation->cancel_requested = true;
+        if (operation->cancel_in_progress || operation->cancel_sent) {
+            return DTV_L3_ACCEPTED;
+        }
+        before_submit = !operation->submitted;
+        operation->cancel_in_progress = true;
+        ++provider_calls_in_flight_;
     }
-    return provider_.cancel(operation->binding.get(), operation->id);
+    const auto result = provider_.cancel(operation->binding.get(), operation->id);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        operation->cancel_in_progress = false;
+        operation->cancel_sent =
+            !(before_submit && result == DTV_L3_INVALID);
+        if (before_submit && result == DTV_L3_INVALID && operation->submitted) {
+            queue_cancel_locked(operation);
+        }
+        state_condition_.notify_all();
+    }
+    finish_close();
+    return result;
 }
 
 dtv_l3_result OwnerEngine::poll(
@@ -193,7 +240,6 @@ dtv_l3_result OwnerEngine::release_operation(
 }
 
 dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
-    (void)timeout_ms;
     Borrow borrow(*this);
     if (!borrow) {
         return DTV_L3_BUSY;
@@ -211,17 +257,23 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
             const auto &op = entry.second;
             if (op->state == DTV_L3_OP_OPENING ||
                 op->state == DTV_L3_OP_RUNNING) {
+                op->cancel_requested = true;
                 pending.push_back(op);
             }
         }
+        for (const auto &op : pending) {
+            queue_cancel_locked(op);
+        }
     }
 
-    for (const auto &op : pending) {
-        provider_.cancel(op->binding.get(), op->id);
-    }
     finish_close();
 
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (timeout_ms != 0 && !physical_quiesced_) {
+        state_condition_.wait_for(
+            lock, std::chrono::milliseconds(timeout_ms),
+            [this] { return physical_quiesced_; });
+    }
     return physical_quiesced_ ? DTV_L3_OK : DTV_L3_TIMEOUT;
 }
 
@@ -362,24 +414,60 @@ void OwnerEngine::on_completion(
 }
 
 void OwnerEngine::finish_close() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (!close_requested_ || cleanup_started_ || cleanup_complete_ ||
+        open_state_ == OpenState::Opening || provider_calls_in_flight_ != 0) {
+        return;
+    }
+    for (const auto &entry : operations_) {
+        if (entry.second->state == DTV_L3_OP_OPENING ||
+            entry.second->state == DTV_L3_OP_RUNNING) {
+            return;
+        }
+    }
+    cleanup_started_ = true;
+    enqueue_locked([this] { run_cleanup(); });
+}
+
+void OwnerEngine::queue_cancel_locked(
+    const std::shared_ptr<Operation> &operation) {
+    if (operation->cancel_in_progress ||
+        operation->cancel_sent || operation->state == DTV_L3_OP_DONE ||
+        operation->state == DTV_L3_OP_FAILED) {
+        return;
+    }
+    operation->cancel_in_progress = true;
+    ++provider_calls_in_flight_;
+    const bool before_submit = !operation->submitted;
+    enqueue_locked([this, operation, before_submit] {
+        run_cancel(operation, before_submit);
+    });
+}
+
+void OwnerEngine::run_cancel(const std::shared_ptr<Operation> &operation,
+                             bool before_submit) {
+    const auto result = provider_.cancel(operation->binding.get(), operation->id);
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        operation->cancel_in_progress = false;
+        operation->cancel_sent =
+            !(before_submit && result == DTV_L3_INVALID);
+        if (before_submit && result == DTV_L3_INVALID && operation->submitted) {
+            queue_cancel_locked(operation);
+        }
+        state_condition_.notify_all();
+    }
+    finish_close();
+}
+
+void OwnerEngine::run_cleanup() {
     std::shared_ptr<Binding> binding;
     std::uint32_t claim_count = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        if (!close_requested_ || cleanup_started_ || cleanup_complete_ ||
-            open_state_ == OpenState::Opening) {
-            return;
-        }
-        for (const auto &entry : operations_) {
-            if (entry.second->state == DTV_L3_OP_OPENING ||
-                entry.second->state == DTV_L3_OP_RUNNING) {
-                return;
-            }
-        }
-        cleanup_started_ = true;
         binding = binding_;
         claim_count = claimed_count_;
-        claimed_count_ = 0;
     }
 
     for (std::uint32_t index = claim_count; index > 0; --index) {
@@ -388,11 +476,36 @@ void OwnerEngine::finish_close() {
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        claimed_count_ = 0;
         ++cleanup_count_;
         physical_quiesced_ = true;
         cleanup_complete_ = true;
         open_state_ = OpenState::Closed;
+        state_condition_.notify_all();
     }
+}
+
+void OwnerEngine::worker_loop() {
+    for (;;) {
+        std::function<void()> work;
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            work_condition_.wait(lock, [this] {
+                return worker_stopping_ || !work_queue_.empty();
+            });
+            if (work_queue_.empty() && worker_stopping_) {
+                return;
+            }
+            work = std::move(work_queue_.front());
+            work_queue_.pop_front();
+        }
+        work();
+    }
+}
+
+void OwnerEngine::enqueue_locked(std::function<void()> work) {
+    work_queue_.push_back(std::move(work));
+    work_condition_.notify_one();
 }
 
 bool OwnerEngine::all_ops_recovered_locked() const {

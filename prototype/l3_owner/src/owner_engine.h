@@ -6,10 +6,12 @@
 
 #include <condition_variable>
 #include <cstdint>
+#include <deque>
 #include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
+#include <thread>
 #include <vector>
 
 struct dtv_l3_provider_binding {
@@ -65,6 +67,10 @@ public:
         std::vector<std::uint8_t> retained_payload;
         std::vector<std::uint8_t> response;
         bool released = false;
+        bool submitted = false;
+        bool cancel_requested = false;
+        bool cancel_in_progress = false;
+        bool cancel_sent = false;
     };
 
     explicit OwnerEngine(Provider &provider, std::uint64_t binding_value);
@@ -112,6 +118,12 @@ private:
                        const dtv_l3_transfer_completion &completion,
                        Operation *operation);
     void finish_close();
+    void queue_cancel_locked(const std::shared_ptr<Operation> &operation);
+    void run_cancel(const std::shared_ptr<Operation> &operation,
+                    bool before_submit);
+    void run_cleanup();
+    void worker_loop();
+    void enqueue_locked(std::function<void()> work);
     bool all_ops_recovered_locked() const;
 
     Provider &provider_;
@@ -124,6 +136,8 @@ private:
     bool physical_quiesced_ = false;
     bool cleanup_complete_ = false;
     bool cleanup_started_ = false;
+    bool worker_stopping_ = false;
+    std::size_t provider_calls_in_flight_ = 0;
     std::size_t cleanup_count_ = 0;
     std::size_t release_count_ = 0;
     std::uint32_t claimed_count_ = 0;
@@ -131,6 +145,10 @@ private:
     std::shared_ptr<Binding> binding_;
     std::shared_ptr<void> stream_ = std::make_shared<int>(1);
     std::map<std::uint64_t, std::shared_ptr<Operation>> operations_;
+    std::deque<std::function<void()>> work_queue_;
+    std::condition_variable work_condition_;
+    std::condition_variable state_condition_;
+    std::thread worker_;
 };
 
 class TestBarrier {
