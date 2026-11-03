@@ -6,12 +6,13 @@ is not part of the top-level Core build and does not implement product adapters
 or a release API. The header's symbols, enum values, and layouts are candidates,
 not a stable ABI.
 
-All files in this subtree are licensed under GPL-2.0-or-later. The repository
-root `LICENSE` remains MIT for the existing Core components. This target does
-not link or copy those components. Its dependency closure is the C standard
-headers `stddef.h` and `stdint.h`, the C++ standard library, and the platform
-thread runtime requested by CMake `Threads`; it has no USB, device, product, or
-external service dependency.
+The prototype source, header, tests, build definition, and this README are
+licensed under GPL-2.0-or-later. The repository root `LICENSE` remains MIT for
+the existing Core components. This target does not link or copy those
+components. Its dependency closure is the C standard headers `stddef.h` and
+`stdint.h`, the C++ standard library, and the platform thread runtime requested
+by CMake `Threads`; it has no USB, device, product, or external service
+dependency.
 
 Run the standalone checks with:
 
