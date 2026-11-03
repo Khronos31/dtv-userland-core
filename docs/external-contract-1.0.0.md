@@ -126,14 +126,14 @@
 |---|---|---|---|
 | `list` | なし | 採用済み | 全 5 製品。選択した稼働中デーモンの筐体・受信機・カードリーダー構成を人間向けに表示（デーモンの `--list-json` とは別） |
 | `status` | なし | 採用済み | 全 5 製品。稼働中デーモンの動的スナップショットを共通 JSON（`userland.status`）で出力 |
-| `card-status` | なし | 提案 | PX4/ASICEN（内蔵リーダーおよび挿入状態）、PIX（内部カードの挿入状態のみ）。Siano は非対応。torne はカードリーダー提供要求があり CARD 経路が存在する一方、現行 tornectl profile では CLI から拒否される（実装現状・提供要求・残る検証範囲を区別し、未確認の動作を検証済みとしない） |
-| `card-atr` | なし | 提案 | PX4/ASICEN。外部カードセッションから ATR 取得。PIX/Siano は非対応。torne は提供要求と現行 profile 拒否を区別 |
-| `card-reset` | なし | 提案 | PX4/ASICEN。外部カードリーダーでカードをリセットして ATR 取得。PIX/Siano は非対応。torne は提供要求と現行 profile 拒否を区別 |
-| `card-apdu` | HEX | 提案 | PX4/ASICEN。外部カードセッションで 1 APDU 送受信。PIX/Siano は非対応。torne は提供要求と現行 profile 拒否を区別 |
+| `card-status` | なし | 提案 | PX4/ASICEN/torne（内蔵・外部リーダーおよび挿入状態。torne は必須要件、現行 profile 欠落の改修中）、PIX（内部カードの挿入状態のみ）。Siano は非対応 |
+| `card-atr` | なし | 提案 | PX4/ASICEN/torne（外部カードセッションから ATR 取得。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
+| `card-reset` | なし | 提案 | PX4/ASICEN/torne（外部カードリーダーでカードをリセットして ATR 取得。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
+| `card-apdu` | HEX | 提案 | PX4/ASICEN/torne（外部カードセッションで 1 APDU 送受信。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
 | `lnb-on` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を直接 ON（デーモンの `--allow-lnb-power` が必要）。PIX/Siano/torne は非対応 |
 | `lnb-off` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を OFF。PIX/Siano/torne は非対応 |
 
-注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である（ユーザーが 4 操作の具体名まで指定したと拡張しない）。torne においては、カードリーダーを recisdb-rs や WinSCard / PC/SC 等で扱えるようにするユーザー提供要求が存在し、製品の CARD UART→Core CardService→daemon IPC 経路が存在する。他方で、現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）は CLI からの操作を拒否する実装現状があり、PC/SC IFD は別経路である。本書は torne を恒久的な CARD 非対応製品と定義せず、現行 ctl profile の拒否という観測、PC/SC 等で提供する要求、および今後確認・実装・検証が残る範囲を混同せずに区別して記載する（未確認の互換性を動作確認済みとは扱わない）。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
+注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である。torne においては、カードリーダーを recisdb-rs や WinSCard / PC/SC 等で扱えるようにする要件に加え、ユーザー明示指示（Issue 17 #6608385943）により **tornectl からのカード操作も必須要件** と確定した。現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）は実装上の欠落・改修中であり、正式な非対応仕様ではない。目標契約として必須であることを明記し、現行実装の改修中状況と明確に区別する。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
 
 #### 3.2.4 Termux ランチャー（`*-termux`）の共通オプション
 
