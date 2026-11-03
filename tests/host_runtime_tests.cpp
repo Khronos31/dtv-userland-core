@@ -559,7 +559,7 @@ bool default_runtime_roots_test()
         "runtime default long-path selection failed: lease=%s expected=%s publish=%s expected=%s\n",
         long_lease_root ? long_lease_root.value().c_str() : "",
         long_xdg.c_str(), long_publish_root ? long_publish_root.value().c_str() : "",
-        selected_path.c_str());
+        long_publish_expected.c_str());
     dtv::userland::host_runtime::EndpointConfig long_endpoint{
         long_xdg, "siano-userland", "test"};
     dtv::userland::host_runtime::EndpointDiagnostic long_path_diagnostic{};
@@ -572,6 +572,12 @@ bool default_runtime_roots_test()
         ? px4::userland::ipc::posix::select_publish_runtime_root(
             "siano-userland", "test")
         : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    dtv::userland::host_runtime::EndpointConfig short_temporary_endpoint{
+        selected_path, "siano-userland", "test"};
+    const auto short_temporary_endpoint_path =
+        dtv::userland::host_runtime::control_endpoint_path(short_temporary_endpoint);
+    const std::string short_publish_expected = short_temporary_endpoint_path
+        ? selected_path : os_fallback_path;
     ok = ok && !long_endpoint_path &&
         long_endpoint_path.error() == px4::userland::Error::INVALID_ARGUMENT &&
         long_path_diagnostic.reason == dtv::userland::host_runtime::EndpointDiagnosticReason::path_too_long &&
@@ -583,7 +589,7 @@ bool default_runtime_roots_test()
         long_connect_diagnostic.stage ==
             dtv::userland::host_runtime::EndpointConnectStage::endpoint_path &&
         long_connect_diagnostic.endpoint.path_bytes == long_path_diagnostic.path_bytes &&
-        long_path_fallback && long_path_fallback.value() == long_publish_expected &&
+        long_path_fallback && long_path_fallback.value() == short_publish_expected &&
         saved_xdg.set(unsafe_xdg.c_str());
 
     dtv::userland::host_runtime::EndpointConfig invalid_instance{
