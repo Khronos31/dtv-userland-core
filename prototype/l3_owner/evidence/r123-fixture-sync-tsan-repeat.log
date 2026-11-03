@@ -1,0 +1,65 @@
+Test project /tmp/l3-owner-r123-tsan
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.03 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+    Test #1: l3_owner_tests ...................   Passed    0.02 sec
+    Start 1: l3_owner_tests
+1/1 Test #1: l3_owner_tests ...................   Passed    0.02 sec
+
+100% tests passed out of 1
+
+Total Test time (real) =   0.73 sec

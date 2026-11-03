@@ -546,7 +546,6 @@ void test_r3_cancel_before_registration_is_replayed_after_acceptance() {
     submit_barrier->release();
     submitter.join();
     CHECK(start_result == DTV_L3_ACCEPTED);
-    CHECK(provider.cancel_count(binding.get(), operation->id) == 2);
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(2);
     OwnerEngine::Snapshot snapshot{};
@@ -558,6 +557,7 @@ void test_r3_cancel_before_registration_is_replayed_after_acceptance() {
         std::this_thread::yield();
     } while (std::chrono::steady_clock::now() < deadline);
     CHECK(snapshot.physical_quiesced);
+    CHECK(provider.cancel_count(binding.get(), operation->id) == 2);
     CHECK(operation->state == DTV_L3_OP_FAILED);
     CHECK(owner.cleanup_count() == 1);
     CHECK(provider.released_claim_count() == 1);
