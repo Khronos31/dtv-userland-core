@@ -877,6 +877,24 @@ struct TestOutput final : px4::userland::cli::Px4TsOutput {
     }
 };
 
+bool test_untuned_control_arguments_are_not_recordable()
+{
+    px4::userland::cli::TsClientProfile profile{};
+    profile.tool_name = "siano-ts";
+    profile.product_slug = "siano-userland";
+    const char* arguments[] = {"siano-ts", "--instance", "RoomA", "--receiver", "0",
+        "--time", "-"};
+    const auto parsed = px4::userland::cli::parse_px4_ts_control_arguments(
+        7, arguments, profile);
+    if (!parsed.valid || parsed.tuning_explicit) return false;
+    TestOutput output;
+    TestClock clock;
+    TestSignal signal;
+    const auto result = px4::userland::cli::Px4TsRunner::run_wire(
+        parsed, profile, output, clock, signal);
+    return !result && result.error() == Error::INVALID_ARGUMENT && output.bytes.empty();
+}
+
 bool add_root(const std::string& value,
               px4::userland::ipc::posix::RuntimeRootCandidates& roots)
 {
@@ -2097,6 +2115,7 @@ int main()
     const bool ts_missing_endpoint = true;
 #endif
     const bool output_timeouts = test_host_ts_output_timeouts();
+    const bool untuned_control = test_untuned_control_arguments_are_not_recordable();
 #if !defined(_WIN32)
     const bool overlong = run_ts_lifecycle(false, true);
 #else
@@ -2139,6 +2158,8 @@ int main()
         std::puts("explicit_instance_ts_missing_endpoint_diagnostic=PASS");
     if (output_timeouts)
         std::puts("fake_server_host_ts_output_timeout_signal_and_regular=PASS");
+    if (untuned_control)
+        std::puts("host_ts_control_parse_cannot_start_untuned_recording=PASS");
     if (overlong) std::puts("runtime_discovery_overlong_endpoint_then_live=PASS");
     if (oom) std::puts("fake_server_host_ts_frame_oom_stop_release=PASS");
     if (unsupported) std::puts("runtime_discovery_remote_unsupported_then_live=PASS");
@@ -2152,6 +2173,6 @@ int main()
            ts && eof && ts_receiver_ambiguity && ts_tune_rejection &&
            ts_stream_endpoint &&
            ts_missing_endpoint &&
-           output_timeouts && overlong &&
+           output_timeouts && untuned_control && overlong &&
            oom && unsupported && not_ready && security ? 0 : 1;
 }

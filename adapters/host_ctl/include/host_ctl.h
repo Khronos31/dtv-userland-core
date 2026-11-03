@@ -20,6 +20,7 @@ struct Profile final {
     identity::Product product = identity::Product::px4;
     bool card_supported = false;
     bool serial_selector_supported = false;
+    // Retained for source compatibility; CLI identity uses the shared grammar.
     InstanceNormalizer normalize_instance = nullptr;
     SerialMatcher matches_serial = nullptr;
     bool lnb_power_supported = false;

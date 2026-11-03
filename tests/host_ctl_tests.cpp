@@ -79,13 +79,25 @@ bool runtime_dir_is_optional(const dtv::userland::host_ctl::Profile& profile)
     return dtv::userland::host_ctl::run_control_cli(4, arguments, profile) != 2;
 }
 
+bool metadata_precedes_invalid_arguments(const dtv::userland::host_ctl::Profile& profile)
+{
+    const char* help[] = {"sianoctl", "--help", "--device", "invalid", "unknown",
+        "--version"};
+    const char* version[] = {"sianoctl", "--version", "--runtime-dir"};
+    const char* version_as_value[] = {"sianoctl", "--instance", "--version", "status"};
+    return dtv::userland::host_ctl::run_control_cli(6, help, profile) == 0 &&
+           dtv::userland::host_ctl::run_control_cli(3, version, profile) == 0 &&
+           dtv::userland::host_ctl::run_control_cli(4, version_as_value, profile) == 0;
+}
+
 }  // namespace
 
 int main()
 {
     const dtv::userland::host_ctl::Profile profile{
         "sianoctl", "siano-userland", "test", dtv::userland::identity::Product::siano};
-    if (!help_text_matches_contract(profile) || !runtime_dir_is_optional(profile)) return 1;
+    if (!help_text_matches_contract(profile) || !runtime_dir_is_optional(profile) ||
+        !metadata_precedes_invalid_arguments(profile)) return 1;
     const char* version[] = {"sianoctl", "--version"};
     if (dtv::userland::host_ctl::run_control_cli(2, version, profile) != 0) return 1;
     const char* unsupported[] = {"sianoctl", "card-status"};

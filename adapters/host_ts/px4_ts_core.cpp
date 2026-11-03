@@ -32,6 +32,8 @@ using namespace ipc::posix;
 
 constexpr std::uint64_t kTsProgressTimeoutMs = 5000U;
 
+enum class Px4TsParseMode : std::uint8_t { normal, control };
+
 #if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
 std::atomic<bool> fail_next_frame_storage_allocation{false};
 #endif
@@ -130,16 +132,7 @@ bool valid_serial(std::string_view value) noexcept
 
 bool valid_instance(std::string_view value) noexcept
 {
-    if (value.empty() || value.size() > 80U || value == "." || value == ".." ||
-        valid_serial(value))
-        return false;
-    for (const char c : value) {
-        if ((c >= '0' && c <= '9') || (c >= 'A' && c <= 'Z') ||
-            (c >= 'a' && c <= 'z') || c == '_' || c == '-' || c == '.')
-            continue;
-        return false;
-    }
-    return true;
+    return dtv::userland::identity::canonicalize_instance(value).has_value();
 }
 
 bool valid_frequency(System system, std::uint64_t frequency) noexcept
@@ -149,7 +142,8 @@ bool valid_frequency(System system, std::uint64_t frequency) noexcept
                                     : frequency >= 146875U && frequency <= 2350000U;
 }
 
-bool valid_arguments(const Px4TsArguments& arguments) noexcept
+bool valid_arguments(const Px4TsArguments& arguments,
+                     bool allow_no_tuning = false) noexcept
 {
     if (arguments.product_cli) {
         constexpr std::uint64_t kMaxRequestedHz = (std::uint64_t{1U} << 53U) - 1U;
@@ -157,7 +151,8 @@ bool valid_arguments(const Px4TsArguments& arguments) noexcept
              !dtv::userland::identity::parse_device_selector(arguments.device)) ||
             (!arguments.instance.empty() && !valid_instance(arguments.instance)) ||
             (!arguments.common_profile && arguments.device.empty() && arguments.instance.empty()) ||
-            arguments.frequency_hz == 0U || arguments.frequency_hz > kMaxRequestedHz ||
+            (arguments.frequency_hz == 0U && !allow_no_tuning) ||
+            arguments.frequency_hz > kMaxRequestedHz ||
             arguments.frequency_khz != 0U || arguments.tune_timeout_ms < 100U ||
             arguments.tune_timeout_ms > 30000U ||
             (arguments.duration_set && arguments.duration_seconds == 0U) ||
@@ -167,6 +162,11 @@ bool valid_arguments(const Px4TsArguments& arguments) noexcept
             (arguments.duration_set && arguments.packet_count_set)) {
             return false;
         }
+        if (arguments.frequency_hz == 0U)
+            return arguments.tuning_explicit == false &&
+                   arguments.system == System::ISDB_T &&
+                   arguments.stream_id == 0xffffU && arguments.slot == 0xffffU &&
+                   arguments.bandwidth_hz == 6000000U;
         if (arguments.system == System::ISDB_T) {
             return arguments.stream_id == 0xffffU && arguments.slot == 0xffffU;
         }
@@ -418,9 +418,21 @@ Px4TsArguments parse_px4_ts_arguments(int argc,
     return result;
 }
 
+static bool takes_product_value(std::string_view option) noexcept
+{
+    return option == "-d" || option == "--device" || option == "--instance" ||
+           option == "--runtime-dir" || option == "--receiver" || option == "-c" ||
+           option == "--channel" || option == "-f" || option == "--freq" ||
+           option == "-s" || option == "--system" || option == "--slot" ||
+           option == "--tsid" || option == "-t" || option == "--time" ||
+           option == "-o" || option == "--output" || option == "--packet-count" ||
+           option == "--tune-timeout-ms";
+}
+
 static Px4TsArguments parse_product_arguments(int argc,
                                               const char* const* argv,
-                                              const TsClientProfile* profile) noexcept
+                                              const TsClientProfile* profile,
+                                              Px4TsParseMode mode) noexcept
 {
     using WireSystem = dtv::userland::wire::System;
     if (argc < 1 || argv == nullptr || argv[0] == nullptr)
@@ -429,6 +441,24 @@ static Px4TsArguments parse_product_arguments(int argc,
     result.product_cli = true;
     result.common_profile = profile != nullptr;
     result.bandwidth_hz = 6000000U;
+    bool request_help = false;
+    bool request_version = false;
+    for (int index = 1; index < argc; ++index) {
+        if (argv[index] == nullptr) continue;
+        const std::string_view token(argv[index]);
+        if (token == "-h" || token == "--help") request_help = true;
+        else if (token == "--version") request_version = true;
+        if (takes_product_value(token) && index + 1 < argc && argv[index + 1] != nullptr) {
+            const std::string_view value(argv[index + 1]);
+            if (value != "--help" && value != "--version") ++index;
+        }
+    }
+    if (request_help || request_version) {
+        result.valid = true;
+        result.help = request_help;
+        result.version = !request_help && request_version;
+        return result;
+    }
     bool have_device = false;
     bool have_instance = false;
     bool have_receiver = false;
@@ -438,6 +468,7 @@ static Px4TsArguments parse_product_arguments(int argc,
     bool have_slot = false;
     bool have_tsid = false;
     bool have_output = false;
+    bool have_runtime = false;
     bool have_timeout = false;
     bool have_time = false;
     std::string_view channel;
@@ -449,34 +480,12 @@ static Px4TsArguments parse_product_arguments(int argc,
     for (int index = 1; index < argc; ++index) {
         if (argv[index] == nullptr) return invalid("null argument");
         const std::string_view option(argv[index]);
-        if (option == "-h" || option == "--help") {
-            if (argc != 2) return invalid("--help cannot be combined");
-            result.valid = true;
-            result.help = true;
-            return result;
-        }
-        if (option == "--version") {
-            if (argc != 2) return invalid("--version cannot be combined");
-            result.valid = true;
-            result.version = true;
-            return result;
-        }
         if (option == "--group") {
             if (result.group) return invalid("duplicate --group");
             result.group = true;
             continue;
         }
-        const bool takes_value = option == "-d" || option == "--device" ||
-                                 option == "--instance" || option == "--runtime-dir" ||
-                                 option == "--receiver" || option == "-c" ||
-                                 option == "--channel" || option == "-f" ||
-                                 option == "--freq" || option == "-s" ||
-                                 option == "--system" || option == "--slot" ||
-                                 option == "--tsid" || option == "-t" ||
-                                 option == "--time" || option == "-o" ||
-                                 option == "--output" || option == "--packet-count" ||
-                                 option == "--tune-timeout-ms";
-        if (!takes_value) return invalid("unknown argument");
+        if (!takes_product_value(option)) return invalid("unknown argument");
         if (index + 1 >= argc || argv[index + 1] == nullptr)
             return invalid("option requires a value");
         const std::string_view value(argv[++index]);
@@ -492,7 +501,8 @@ static Px4TsArguments parse_product_arguments(int argc,
             have_instance = true;
             result.instance.assign(value.data(), value.size());
         } else if (option == "--runtime-dir") {
-            if (!result.runtime_directory.empty()) return invalid("duplicate --runtime-dir");
+            if (have_runtime) return invalid("duplicate --runtime-dir");
+            have_runtime = true;
             result.runtime_directory.assign(value.data(), value.size());
         } else if (option == "--receiver") {
             if (have_receiver || !parse_unsigned(value, result.receiver) ||
@@ -530,6 +540,7 @@ static Px4TsArguments parse_product_arguments(int argc,
         } else if (option == "-t" || option == "--time") {
             if (have_time) return invalid("duplicate --time");
             have_time = true;
+            result.time_explicit = true;
             if (value != "-") {
                 if (!parse_unsigned(value, result.duration_seconds))
                     return invalid("time must be seconds or -");
@@ -558,10 +569,15 @@ static Px4TsArguments parse_product_arguments(int argc,
                               dtv::userland::identity::SelectorKind::serial))
             return invalid("device must be a supported canonical serial: or usb: selector");
     }
-    if (!have_receiver && profile == nullptr) return invalid("--receiver is required");
+    if (!have_receiver) return invalid("--receiver is required");
     result.receiver_explicit = have_receiver;
-    if (have_channel == have_frequency)
+    result.tuning_explicit = have_channel || have_frequency;
+    if (have_channel && have_frequency)
         return invalid("exactly one of --channel or --freq is required");
+    if (!result.tuning_explicit && mode == Px4TsParseMode::normal)
+        return invalid("exactly one of --channel or --freq is required");
+    if (!result.tuning_explicit && (have_system || have_slot || have_tsid))
+        return invalid("tuning options require --channel or --freq");
     if (have_frequency && !have_system &&
         (profile == nullptr || !profile->frequency_system_optional))
         return invalid("--freq requires --system");
@@ -574,29 +590,29 @@ static Px4TsArguments parse_product_arguments(int argc,
     if (result.duration_set && result.packet_count_set)
         return invalid("--time and --packet-count are exclusive");
 
-    const dtv::tuning::Request request{have_channel
-                                           ? std::optional<std::string_view>(channel)
-                                           : std::nullopt,
-                                       frequency_hz, system, slot, tsid};
-    const auto resolved = dtv::tuning::resolve(request);
-    if (!resolved)
-        return invalid("channel, frequency, system, slot, or tsid is invalid");
-    result.system = resolved.value().system == WireSystem::isdb_t
-                        ? System::ISDB_T : System::ISDB_S;
-    result.frequency_hz = resolved.value().frequency_hz;
-    if (resolved.value().selection == dtv::userland::wire::Selection::slot) {
-        result.slot = resolved.value().selection_value;
-    } else if (resolved.value().selection == dtv::userland::wire::Selection::tsid) {
-        result.stream_id = resolved.value().selection_value;
-    }
-    if (result.system == System::ISDB_S) result.bandwidth_hz = 0U;
-    if (profile != nullptr && !profile->preserve_instance_case) {
-        for (char& character : result.instance) {
-            if (character >= 'A' && character <= 'Z')
-                character = static_cast<char>(character - 'A' + 'a');
+    if (result.tuning_explicit) {
+        const dtv::tuning::Request request{have_channel
+                                               ? std::optional<std::string_view>(channel)
+                                               : std::nullopt,
+                                           frequency_hz, system, slot, tsid};
+        const auto resolved = dtv::tuning::resolve(request);
+        if (!resolved)
+            return invalid("channel, frequency, system, slot, or tsid is invalid");
+        result.system = resolved.value().system == WireSystem::isdb_t
+                            ? System::ISDB_T : System::ISDB_S;
+        result.frequency_hz = resolved.value().frequency_hz;
+        if (resolved.value().selection == dtv::userland::wire::Selection::slot) {
+            result.slot = resolved.value().selection_value;
+        } else if (resolved.value().selection == dtv::userland::wire::Selection::tsid) {
+            result.stream_id = resolved.value().selection_value;
         }
     }
-    if (!valid_arguments(result)) return invalid("argument value is out of range");
+    if (result.system == System::ISDB_S) result.bandwidth_hz = 0U;
+    if (!result.tuning_explicit && mode == Px4TsParseMode::control &&
+        !result.time_explicit && !result.packet_count_set)
+        return invalid("control mode requires --time or --packet-count");
+    if (!valid_arguments(result, mode == Px4TsParseMode::control))
+        return invalid("argument value is out of range");
     result.valid = true;
     return result;
 }
@@ -604,7 +620,7 @@ static Px4TsArguments parse_product_arguments(int argc,
 Px4TsArguments parse_px4_ts_product_arguments(int argc,
                                               const char* const* argv) noexcept
 {
-    return parse_product_arguments(argc, argv, nullptr);
+    return parse_product_arguments(argc, argv, nullptr, Px4TsParseMode::normal);
 }
 
 Px4TsArguments parse_px4_ts_product_arguments(
@@ -613,7 +629,16 @@ Px4TsArguments parse_px4_ts_product_arguments(
     if (profile.tool_name == nullptr || profile.product_slug == nullptr ||
         profile.tool_name[0] == '\0' || profile.product_slug[0] == '\0')
         return invalid("invalid product profile");
-    return parse_product_arguments(argc, argv, &profile);
+    return parse_product_arguments(argc, argv, &profile, Px4TsParseMode::normal);
+}
+
+Px4TsArguments parse_px4_ts_control_arguments(
+    int argc, const char* const* argv, const TsClientProfile& profile) noexcept
+{
+    if (profile.tool_name == nullptr || profile.product_slug == nullptr ||
+        profile.tool_name[0] == '\0' || profile.product_slug[0] == '\0')
+        return invalid("invalid product profile");
+    return parse_product_arguments(argc, argv, &profile, Px4TsParseMode::control);
 }
 
 void print_px4_ts_usage(void* output) noexcept
@@ -643,7 +668,7 @@ void print_px4_ts_usage(const TsClientProfile& profile, void* output) noexcept
     if (file == nullptr || profile.tool_name == nullptr) return;
     std::fprintf(file,
                  "usage: %s [--device serial:...|usb:...] [--instance TOKEN] "
-                 "[--receiver ID] (-c|--channel CH | -f|--freq HZ -s|--system isdb-t|isdb-s) [options]\n"
+                 "--receiver ID (-c|--channel CH | -f|--freq HZ -s|--system isdb-t|isdb-s) [options]\n"
                  "  -c, --channel CH              (T13..T62 | 13..62 | BS<nn>[_<slot>] | CS<n>)\n"
                  "  -f, --freq HZ                 (unsigned decimal Hz)\n"
                  "  -s, --system isdb-t|isdb-s    (required with --freq)\n"
