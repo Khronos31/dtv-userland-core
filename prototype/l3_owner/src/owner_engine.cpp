@@ -41,11 +41,16 @@ OwnerEngine::Borrow::~Borrow() {
 void OwnerEngine::initialize_claims(std::uint32_t count) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        open_state_ = OpenState::Opening;
         claims_.assign(count, ClaimState::NotAttempted);
         claim_quiesced_.assign(count, true);
         claim_cleanup_errors_.assign(count, DTV_L3_OK);
-        open_result_ = DTV_L3_ACCEPTED;
+        claims_initialized_ = true;
+        if (close_requested_) {
+            open_state_ = OpenState::Closing;
+        } else {
+            open_state_ = OpenState::Opening;
+            open_result_ = DTV_L3_ACCEPTED;
+        }
     }
 
     bool failed = false;
@@ -243,16 +248,22 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
     if (!borrow) {
         return DTV_L3_BUSY;
     }
+    bool claims_initialized = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_state_ != OpenState::Opening || close_requested_) {
             return DTV_L3_OK;
         }
         close_requested_ = true;
-        open_state_ = OpenState::Closing;
+        claims_initialized = claims_initialized_;
+        if (claims_initialized) {
+            open_state_ = OpenState::Closing;
+        }
         state_condition_.notify_all();
     }
-    finish_close();
+    if (claims_initialized) {
+        finish_close();
+    }
     return DTV_L3_ACCEPTED;
 }
 
@@ -544,7 +555,7 @@ void OwnerEngine::on_completion(
 void OwnerEngine::finish_close() {
     std::lock_guard<std::mutex> lock(mutex_);
     if (!close_requested_ || cleanup_started_ || cleanup_attempted_ ||
-        cleanup_complete_ ||
+        cleanup_complete_ || !claims_initialized_ ||
         open_state_ == OpenState::Opening || provider_calls_in_flight_ != 0) {
         return;
     }

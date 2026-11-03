@@ -2,6 +2,7 @@
 #include <dtv/l3_owner.h>
 
 #include <pthread.h>
+#include <sched.h>
 #include <stdatomic.h>
 #include <stdio.h>
 #include <string.h>
@@ -21,7 +22,15 @@ struct fixture {
     atomic_int hold_release;
     atomic_int release_entered;
     atomic_int allow_release;
+    atomic_int hold_claim;
+    atomic_int claim_entered;
+    atomic_int allow_claim;
+    atomic_int hold_release_call;
 };
+
+extern void l3_test_hold_initialize(void);
+extern int l3_test_wait_initialize(void);
+extern void l3_test_release_initialize(void);
 
 static dtv_l3_claim_result provider_claim(void *context,
                                           dtv_l3_provider_binding *binding,
@@ -29,6 +38,11 @@ static dtv_l3_claim_result provider_claim(void *context,
     struct fixture *fixture = context;
     (void)binding;
     (void)claim_index;
+    if (atomic_load(&fixture->hold_claim)) {
+        atomic_store(&fixture->claim_entered, 1);
+        while (!atomic_load(&fixture->allow_claim)) {
+        }
+    }
     return fixture->claim_result;
 }
 
@@ -40,7 +54,9 @@ static dtv_l3_release_result provider_release(
     (void)binding;
     (void)claim_index;
     ++fixture->release_calls;
-    if (atomic_load(&fixture->hold_release) && fixture->release_calls == 1) {
+    if (atomic_load(&fixture->hold_release) &&
+        fixture->release_calls ==
+            (unsigned int)atomic_load(&fixture->hold_release_call)) {
         atomic_store(&fixture->release_entered, 1);
         while (!atomic_load(&fixture->allow_release)) {
         }
@@ -101,6 +117,10 @@ static struct fixture fixture_new(void) {
     atomic_init(&fixture.hold_release, 0);
     atomic_init(&fixture.release_entered, 0);
     atomic_init(&fixture.allow_release, 0);
+    atomic_init(&fixture.hold_claim, 0);
+    atomic_init(&fixture.claim_entered, 0);
+    atomic_init(&fixture.allow_claim, 0);
+    atomic_init(&fixture.hold_release_call, 1);
     return fixture;
 }
 
@@ -119,6 +139,7 @@ static int wait_open(dtv_l3_op *op, dtv_l3_op_result *result) {
             result->state == DTV_L3_OP_FAILED) {
             return 1;
         }
+        sched_yield();
     }
     return 0;
 }
@@ -160,6 +181,16 @@ static int finish_context(dtv_l3_context *owner) {
         }
     }
     return 0;
+}
+
+static dtv_l3_result release_context_after_open(dtv_l3_context *owner) {
+    dtv_l3_result result = DTV_L3_BUSY;
+    unsigned int attempt;
+    for (attempt = 0; attempt < 1000000 && result == DTV_L3_BUSY; ++attempt) {
+        result = dtv_l3_context_release(owner);
+        sched_yield();
+    }
+    return result;
 }
 
 static int test_rejected_submit_recovered(void) {
@@ -383,6 +414,149 @@ static int test_open_terminal_poll_stable_during_close(void) {
                : 5;
 }
 
+static int test_open_cancel_before_initialize(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_close_status status;
+    unsigned int attempt;
+    int observed;
+    int cleanup_before_initialize = 0;
+
+    l3_test_hold_initialize();
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED ||
+        !l3_test_wait_initialize()) {
+        l3_test_release_initialize();
+        return 1;
+    }
+    observed = dtv_l3_op_cancel(opened.op) == DTV_L3_ACCEPTED &&
+               dtv_l3_close_status_get(opened.owner, &status) == DTV_L3_OK &&
+               dtv_l3_op_poll(opened.op, &result) == DTV_L3_OK &&
+               result.state == DTV_L3_OP_RUNNING;
+    for (attempt = 0; attempt < 1000000; ++attempt) {
+        if (dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK) {
+            cleanup_before_initialize = 1;
+            break;
+        }
+        if (status.cleanup_complete) {
+            cleanup_before_initialize = status.cleanup_complete;
+            break;
+        }
+        sched_yield();
+    }
+    l3_test_release_initialize();
+    if (!wait_open(opened.op, &result) ||
+        result.state != DTV_L3_OP_FAILED ||
+        result.result != DTV_L3_CANCELLED ||
+        dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK ||
+        !status.cleanup_complete || !status.all_ops_recovered ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK ||
+        release_context_after_open(opened.owner) != DTV_L3_OK) {
+        return 2;
+    }
+    return observed && !cleanup_before_initialize ? 0 : 3;
+}
+
+static int test_repeated_open_cancel_keeps_request(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_close_status status;
+    int observed;
+
+    atomic_store(&fixture.hold_claim, 1);
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED) {
+        return 1;
+    }
+    while (!atomic_load(&fixture.claim_entered)) {
+        sched_yield();
+    }
+    observed = dtv_l3_op_cancel(opened.op) == DTV_L3_ACCEPTED &&
+               dtv_l3_op_cancel(opened.op) == DTV_L3_OK;
+    atomic_store(&fixture.allow_claim, 1);
+    if (!wait_open(opened.op, &result) ||
+        result.result != DTV_L3_CANCELLED ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK ||
+        dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK ||
+        !status.cleanup_complete || !status.all_ops_recovered ||
+        release_context_after_open(opened.owner) != DTV_L3_OK) {
+        return 2;
+    }
+    return observed ? 0 : 3;
+}
+
+static int test_open_terminal_epoch_is_stable_during_retry(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_op_result initial;
+    dtv_l3_op_result observed;
+    dtv_l3_close_status status;
+    unsigned int attempt;
+    int stable;
+    int owner_busy;
+
+    fixture.retain_first_release = 1;
+    atomic_store(&fixture.hold_release, 1);
+    atomic_store(&fixture.hold_release_call, 2);
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED || !wait_open(opened.op, &initial) ||
+        initial.state != DTV_L3_OP_DONE) {
+        return 1;
+    }
+    {
+        const dtv_l3_result close_result = dtv_l3_close(opened.owner, 0);
+        if (close_result != DTV_L3_OK && close_result != DTV_L3_TIMEOUT) {
+            return 2;
+        }
+    }
+    for (attempt = 0; attempt < 1000000; ++attempt) {
+        if (dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK) {
+            return 2;
+        }
+        if (status.physical_quiesced) {
+            break;
+        }
+        sched_yield();
+    }
+    if (attempt == 1000000) {
+        return 2;
+    }
+    if (dtv_l3_cleanup_retry(opened.owner) != DTV_L3_ACCEPTED) {
+        return 3;
+    }
+    while (!atomic_load(&fixture.release_entered)) {
+        sched_yield();
+    }
+    stable = dtv_l3_op_poll(opened.op, &observed) == DTV_L3_OK &&
+             observed.state == initial.state &&
+             observed.result == initial.result &&
+             observed.cleanup_epoch == initial.cleanup_epoch;
+    if (dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        atomic_store(&fixture.allow_release, 1);
+        return 2;
+    }
+    owner_busy = dtv_l3_context_release(opened.owner) == DTV_L3_BUSY;
+    atomic_store(&fixture.allow_release, 1);
+    for (attempt = 0; attempt < 1000000; ++attempt) {
+        if (dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK) {
+            return 2;
+        }
+        if (status.cleanup_complete) {
+            break;
+        }
+        sched_yield();
+    }
+    if (attempt == 1000000 || dtv_l3_context_release(opened.owner) != DTV_L3_OK) {
+        return 3;
+    }
+    return stable && owner_busy ? 0 : 4;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         return 64;
@@ -398,6 +572,15 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "poll") == 0) {
         return test_open_terminal_poll_stable_during_close();
+    }
+    if (strcmp(argv[1], "preinit-cancel") == 0) {
+        return test_open_cancel_before_initialize();
+    }
+    if (strcmp(argv[1], "repeat-cancel") == 0) {
+        return test_repeated_open_cancel_keeps_request();
+    }
+    if (strcmp(argv[1], "epoch") == 0) {
+        return test_open_terminal_epoch_is_stable_during_retry();
     }
     return 64;
 }

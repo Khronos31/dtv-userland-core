@@ -53,6 +53,7 @@ struct dtv_l3_open_op_state {
     bool cancel_requested = false;
     dtv_l3_op_state state = DTV_L3_OP_RUNNING;
     dtv_l3_result result = DTV_L3_ACCEPTED;
+    std::uint64_t cleanup_epoch = 0;
 };
 
 struct dtv_l3_context {
@@ -100,6 +101,7 @@ static dtv_l3_result poll_open_op(dtv_l3_context *owner,
             snapshot.open_result == DTV_L3_OK ? DTV_L3_OP_DONE
                                                : DTV_L3_OP_FAILED;
         owner->open_op_state.result = snapshot.open_result;
+        owner->open_op_state.cleanup_epoch = snapshot.cleanup_epoch;
     } else if (!owner->open_op_state.terminal &&
                snapshot.open_state ==
                    l3_owner_prototype::OwnerEngine::OpenState::Closed) {
@@ -108,6 +110,7 @@ static dtv_l3_result poll_open_op(dtv_l3_context *owner,
         owner->open_op_state.result = owner->open_op_state.cancel_requested
                                           ? DTV_L3_CANCELLED
                                           : DTV_L3_FAILED;
+        owner->open_op_state.cleanup_epoch = snapshot.cleanup_epoch;
     }
     result->kind = DTV_L3_OP_KIND_OPEN;
     result->state = owner->open_op_state.terminal
@@ -116,7 +119,9 @@ static dtv_l3_result poll_open_op(dtv_l3_context *owner,
     result->result = owner->open_op_state.terminal
                          ? owner->open_op_state.result
                          : DTV_L3_ACCEPTED;
-    result->cleanup_epoch = snapshot.cleanup_epoch;
+    result->cleanup_epoch = owner->open_op_state.terminal
+                                ? owner->open_op_state.cleanup_epoch
+                                : snapshot.cleanup_epoch;
     result->data = nullptr;
     result->data_size = 0;
     return DTV_L3_OK;
@@ -281,22 +286,15 @@ dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op) {
         if (result.state != DTV_L3_OP_RUNNING) {
             return DTV_L3_OK;
         }
+        dtv_l3_result cancel_result;
         {
             std::lock_guard<std::mutex> lock(op->owner->open_op_state.mutex);
             if (op->owner->open_op_state.terminal) {
                 return DTV_L3_OK;
             }
-            op->owner->open_op_state.cancel_requested = true;
-        }
-        const auto cancel_result =
-            op->owner->engine->cancel_open_if_opening();
-        if (cancel_result == DTV_L3_ACCEPTED) {
-            return cancel_result;
-        }
-        {
-            std::lock_guard<std::mutex> lock(op->owner->open_op_state.mutex);
-            if (!op->owner->open_op_state.terminal) {
-                op->owner->open_op_state.cancel_requested = false;
+            cancel_result = op->owner->engine->cancel_open_if_opening();
+            if (cancel_result == DTV_L3_ACCEPTED) {
+                op->owner->open_op_state.cancel_requested = true;
             }
         }
         if (cancel_result == DTV_L3_OK) {

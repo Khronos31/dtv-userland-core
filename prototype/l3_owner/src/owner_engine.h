@@ -151,6 +151,7 @@ private:
     bool released_ = false;
     std::size_t active_borrows_ = 0;
     OpenState open_state_ = OpenState::Opening;
+    bool claims_initialized_ = false;
     bool close_requested_ = false;
     bool physical_quiesced_ = false;
     bool cleanup_complete_ = false;

@@ -24,9 +24,13 @@ target_include_directories(l3_header_c PRIVATE include)
 target_link_libraries(l3_header_c PRIVATE l3_owner_model Threads::Threads)
 set_target_properties(l3_header_c PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
 
-add_executable(l3_public_contract_c tests/c_contract_regressions.c)
+add_executable(l3_public_contract_c tests/c_contract_regressions.c
+    tests/initialize_claims_wrap.cpp)
 target_include_directories(l3_public_contract_c PRIVATE include)
+target_include_directories(l3_public_contract_c PRIVATE src)
 target_link_libraries(l3_public_contract_c PRIVATE l3_owner_model Threads::Threads)
+target_link_options(l3_public_contract_c PRIVATE
+    "LINKER:--wrap=_ZN18l3_owner_prototype11OwnerEngine17initialize_claimsEj")
 target_compile_options(l3_public_contract_c PRIVATE -Wall -Wextra -Werror)
 set_target_properties(l3_public_contract_c PROPERTIES
     C_STANDARD 11
@@ -53,4 +57,7 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_open_cancel_local COMMAND l3_public_contract_c cancel)
     add_test(NAME l3_c_release_nonblocking COMMAND l3_public_contract_c release)
     add_test(NAME l3_c_open_poll_stable COMMAND l3_public_contract_c poll)
+    add_test(NAME l3_c_open_cancel_preinit COMMAND l3_public_contract_c preinit-cancel)
+    add_test(NAME l3_c_open_cancel_repeat COMMAND l3_public_contract_c repeat-cancel)
+    add_test(NAME l3_c_open_epoch_stable COMMAND l3_public_contract_c epoch)
 endif()
