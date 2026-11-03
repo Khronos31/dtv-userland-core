@@ -257,6 +257,32 @@ dtv_l3_result OwnerEngine::poll(
     return DTV_L3_OK;
 }
 
+dtv_l3_result OwnerEngine::poll_result(
+    const std::shared_ptr<Operation> &operation,
+    dtv_l3_op_state *state,
+    dtv_l3_result *result,
+    const std::uint8_t **data,
+    std::size_t *data_size) {
+    if (!operation || state == nullptr || result == nullptr || data == nullptr ||
+        data_size == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    Borrow borrow(*this);
+    if (!borrow) {
+        return DTV_L3_BUSY;
+    }
+    std::lock_guard<std::mutex> lock(mutex_);
+    const auto found = operations_.find(operation->id);
+    if (found == operations_.end() || found->second != operation) {
+        return DTV_L3_INVALID;
+    }
+    *state = operation->state;
+    *result = operation->result;
+    *data = operation->response.empty() ? nullptr : operation->response.data();
+    *data_size = operation->response.size();
+    return DTV_L3_OK;
+}
+
 dtv_l3_result OwnerEngine::release_operation(
     const std::shared_ptr<Operation> &operation) {
     if (!operation) {
@@ -346,6 +372,7 @@ dtv_l3_result OwnerEngine::close_status(Snapshot *snapshot) {
             return state == ClaimState::InFlight || state == ClaimState::Ready ||
                    state == ClaimState::Retained || state == ClaimState::Unknown;
         });
+    snapshot->cleanup_epoch = cleanup_epoch_;
     snapshot->last_cleanup_error = last_cleanup_error_;
     snapshot->open_result = open_result_;
     snapshot->cleanup_result = last_cleanup_error_;
@@ -371,6 +398,7 @@ dtv_l3_result OwnerEngine::retry_cleanup() {
     cleanup_attempted_ = false;
     cleanup_complete_ = false;
     physical_quiesced_ = false;
+    ++cleanup_epoch_;
     lock.unlock();
     finish_close();
     return DTV_L3_ACCEPTED;

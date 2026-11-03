@@ -60,6 +60,7 @@ public:
         std::size_t claims_attempted;
         std::size_t transfer_ready_claims;
         std::size_t cleanup_claims_remaining;
+        std::uint64_t cleanup_epoch;
         dtv_l3_result open_result;
         dtv_l3_result cleanup_result;
         dtv_l3_result last_cleanup_error;
@@ -96,6 +97,11 @@ public:
     dtv_l3_result cancel(const std::shared_ptr<Operation> &operation);
     dtv_l3_result poll(const std::shared_ptr<Operation> &operation,
                        dtv_l3_op_state *state);
+    dtv_l3_result poll_result(const std::shared_ptr<Operation> &operation,
+                              dtv_l3_op_state *state,
+                              dtv_l3_result *result,
+                              const std::uint8_t **data,
+                              std::size_t *data_size);
     dtv_l3_result release_operation(const std::shared_ptr<Operation> &operation);
     dtv_l3_result close(std::uint32_t timeout_ms);
     dtv_l3_result close_status(Snapshot *snapshot);
@@ -153,6 +159,7 @@ private:
     std::size_t provider_calls_in_flight_ = 0;
     std::size_t cleanup_count_ = 0;
     std::size_t release_count_ = 0;
+    std::uint64_t cleanup_epoch_ = 1;
     std::uint32_t claimed_count_ = 0;
     std::vector<ClaimState> claims_;
     std::vector<bool> claim_quiesced_;

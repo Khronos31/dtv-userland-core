@@ -32,6 +32,11 @@ typedef enum dtv_l3_op_state {
     DTV_L3_OP_FAILED = 3
 } dtv_l3_op_state;
 
+typedef enum dtv_l3_op_kind {
+    DTV_L3_OP_KIND_OPEN = 1,
+    DTV_L3_OP_KIND_TRANSFER = 2
+} dtv_l3_op_kind;
+
 typedef enum dtv_l3_transfer_kind {
     DTV_L3_TRANSFER_BULK = 1,
     DTV_L3_TRANSFER_CONTROL = 2
@@ -148,10 +153,12 @@ typedef struct dtv_l3_provider {
 typedef struct dtv_l3_open_result {
     dtv_l3_result result;
     dtv_l3_context *owner;
+    dtv_l3_op *op;
 } dtv_l3_open_result;
 
 typedef struct dtv_l3_open_status {
     dtv_l3_open_state state;
+    dtv_l3_result result;
     uint32_t claims_acquired;
     uint32_t claims_attempted;
     uint32_t cleanup_claims_remaining;
@@ -162,11 +169,21 @@ typedef struct dtv_l3_open_status {
 
 typedef struct dtv_l3_close_status {
     dtv_l3_result result;
+    uint64_t cleanup_epoch;
     uint8_t physical_quiesced;
     uint8_t all_ops_recovered;
     uint8_t cleanup_complete;
     uint8_t reserved;
 } dtv_l3_close_status;
+
+typedef struct dtv_l3_op_result {
+    dtv_l3_op_kind kind;
+    dtv_l3_op_state state;
+    dtv_l3_result result;
+    uint64_t cleanup_epoch;
+    const uint8_t *data;
+    size_t data_size;
+} dtv_l3_op_result;
 
 /* ACCEPTED transfers an owner before claim work; later failure keeps it recoverable. */
 dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
@@ -180,6 +197,7 @@ dtv_l3_result dtv_l3_close(dtv_l3_context *owner, uint32_t timeout_ms);
 dtv_l3_result dtv_l3_close_status_get(
     dtv_l3_context *owner,
     dtv_l3_close_status *status);
+dtv_l3_result dtv_l3_cleanup_retry(dtv_l3_context *owner);
 
 /*
  * The host stops issuing calls and drains calls already being issued before
@@ -194,7 +212,8 @@ dtv_l3_result dtv_l3_transfer_start(
     const dtv_l3_transfer_request *request,
     dtv_l3_op **op);
 dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op);
-dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_state *state);
+/* Transfer result data remains valid until this operation handle is released. */
+dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_result *result);
 dtv_l3_result dtv_l3_op_release(dtv_l3_op *op);
 
 #ifdef __cplusplus
