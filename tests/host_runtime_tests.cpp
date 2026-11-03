@@ -493,6 +493,8 @@ bool default_runtime_roots_test()
 
     const std::string selected_path = canonical_path(temporary_parent) + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
+    const std::string os_fallback_path = canonical_path("/tmp") + "/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
     struct stat unsafe_info_before{};
     const bool unsafe_stat_before = ::lstat(unsafe_xdg.c_str(), &unsafe_info_before) == 0;
     const auto selected = px4::userland::ipc::posix::select_publish_runtime_root(
@@ -545,8 +547,14 @@ bool default_runtime_roots_test()
     const auto long_publish_root =
         px4::userland::ipc::posix::select_publish_runtime_root(
             "asicen-userland", "abcdefghijklmnopqrst");
+    dtv::userland::host_runtime::EndpointConfig long_temporary_endpoint{
+        selected_path, "asicen-userland", "abcdefghijklmnopqrst"};
+    const auto long_temporary_endpoint_path =
+        dtv::userland::host_runtime::control_endpoint_path(long_temporary_endpoint);
+    const std::string long_publish_expected = long_temporary_endpoint_path
+        ? selected_path : os_fallback_path;
     ok = ok && long_lease_root && long_lease_root.value() == long_xdg &&
-        long_publish_root && long_publish_root.value() == selected_path;
+        long_publish_root && long_publish_root.value() == long_publish_expected;
     if (!ok) std::fprintf(stderr,
         "runtime default long-path selection failed: lease=%s expected=%s publish=%s expected=%s\n",
         long_lease_root ? long_lease_root.value().c_str() : "",
@@ -575,7 +583,7 @@ bool default_runtime_roots_test()
         long_connect_diagnostic.stage ==
             dtv::userland::host_runtime::EndpointConnectStage::endpoint_path &&
         long_connect_diagnostic.endpoint.path_bytes == long_path_diagnostic.path_bytes &&
-        long_path_fallback && long_path_fallback.value() == selected_path &&
+        long_path_fallback && long_path_fallback.value() == long_publish_expected &&
         saved_xdg.set(unsafe_xdg.c_str());
 
     dtv::userland::host_runtime::EndpointConfig invalid_instance{
@@ -746,13 +754,17 @@ bool unsafe_ancestor_runtime_candidate_test()
     const std::string parent = branch + "/t";
     const std::string root_path = parent + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
+    const std::string safe_temporary = base + "/safe-tmp";
+    const std::string safe_root = safe_temporary + "/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
     const std::string product_path = root_path + "/fake-native";
     const std::string version_path = product_path + "/v1";
     const std::string instance_path = version_path + "/x";
     bool ok = make_directory(shared) && ::chmod(shared.c_str(), 0777) == 0 &&
         make_directory(branch) && make_directory(parent) && make_directory(root_path) &&
         make_directory(product_path) && make_directory(version_path) &&
-        make_directory(instance_path);
+        make_directory(instance_path) && make_directory(safe_temporary) &&
+        make_directory(safe_root);
     const std::string root = canonical_path(root_path);
     const std::string product = root + "/fake-native";
     const std::string version = product + "/v1";
@@ -760,8 +772,7 @@ bool unsafe_ancestor_runtime_candidate_test()
     ok = ok && !root.empty();
     EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
     EnvironmentValue saved_tmp("TMPDIR");
-    const std::string missing = base + "/missing";
-    ok = ok && saved_xdg.set(root.c_str()) && saved_tmp.set(missing.c_str());
+    ok = ok && saved_xdg.set(root.c_str()) && saved_tmp.set(safe_temporary.c_str());
 
     int listener = -1;
     std::string socket_path;
@@ -803,6 +814,8 @@ bool unsafe_ancestor_runtime_candidate_test()
     (void)::rmdir(version.c_str());
     (void)::rmdir(product.c_str());
     (void)::rmdir(root.c_str());
+    (void)::rmdir(safe_root.c_str());
+    (void)::rmdir(safe_temporary.c_str());
     (void)::rmdir(parent.c_str());
     (void)::rmdir(branch.c_str());
     (void)::rmdir(shared.c_str());
