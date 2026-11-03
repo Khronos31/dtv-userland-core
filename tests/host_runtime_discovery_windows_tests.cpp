@@ -125,10 +125,39 @@ bool test_windows_runtime_instance_discovery()
     return true;
 }
 
+bool test_windows_default_runtime_root()
+{
+    std::array<wchar_t, 32768U> original{};
+    const DWORD count = ::GetEnvironmentVariableW(L"LOCALAPPDATA", original.data(),
+        static_cast<DWORD>(original.size()));
+    const bool had_value = count > 0U && count < original.size();
+    std::string expected;
+    if (!had_value || !to_utf8(std::wstring(original.data()), expected)) return false;
+
+    const auto roots = px4::userland::ipc::posix::client_runtime_roots();
+    const auto publish = px4::userland::ipc::posix::select_publish_runtime_root(
+        "px4-userland", "windows-default");
+    const auto lease = px4::userland::ipc::posix::select_lease_runtime_root();
+    bool ok = roots && roots.value().count == 1U &&
+        std::string(roots.value().paths[0U].data()) == expected && publish && lease &&
+        publish.value() == expected && lease.value() == expected;
+
+    (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", L"C:\\Windows\\Temp");
+    const auto unsafe = px4::userland::ipc::posix::client_runtime_roots();
+    ok = ok && !unsafe && unsafe.error() == px4::userland::Error::NOT_FOUND;
+    (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", nullptr);
+    const auto missing = px4::userland::ipc::posix::client_runtime_roots();
+    ok = ok && !missing && missing.error() == px4::userland::Error::NOT_FOUND;
+    (void)::SetEnvironmentVariableW(L"LOCALAPPDATA", original.data());
+    if (ok) std::cout << "windows_LOCALAPPDATA_default_unsafe_missing=PASS\n";
+    return ok;
+}
+
 }  // namespace
 
 int main()
 {
     if (!test_windows_runtime_instance_discovery()) return 1;
+    if (!test_windows_default_runtime_root()) return 1;
     return 0;
 }

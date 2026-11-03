@@ -122,13 +122,8 @@ bool same_identity(const struct stat& left, const struct stat& right) noexcept
 
 bool resolve_runtime(std::string_view configured, std::string& runtime) noexcept
 {
-    if (configured.empty()) {
-        const char* environment = std::getenv("XDG_RUNTIME_DIR");
-        if (environment == nullptr || environment[0] == '\0') return false;
-        runtime = environment;
-    } else {
-        runtime.assign(configured.data(), configured.size());
-    }
+    if (configured.empty()) return false;
+    runtime.assign(configured.data(), configured.size());
     if (runtime.empty() || runtime.front() != '/') return false;
     while (runtime.size() > 1U && runtime.back() == '/') runtime.pop_back();
     return true;

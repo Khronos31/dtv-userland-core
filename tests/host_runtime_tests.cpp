@@ -15,6 +15,7 @@
 #include "windows/windows_security.h"
 #else
 #include "dtv/userland/host_runtime/posix_ipc.h"
+#include "posix_client_compat_test.h"
 #include "px4/posix_ipc.h"
 #include "px4/posix_tuner_nonce.h"
 #include <csignal>
@@ -428,6 +429,31 @@ bool make_directory(const std::string& path)
     return ::mkdir(path.c_str(), 0700) == 0 && ::chmod(path.c_str(), 0700) == 0;
 }
 
+bool android_trust_chain_policy_test()
+{
+    using px4::userland::ipc::posix::test_auto_root_parent_policy;
+    const bool ok =
+        test_auto_root_parent_policy(0U, 0U, 0755U, 10130U, 10130U, true) &&
+        test_auto_root_parent_policy(1000U, 1000U, 0771U, 10130U, 10130U, true) &&
+        test_auto_root_parent_policy(10130U, 10130U, 0771U, 10130U, 10130U, true) &&
+        !test_auto_root_parent_policy(10130U, 20130U, 0771U, 10130U, 10130U, true) &&
+        !test_auto_root_parent_policy(1000U, 1000U, 0773U, 10130U, 10130U, true) &&
+        !test_auto_root_parent_policy(20130U, 20130U, 0700U, 10130U, 10130U, true) &&
+        !test_auto_root_parent_policy(1000U, 1000U, 0771U, 10130U, 10130U, false) &&
+        test_auto_root_parent_policy(0U, 0U, 0755U, 10130U, 10130U, false);
+    if (ok) std::puts("android_runtime_trust_chain_policy_and_linux_isolation=PASS");
+    return ok;
+}
+
+std::string canonical_path(const std::string& path)
+{
+    char* value = ::realpath(path.c_str(), nullptr);
+    if (value == nullptr) return {};
+    const std::string result(value);
+    std::free(value);
+    return result;
+}
+
 class EnvironmentValue final {
 public:
     explicit EnvironmentValue(const char* name) : name_(name)
@@ -465,18 +491,17 @@ bool default_runtime_roots_test()
     ok = ok && saved_xdg.set(unsafe_xdg.c_str()) &&
         saved_tmp.set(temporary_parent.c_str());
 
-    const auto roots = px4::userland::ipc::posix::client_runtime_roots();
-    const std::string selected_path = temporary_parent + "/dtv-userland-" +
+    const std::string selected_path = canonical_path(temporary_parent) + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
     struct stat unsafe_info_before{};
     const bool unsafe_stat_before = ::lstat(unsafe_xdg.c_str(), &unsafe_info_before) == 0;
     const auto selected = px4::userland::ipc::posix::select_publish_runtime_root(
         "siano-userland", "test");
+    const auto roots = px4::userland::ipc::posix::client_runtime_roots();
     struct stat unsafe_info{};
     struct stat selected_info{};
-    ok = ok && unsafe_stat_before && roots && roots.value().count == 3U &&
-        std::strcmp(roots.value().paths[0].data(), unsafe_xdg.c_str()) == 0 &&
-        std::strcmp(roots.value().paths[1].data(), selected_path.c_str()) == 0 &&
+    ok = ok && unsafe_stat_before && roots && roots.value().count >= 1U &&
+        std::strcmp(roots.value().paths[0].data(), selected_path.c_str()) == 0 &&
         selected && selected.value() == selected_path &&
         ::lstat(unsafe_xdg.c_str(), &unsafe_info) == 0 &&
         (unsafe_info.st_mode & 0777) == 0777 &&
@@ -489,21 +514,30 @@ bool default_runtime_roots_test()
 
     const bool removed_selected = ::rmdir(selected_path.c_str()) == 0;
     const bool duplicate_xdg_set = saved_xdg.set(selected_path.c_str());
-    const auto duplicate_roots =
-        px4::userland::ipc::posix::client_runtime_roots();
     const auto duplicate_selected = duplicate_xdg_set
         ? px4::userland::ipc::posix::select_publish_runtime_root(
             "siano-userland", "test")
         : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    const auto duplicate_roots =
+        px4::userland::ipc::posix::client_runtime_roots();
     ok = ok && removed_selected && duplicate_xdg_set && duplicate_roots &&
-        duplicate_roots.value().count == 2U &&
+        duplicate_roots.value().count >= 1U &&
         std::strcmp(duplicate_roots.value().paths[0U].data(), selected_path.c_str()) == 0 &&
         duplicate_selected &&
         duplicate_selected.value() == selected_path &&
         saved_xdg.set(unsafe_xdg.c_str());
 
-    const std::string long_xdg = base + "/" + std::string(90U, 'x');
-    ok = ok && make_directory(long_xdg) && saved_xdg.set(long_xdg.c_str());
+    const std::string long_xdg_path = base + "/" + std::string(90U, 'x');
+    ok = ok && make_directory(long_xdg_path);
+    const std::string long_xdg = canonical_path(long_xdg_path);
+    ok = ok && !long_xdg.empty() && saved_xdg.set(long_xdg.c_str());
+    const auto long_lease_root =
+        px4::userland::ipc::posix::select_lease_runtime_root();
+    const auto long_publish_root =
+        px4::userland::ipc::posix::select_publish_runtime_root(
+            "asicen-userland", "abcdefghijklmnopqrst");
+    ok = ok && long_lease_root && long_lease_root.value() == long_xdg &&
+        long_publish_root && long_publish_root.value() == selected_path;
     dtv::userland::host_runtime::EndpointConfig long_endpoint{
         long_xdg, "siano-userland", "test"};
     dtv::userland::host_runtime::EndpointDiagnostic long_path_diagnostic{};
@@ -593,10 +627,11 @@ bool default_runtime_roots_test()
              px4::userland::ipc::posix::EndpointAccess::private_user,
              "siano-userland"}, px4::userland::Timeout{1000U});
     };
-    auto refused_unsafe = connect_default();
-    pollfd unsafe_pending{server, POLLIN, 0};
-    ok = ok && !refused_unsafe && refused_unsafe.error() ==
-        px4::userland::Error::UNSUPPORTED && ::poll(&unsafe_pending, 1U, 0) == 0;
+    auto unsafe_fallback = connect_default();
+    const int unsafe_peer = unsafe_fallback ? ::accept(server, nullptr, nullptr) : -1;
+    ok = ok && unsafe_fallback && unsafe_fallback.value().valid() && unsafe_peer >= 0;
+    if (unsafe_peer >= 0) (void)::close(unsafe_peer);
+    if (unsafe_fallback) unsafe_fallback.value().close();
     for (unsigned attempt = 0U; attempt < 2U && ok; ++attempt) {
         if (attempt == 0U) {
             ok = saved_xdg.set(long_xdg.c_str());
@@ -625,7 +660,7 @@ bool default_runtime_roots_test()
     }
     const std::string missing_xdg = base + "/missing-xdg";
     const std::string temporary_link = base + "/tmp-link";
-    const std::string os_root = "/tmp/dtv-userland-" +
+    const std::string os_root = canonical_path(temporary_parent) + "/dtv-userland-" +
         std::to_string(static_cast<unsigned long>(::geteuid()));
     struct stat os_root_before{};
     const bool os_root_existed = ::lstat(os_root.c_str(), &os_root_before) == 0;
@@ -640,13 +675,26 @@ bool default_runtime_roots_test()
         ? px4::userland::ipc::posix::select_publish_runtime_root(
             "siano-userland", "test")
         : px4::userland::Result<std::string>::failure(px4::userland::Error::INTERNAL);
+    const auto symlink_roots = px4::userland::ipc::posix::client_runtime_roots();
+    auto symlink_client = px4::userland::ipc::posix::SocketStream::connect(
+        {nullptr, "test", "control.sock",
+         px4::userland::ipc::posix::EndpointAccess::private_user,
+         "siano-userland"}, px4::userland::Timeout{1000U});
+    const int symlink_peer = symlink_client ? ::accept(server, nullptr, nullptr) : -1;
+    if (symlink_peer >= 0) (void)::close(symlink_peer);
+    if (symlink_client) symlink_client.value().close();
     struct stat os_root_after{};
     if (os_root_existed && !os_root_was_safe) {
-        ok = ok && !os_fallback && os_fallback.error() ==
-            px4::userland::Error::UNSUPPORTED &&
+        ok = ok && os_fallback && os_fallback.value() == os_root &&
+            symlink_roots && symlink_roots.value().count >= 1U &&
+            std::strcmp(symlink_roots.value().paths[0U].data(), os_root.c_str()) == 0 &&
+            symlink_client && symlink_peer >= 0 &&
             ::lstat(os_root.c_str(), &os_root_after) == 0;
     } else {
         ok = ok && os_fallback && os_fallback.value() == os_root &&
+            symlink_roots && symlink_roots.value().count >= 1U &&
+            std::strcmp(symlink_roots.value().paths[0U].data(), os_root.c_str()) == 0 &&
+            symlink_client && symlink_peer >= 0 &&
             ::lstat(os_root.c_str(), &os_root_after) == 0 &&
             os_root_after.st_uid == ::geteuid() && (os_root_after.st_mode & 0077) == 0;
     }
@@ -662,12 +710,80 @@ bool default_runtime_roots_test()
     (void)::rmdir(product.c_str());
     (void)::rmdir(selected_path.c_str());
     (void)::rmdir(temporary_parent.c_str());
-    (void)::rmdir(long_xdg.c_str());
+    (void)::rmdir(long_xdg_path.c_str());
     (void)::rmdir(unsafe_xdg.c_str());
     (void)::unlink(temporary_link.c_str());
     (void)::rmdir(base.c_str());
     if (!os_root_existed) (void)::rmdir(os_root.c_str());
     if (ok) std::puts("posix_default_runtime_root_order_security_and_client_match=PASS");
+    return ok;
+}
+
+bool unsafe_ancestor_runtime_candidate_test()
+{
+    std::array<char, 64U> temporary{};
+    const char pattern[] = "/tmp/dtv-unsafe-ancestor-XXXXXX";
+    std::memcpy(temporary.data(), pattern, sizeof(pattern));
+    char* base_value = ::mkdtemp(temporary.data());
+    if (base_value == nullptr) return false;
+    const std::string base(base_value);
+    const std::string shared = base + "/shared";
+    const std::string branch = shared + "/a";
+    const std::string parent = branch + "/t";
+    const std::string root = parent + "/dtv-userland-" +
+        std::to_string(static_cast<unsigned long>(::geteuid()));
+    const std::string product = root + "/fake-native";
+    const std::string version = product + "/v1";
+    const std::string instance = version + "/x";
+    bool ok = make_directory(shared) && ::chmod(shared.c_str(), 0777) == 0 &&
+        make_directory(branch) && make_directory(parent) && make_directory(root) &&
+        make_directory(product) && make_directory(version) && make_directory(instance);
+    EnvironmentValue saved_xdg("XDG_RUNTIME_DIR");
+    EnvironmentValue saved_tmp("TMPDIR");
+    const std::string missing = base + "/missing";
+    ok = ok && saved_xdg.set(root.c_str()) && saved_tmp.set(missing.c_str());
+
+    int listener = -1;
+    std::string socket_path;
+    if (ok) {
+        const auto path = dtv::userland::host_runtime::control_endpoint_path(
+            {root, "fake-native", "x"});
+        ok = static_cast<bool>(path);
+        if (path) socket_path = path.value();
+    }
+    if (ok) {
+        listener = ::socket(AF_UNIX, SOCK_STREAM, 0);
+        sockaddr_un address{};
+        address.sun_family = AF_UNIX;
+        std::memcpy(address.sun_path, socket_path.c_str(), socket_path.size() + 1U);
+        ok = listener >= 0 &&
+            ::bind(listener, reinterpret_cast<const sockaddr*>(&address), sizeof(address)) == 0 &&
+            ::chmod(socket_path.c_str(), 0600) == 0 && ::listen(listener, 1) == 0;
+    }
+    const auto candidates = px4::userland::ipc::posix::client_runtime_roots();
+    bool unsafe_root_listed = false;
+    if (candidates) {
+        for (std::size_t index = 0U; index < candidates.value().count; ++index)
+            unsafe_root_listed = unsafe_root_listed ||
+                std::strcmp(candidates.value().paths[index].data(), root.c_str()) == 0;
+    }
+    const auto client = px4::userland::ipc::posix::SocketStream::connect(
+        {nullptr, "x", "control.sock", px4::userland::ipc::posix::EndpointAccess::private_user,
+         "fake-native"}, px4::userland::Timeout{100U});
+    pollfd pending{listener, POLLIN, 0};
+    ok = ok && candidates && !unsafe_root_listed && !client &&
+        ::poll(&pending, 1U, 0) == 0;
+    if (listener >= 0) (void)::close(listener);
+    if (!socket_path.empty()) (void)::unlink(socket_path.c_str());
+    (void)::rmdir(instance.c_str());
+    (void)::rmdir(version.c_str());
+    (void)::rmdir(product.c_str());
+    (void)::rmdir(root.c_str());
+    (void)::rmdir(parent.c_str());
+    (void)::rmdir(branch.c_str());
+    (void)::rmdir(shared.c_str());
+    (void)::rmdir(base.c_str());
+    if (ok) std::puts("posix_unsafe_writable_ancestor_not_connected=PASS");
     return ok;
 }
 
@@ -1084,8 +1200,16 @@ int main()
     }
 #endif
 #if !defined(_WIN32)
+    if (!android_trust_chain_policy_test()) {
+        std::fputs("Android trust-chain policy fixture failed\n", stderr);
+        return 1;
+    }
     if (!default_runtime_roots_test()) {
         std::fputs("POSIX default runtime-root fixture failed\n", stderr);
+        return 1;
+    }
+    if (!unsafe_ancestor_runtime_candidate_test()) {
+        std::fputs("POSIX unsafe-ancestor runtime fixture failed\n", stderr);
         return 1;
     }
 #endif

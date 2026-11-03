@@ -1303,9 +1303,18 @@ if(DTV_USERLAND_BUILD_TESTING)
                 -fno-exceptions -fno-rtti -Wall -Wextra -Wpedantic)
         endif()
         add_executable(host_runtime_tests tests/host_runtime_tests.cpp)
+        target_include_directories(host_runtime_tests PRIVATE
+            adapters/host_runtime/src)
         target_link_libraries(host_runtime_tests PRIVATE
             dtv_userland_host_runtime_test ${_dtv_userland_host_facade_test_target})
         add_test(NAME host_runtime_tests COMMAND host_runtime_tests)
+        if(ANDROID OR CMAKE_SYSTEM_NAME STREQUAL "Linux")
+            add_executable(host_runtime_android_smoke
+                tests/host_runtime_android_smoke.cpp)
+            target_link_libraries(host_runtime_android_smoke PRIVATE dtv::host_runtime)
+            add_test(NAME host_runtime_android_smoke COMMAND host_runtime_android_smoke)
+            set_tests_properties(host_runtime_android_smoke PROPERTIES TIMEOUT 30)
+        endif()
     endif()
     if(WIN32 AND DTV_USERLAND_BUILD_HOST_FACADE)
         add_executable(windows_stdin_monitor_tests tests/windows_stdin_monitor_tests.cpp)
