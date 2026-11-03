@@ -43,6 +43,8 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
         std::lock_guard<std::mutex> lock(mutex_);
         open_state_ = OpenState::Opening;
         claims_.assign(count, ClaimState::NotAttempted);
+        claim_quiesced_.assign(count, true);
+        open_result_ = DTV_L3_ACCEPTED;
     }
 
     bool failed = false;
@@ -54,6 +56,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
                 break;
             }
             claims_[index] = ClaimState::InFlight;
+            claim_quiesced_[index] = false;
             claim_in_flight_ = true;
             ++provider_calls_in_flight_;
             binding = binding_;
@@ -67,17 +70,24 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             if (claim.result == DTV_L3_OK &&
                 claim.residual_state == DTV_L3_CLAIM_RETAINED) {
                 claims_[index] = ClaimState::Ready;
+                claim_quiesced_[index] = false;
                 ++claimed_count_;
             } else {
                 failed = true;
+                open_result_ = claim.result == DTV_L3_OK
+                                   ? DTV_L3_FAILED
+                                   : claim.result;
                 open_state_ = OpenState::Failed;
                 close_requested_ = true;
                 if (claim.residual_state == DTV_L3_CLAIM_NONE) {
                     claims_[index] = ClaimState::Released;
+                    claim_quiesced_[index] = true;
                 } else if (claim.residual_state == DTV_L3_CLAIM_RETAINED) {
                     claims_[index] = ClaimState::Retained;
+                    claim_quiesced_[index] = false;
                 } else {
                     claims_[index] = ClaimState::Unknown;
+                    claim_quiesced_[index] = false;
                 }
             }
             state_condition_.notify_all();
@@ -96,6 +106,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             }
         } else if (!failed) {
             open_state_ = OpenState::Ready;
+            open_result_ = DTV_L3_OK;
         }
         must_finish_close = failed || close_requested_;
     }
@@ -335,6 +346,8 @@ dtv_l3_result OwnerEngine::close_status(Snapshot *snapshot) {
                    state == ClaimState::Retained || state == ClaimState::Unknown;
         });
     snapshot->last_cleanup_error = last_cleanup_error_;
+    snapshot->open_result = open_result_;
+    snapshot->cleanup_result = last_cleanup_error_;
     snapshot->restoration_failed = restoration_failed_;
     return DTV_L3_OK;
 }
@@ -351,7 +364,7 @@ dtv_l3_result OwnerEngine::retry_cleanup() {
         return DTV_L3_BUSY;
     }
     if (!cleanup_claims_locked()) {
-        return DTV_L3_OK;
+        return physical_quiesced_ ? DTV_L3_OK : DTV_L3_BUSY;
     }
     cleanup_started_ = false;
     cleanup_attempted_ = false;
@@ -536,6 +549,7 @@ void OwnerEngine::run_cleanup() {
     std::vector<std::uint32_t> release_indices;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        last_cleanup_error_ = DTV_L3_OK;
         binding = binding_;
         for (std::uint32_t index = 0; index < claims_.size(); ++index) {
             if (claims_[index] == ClaimState::Ready ||
@@ -549,8 +563,9 @@ void OwnerEngine::run_cleanup() {
          ++index) {
         const auto result = provider_.release_claim(binding.get(), *index);
         std::lock_guard<std::mutex> lock(mutex_);
-        if (result.quiescence == DTV_L3_RELEASE_QUIESCED &&
-            result.residual_state == DTV_L3_CLAIM_NONE) {
+        claim_quiesced_[*index] =
+            result.quiescence == DTV_L3_RELEASE_QUIESCED;
+        if (result.residual_state == DTV_L3_CLAIM_NONE) {
             claims_[*index] = ClaimState::Released;
         } else if (result.residual_state == DTV_L3_CLAIM_RETAINED) {
             claims_[*index] = ClaimState::Retained;
@@ -573,9 +588,13 @@ void OwnerEngine::run_cleanup() {
         std::lock_guard<std::mutex> lock(mutex_);
         claimed_count_ = std::count(claims_.begin(), claims_.end(), ClaimState::Ready);
         ++cleanup_count_;
-        physical_quiesced_ = !cleanup_claims_locked();
-        cleanup_complete_ = physical_quiesced_;
-        open_state_ = OpenState::Closed;
+        physical_quiesced_ = std::all_of(
+            claim_quiesced_.begin(), claim_quiesced_.end(),
+            [](bool quiesced) { return quiesced; });
+        cleanup_complete_ = !cleanup_claims_locked();
+        if (open_state_ != OpenState::Failed) {
+            open_state_ = OpenState::Closed;
+        }
         cleanup_started_ = false;
         state_condition_.notify_all();
     }

@@ -96,13 +96,17 @@ public:
                  route->second != request.endpoint)) {
                 return DTV_L3_INVALID;
             }
+            const auto function = route_functions.find(request.claim_index);
+            if (function == route_functions.end()) {
+                return DTV_L3_INVALID;
+            }
             if (request.kind == DTV_L3_TRANSFER_CONTROL) {
                 last_control_slot = request.claim_index;
                 last_control_setup = request.control;
             }
             ++usb_submit_calls;
             usb_destinations.emplace_back(request.claim_index, request.endpoint);
-            usb_functions.push_back(route_functions[request.claim_index]);
+            usb_functions.push_back(function->second);
             ++submit_calls;
             if (immediate_result) {
                 complete_now = true;
@@ -287,7 +291,9 @@ void test_failed_open_and_partial_claim_cleanup() {
     owner.initialize_claims(3);
     OwnerEngine::Snapshot snapshot{};
     CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
-    CHECK(snapshot.open_state == OwnerEngine::OpenState::Closed);
+    CHECK(snapshot.open_state == OwnerEngine::OpenState::Failed);
+    CHECK(snapshot.open_result == DTV_L3_FAILED);
+    CHECK(snapshot.cleanup_result == DTV_L3_OK);
     CHECK(snapshot.physical_quiesced);
     CHECK(snapshot.cleanup_complete);
     CHECK(provider.released_claim_count() == 1);
@@ -297,6 +303,45 @@ void test_failed_open_and_partial_claim_cleanup() {
     CHECK(owner.release() == DTV_L3_OK);
     CHECK(owner.release_count() == 1);
     CHECK(owner.cleanup_count() == 1);
+}
+
+void test_failed_open_result_survives_cleanup_and_close() {
+    ProviderMock failed_provider;
+    failed_provider.claim_results[0] = {DTV_L3_FAILED, DTV_L3_CLAIM_NONE};
+    OwnerEngine failed_owner(failed_provider, 101);
+    failed_owner.initialize_claims(1);
+    OwnerEngine::Snapshot failed{};
+    CHECK(failed_owner.close_status(&failed) == DTV_L3_OK);
+    CHECK(failed.open_state == OwnerEngine::OpenState::Failed);
+    CHECK(failed.open_result == DTV_L3_FAILED);
+    CHECK(failed.cleanup_result == DTV_L3_OK);
+    CHECK(failed.cleanup_complete);
+    CHECK(failed_provider.released_claim_count() == 0);
+    CHECK(failed_owner.close(0) == DTV_L3_OK);
+    CHECK(failed_owner.close_status(&failed) == DTV_L3_OK);
+    CHECK(failed.open_result == DTV_L3_FAILED);
+    CHECK(failed_owner.release() == DTV_L3_OK);
+
+    ProviderMock successful_provider;
+    OwnerEngine successful_owner(successful_provider, 102);
+    successful_owner.initialize_claims(1);
+    CHECK(successful_owner.close(2000) == DTV_L3_OK);
+    OwnerEngine::Snapshot successful{};
+    CHECK(successful_owner.close_status(&successful) == DTV_L3_OK);
+    CHECK(successful.open_result == DTV_L3_OK);
+    CHECK(failed.open_state != successful.open_state);
+    CHECK(failed.open_result != successful.open_result);
+    CHECK(failed.physical_quiesced == successful.physical_quiesced);
+    CHECK(failed.cleanup_complete == successful.cleanup_complete);
+    CHECK(failed.all_ops_recovered == successful.all_ops_recovered);
+    CHECK(failed.active_borrows == successful.active_borrows);
+    CHECK(failed.claims_attempted == successful.claims_attempted);
+    CHECK(failed.transfer_ready_claims == successful.transfer_ready_claims);
+    CHECK(failed.cleanup_claims_remaining == successful.cleanup_claims_remaining);
+    CHECK(failed.cleanup_result == successful.cleanup_result);
+    CHECK(failed.last_cleanup_error == successful.last_cleanup_error);
+    CHECK(failed.restoration_failed == successful.restoration_failed);
+    CHECK(successful_owner.release() == DTV_L3_OK);
 }
 
 void test_close_during_opening_defers_cleanup() {
@@ -741,9 +786,85 @@ void test_provider_route_slots_control_and_layered_rejection() {
     CHECK(owner_y.close(2000) == DTV_L3_OK);
     CHECK(owner_x.release() == DTV_L3_OK);
     CHECK(owner_y.release() == DTV_L3_OK);
+
+    ProviderMock control_x;
+    ProviderMock control_y;
+    control_x.immediate_result = DTV_L3_OK;
+    control_y.immediate_result = DTV_L3_OK;
+    control_x.route_functions.erase(1);
+    OwnerEngine control_owner_x(control_x, 57);
+    OwnerEngine control_owner_y(control_y, 58);
+    control_owner_x.initialize_claims(2);
+    control_owner_y.initialize_claims(2);
+    auto same_control = request_for(payload);
+    same_control.kind = DTV_L3_TRANSFER_CONTROL;
+    same_control.endpoint = 0;
+    same_control.claim_index = 1;
+    same_control.control = {0x40, 0x55, 0x1234, 0x0044};
+    std::shared_ptr<OwnerEngine::Operation> control_x_op;
+    std::shared_ptr<OwnerEngine::Operation> control_y_op;
+    CHECK(control_owner_x.start(same_control, &control_x_op) == DTV_L3_INVALID);
+    CHECK(control_owner_y.start(same_control, &control_y_op) == DTV_L3_ACCEPTED);
+    CHECK(control_x.provider_entry_calls == 1);
+    CHECK(control_y.provider_entry_calls == 1);
+    CHECK(control_x.usb_submit_calls == 0);
+    CHECK(control_y.usb_submit_calls == 1);
+    CHECK(control_y.usb_functions[0] == 20);
+    CHECK(control_owner_x.release_operation(control_x_op) == DTV_L3_OK);
+    CHECK(control_owner_y.release_operation(control_y_op) == DTV_L3_OK);
+    CHECK(control_owner_x.close(2000) == DTV_L3_OK);
+    CHECK(control_owner_y.close(2000) == DTV_L3_OK);
+    CHECK(control_owner_x.release() == DTV_L3_OK);
+    CHECK(control_owner_y.release() == DTV_L3_OK);
 }
 
 void test_failed_claim_residual_recovery_and_release_result_visibility() {
+    {
+        ProviderMock provider;
+        provider.release_results[0] = {
+            {DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_RETAINED,
+             DTV_L3_RESTORE_SUCCEEDED, DTV_L3_FAILED},
+            {DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
+             DTV_L3_RESTORE_SUCCEEDED, DTV_L3_OK}};
+        OwnerEngine owner(provider, 103);
+        owner.initialize_claims(1);
+        CHECK(owner.close(2000) == DTV_L3_OK);
+        OwnerEngine::Snapshot snapshot{};
+        CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+        CHECK(snapshot.physical_quiesced);
+        CHECK(!snapshot.cleanup_complete);
+        CHECK(snapshot.cleanup_claims_remaining == 1);
+        CHECK(snapshot.cleanup_result == DTV_L3_FAILED);
+        CHECK(owner.release() == DTV_L3_BUSY);
+        CHECK(provider.released_claim_count() == 1);
+        CHECK(owner.retry_cleanup() == DTV_L3_ACCEPTED);
+        CHECK(wait_for_cleanup_pass(owner, 2));
+        CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+        CHECK(snapshot.physical_quiesced && snapshot.cleanup_complete);
+        CHECK(snapshot.cleanup_result == DTV_L3_OK);
+        CHECK(owner.release() == DTV_L3_OK);
+    }
+
+    {
+        ProviderMock provider;
+        provider.release_results[0] = {
+            {DTV_L3_RELEASE_QUIESCENCE_UNKNOWN, DTV_L3_CLAIM_NONE,
+             DTV_L3_RESTORE_SUCCEEDED, DTV_L3_TIMEOUT}};
+        OwnerEngine owner(provider, 104);
+        owner.initialize_claims(1);
+        CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+        CHECK(wait_for_cleanup_pass(owner, 1));
+        OwnerEngine::Snapshot snapshot{};
+        CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+        CHECK(!snapshot.physical_quiesced);
+        CHECK(snapshot.cleanup_complete);
+        CHECK(snapshot.cleanup_claims_remaining == 0);
+        CHECK(snapshot.cleanup_result == DTV_L3_TIMEOUT);
+        CHECK(owner.retry_cleanup() == DTV_L3_BUSY);
+        CHECK(provider.released_claim_count() == 1);
+        CHECK(owner.release() == DTV_L3_BUSY);
+    }
+
     {
         ProviderMock provider;
         provider.claim_results[0] =
@@ -842,6 +963,7 @@ void test_failed_claim_residual_recovery_and_release_result_visibility() {
 
 int main() {
     test_failed_open_and_partial_claim_cleanup();
+    test_failed_open_result_survives_cleanup_and_close();
     test_close_during_opening_defers_cleanup();
     test_immediate_completion_and_cancel_success_race();
     test_p1_borrow_survives_physical_quiescence_and_gate_orders();

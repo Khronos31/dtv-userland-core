@@ -60,6 +60,8 @@ public:
         std::size_t claims_attempted;
         std::size_t transfer_ready_claims;
         std::size_t cleanup_claims_remaining;
+        dtv_l3_result open_result;
+        dtv_l3_result cleanup_result;
         dtv_l3_result last_cleanup_error;
         bool restoration_failed;
     };
@@ -153,8 +155,10 @@ private:
     std::size_t release_count_ = 0;
     std::uint32_t claimed_count_ = 0;
     std::vector<ClaimState> claims_;
+    std::vector<bool> claim_quiesced_;
     bool claim_in_flight_ = false;
     dtv_l3_result last_cleanup_error_ = DTV_L3_OK;
+    dtv_l3_result open_result_ = DTV_L3_ACCEPTED;
     bool restoration_failed_ = false;
     std::uint64_t next_transfer_id_ = 1;
     std::shared_ptr<Binding> binding_;
