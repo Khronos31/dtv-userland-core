@@ -1,122 +1,23 @@
-# Socketless control authority
+# ソケットレス制御オーソリティ
 
-`dtv::authority` is an internal, default-OFF component. Build it with
-`DTV_USERLAND_BUILD_AUTHORITY=ON`; this requires the existing control gate,
-receiver engine, and STATUS projection options. Installed consumers request
-`find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS authority)` and
-link `dtv::authority`. The component adds no socket, OS thread, timer, data
-path, product adapter, or USB dependency.
+`dtv::authority` は、既定で無効（default-OFF）の内部コンポーネントである。`DTV_USERLAND_BUILD_AUTHORITY=ON` でビルドする。これには既存の制御ゲート、レシーバエンジン、STATUS 投影オプションが必要となる。インストールされた利用者は `find_package(dtv_userland_core CONFIG REQUIRED COMPONENTS authority)` を指定して `dtv::authority` にリンクする。本コンポーネントはソケット、OS スレッド、タイマー、データパス、製品アダプタ、USB 依存関係を追加しない。
 
-The host owner seam configures Authority IDs in `2^63..UINT64_MAX`; the legacy
-TunerService domain is `1..2^63-1`. Both domains allocate monotonically and do
-not wrap or reuse IDs. This range is an internal identity boundary and does
-not change wire records. The current Core main has no `ControlServer` counter;
-downstream server integration must apply the low-half ceiling to its own
-allocator before using the shared Engine.
+ホスト所有者の境界は、Authority ID を `2^63..UINT64_MAX` の範囲に設定する。旧来の TunerService 領域は `1..2^63-1` である。両領域ともに単調に割り当てを行い、ID の周回や再利用は行わない。この範囲は内部の識別境界であり、wire レコードを変更するものではない。現在の Core main には `ControlServer` カウンタが存在しない。下流のサーバ統合では、共有 Engine を使用する前に、自身のアロケータへ下半分（low-half）の上限を適用しなければならない。
 
-`ControlAuthority` holds one `ReceiverEngine` reference, the immutable server
-HELLO values, and the canonical LIST. Caller-owned `ControlServiceSession`
-objects register in its intrusive session table. Each session has a
-non-reusable process-lifetime client ID, its `ControlConnection`, an owned
-response frame, one bounded request slot, and a STATUS output record. Callers
-must serialize authority methods on the event-loop owner, call `close()` and
-hand off its returned cleanup job before destroying a live session, then keep
-the authority, Engine, backend, and executor alive until all queued/running
-jobs drain and workers join. Recreate the authority/client-ID space only after
-that drain. The session's response storage is `kHeaderSize +
-kMaxControlPayload` bytes; bounded tune/PID request storage remains with the
-session instead of being copied into worker closures.
+`ControlAuthority` は、1 つの `ReceiverEngine` 参照、イミュータブルなサーバ HELLO 値、および正規 LIST を保持する。呼び出し側所有の `ControlServiceSession` オブジェクトがその侵入型（intrusive）セッションテーブルに登録される。各セッションは、再利用不能なプロセス生存期間のクライアント ID、自身の `ControlConnection`、所有された応答フレーム、1 つの上限付き要求スロット、および STATUS 出力レコードを持つ。呼び出し側はイベントループ所有者上で authority メソッドを直列化し、アクティブなセッションを破棄する前に `close()` を呼び出して返されたクリーンアップジョブを引き渡し、キューイング中または実行中の全ジョブがドレインされワーカーが join するまで authority、Engine、バックエンド、エグゼキュータを存続させなければならない。authority およびクライアント ID 空間の再生成は、そのドレイン完了後にのみ行う。セッションの応答格納領域は `kHeaderSize + kMaxControlPayload` バイトである。上限付きの tune/PID 要求格納領域は、ワーカーのクロージャにコピーされるのではなくセッション内に保持される。
 
-When `try_admit_tune_detailed()` reports only registry-mutex contention,
-`ControlAuthority` retains the original TUNE request in a fixed FIFO with
-round-robin retries. The queue holds at most `kReceiverEngineCapacity`
-sessions; each session can retain only its one outstanding request. The
-next contended request is rejected with the existing RESOURCE_LIMIT error
-when that queue is full. The
-event-loop owner calls `retry_pending_admission(now_ms, executor)` once per
-poll turn, using the Engine's monotonic clock domain. Each call makes at most
-one nonblocking admission attempt. A continued mutex contention moves that
-session to the FIFO tail; other BUSY causes return immediately.
+`try_admit_tune_detailed()` がレジストリミューテックスの競合のみを報告した場合、`ControlAuthority` は元の TUNE 要求を固定 FIFO に保持し、ラウンドロビンで再試行する。このキューは最大 `kReceiverEngineCapacity` 個のセッションを保持できる。各セッションは 1 つの未処理要求のみを保持できる。キューが満杯の場合、次の競合要求は既存の RESOURCE_LIMIT エラーで拒否される。イベントループ所有者は、Engine の単調時計領域を用いて、ポーリングターンごとに 1 回 `retry_pending_admission(now_ms, executor)` を呼び出す。各呼び出しは最大 1 回の非ブロッキング受付試行を行う。ミューテックス競合が継続している場合、そのセッションは FIFO の末尾へ移動する。それ以外の BUSY 原因は直ちに復帰する。
 
-The retained request keeps its original `accepted_at_ms` and request ID. If
-its existing TUNE budget has elapsed when a retry turn checks it, the authority
-returns the existing TIMEOUT result without creating a ticket or advancing a
-revision. A successful retry creates and publishes one ticket. A close
-observed by the server removes the session from the queue before disconnect
-cleanup, so a later poll cannot admit that request. The server does not know
-an independent client's local deadline before it observes a close; this
-facility does not add such a guarantee or a client retry.
+保持された要求は、元の `accepted_at_ms` と要求 ID を維持する。再試行ターンでの検査時に既存の TUNE 予算が経過していた場合、authority はチケットの生成やリビジョンの進行を行わずに既存の TIMEOUT 結果を返す。再試行が成功すると、1 つのチケットが生成されて公開される。サーバによって観測された close は、切断クリーンアップの前にセッションをキューから削除するため、以後のポーリングでその要求が受け付けられることはない。サーバは close を観測するまで独立クライアントのローカル期限を知ることはできない。本機能はそのような保証やクライアント再試行を追加するものではない。
 
-The injected `ControlAuthorityExecutor` is a nonblocking publication seam. A
-`AuthorityJob` owns its `SessionKey` and admitted tune ticket or acquire,
-independent LNB power, release, rollback, and disconnect values by value; it
-contains no session pointer. Independent LNB requests require a canonical
-receiver capability that declares both 0 V and 15 V, run on the shared LNB
-worker lane, and produce a typed response only after backend success. The
-executor's optional LNB state is a cached enclosure snapshot; an absent value
-is published as unknown in enclosure STATUS. The host worker invokes
-`ControlAuthority::execute_job_value()` outside the poll loop for Engine jobs
-and posts typed `AuthorityCompletion` values for Authority work back to that
-same loop. ACQUIRE dispatch only queues a value job; the worker performs
-`ReceiverEngine::acquire()` and returns the lease ID and receiver. The authority
-checks key and job kind before producing a wire reply. If a successful acquire
-with a valid lease ID cannot be recorded or encoded, completion returns one
-rollback-release value job; the poll loop does not call Engine release. A
-success completion without a lease ID closes the client through disconnect
-cleanup because there is no scalar lease identity to release. A rejected
-cleanup submit remains owned by the caller, and a repeated or stale completion
-cannot produce the cleanup value again.
+注入される `ControlAuthorityExecutor` は非ブロッキングの公開境界である。`AuthorityJob` は、`SessionKey`、受け付けられた tune チケット、あるいは acquire、独立 LNB 給電、release、rollback、disconnect の各値を値として（by value）所有する。セッションポインタは含まない。独立 LNB 要求は、0 V と 15 V の双方を宣言する正規レシーバ機能を要求し、共有 LNB ワーカーレーンで実行され、バックエンドの成功後にのみ型付き応答を生成する。エグゼキュータの optional な LNB 状態はキャッシュされた筐体スナップショットである。非存在の値は筐体 STATUS において未知（unknown）として公開される。ホストワーカーは Engine ジョブについてポーリングループ外で `ControlAuthority::execute_job_value()` を呼び出し、Authority の作業については型付きの `AuthorityCompletion` 値を同じループへポストバックする。ACQUIRE のディスパッチは値ジョブをキューイングするのみであり、ワーカーが `ReceiverEngine::acquire()` を実行して lease ID とレシーバを返す。authority は wire 応答を生成する前にキーとジョブ種別を検査する。有効な lease ID を持つ正常な acquire が記録またはエンコードできない場合、完了処理は 1 つの rollback-release 値ジョブを返す。ポーリングループが Engine release を呼び出すことはない。lease ID のない成功完了は、解放すべきスカラーの lease 識別子が存在しないため、切断クリーンアップを通じてクライアントを閉じる。拒否されたクリーンアップ投入は呼び出し側所有のまま残り、重複または古い完了通知が再びクリーンアップ値を生成することはない。
 
-Closing while ACQUIRE or rollback is pending marks the session closed but keeps
-its storage in the authority table. `close()` returns a deferred disconnect
-intent that must not be submitted. The matching late completion returns the
-runnable disconnect cleanup value; only its successful completion removes the
-session. Rollback failure transfers cleanup to disconnect in sequence, never
-with both operations runnable for the same lease. For these retained sessions,
-the caller reports disconnect submission with `cleanup_submitted(job, accepted)`:
-a rejected value remains caller-owned, and a retry is marked accepted before
-its completion is delivered. Other close paths retain the existing close
-contract. Engine/backend ownership must outlive all returned jobs and their
-completions.
+ACQUIRE またはロールバックが処理中の状態で close した場合、セッションを closed とマークするが、その格納領域は authority テーブル内に保持する。`close()` は投入してはならない遅延切断意図（deferred disconnect intent）を返す。一致する遅延完了通知が、実行可能な切断クリーンアップ値を返す。その正常完了によってのみセッションが削除される。ロールバックの失敗は順次切断へとクリーンアップを引き継ぎ、同一 lease に対して両方の操作が同時に実行可能になることは決してない。これらの保持されたセッションについて、呼び出し側は `cleanup_submitted(job, accepted)` により切断投入を報告する。拒否された値は呼び出し側所有のまま残り、再試行は完了通知が届く前に受理されたものとしてマークされる。その他の close パスは既存の close 契約を維持する。Engine/バックエンドの所有権は、返されたすべてのジョブおよびその完了通知よりも長く生存しなければならない。
 
-The host executor must provide parallel progress for cleanup on one receiver
-while another receiver is blocked in TUNE. `ReceiverEngine` already serializes
-physical operations per receiver, so this component does not add per-receiver
-lanes. `submit()` must return without waiting. TUNE publication rejection
-calls `abort_unstarted_tune()` once. Accepted work calls
-`execute_admitted_tune()` once. A rejected disconnect publication returns the
-cleanup job through the reply/output parameter; the caller must retain it for
-an external teardown worker and must not run blocking cleanup in the poll
-loop.
+ホストエグゼキュータは、あるレシーバが TUNE でブロックされている間も、別のレシーバにおけるクリーンアップが並行して進行できるようにしなければならない。`ReceiverEngine` は既にレシーバごとに物理操作を直列化しているため、本コンポーネントはレシーバごとのレーンを追加しない。`submit()` は待機することなく復帰しなければならない。TUNE 公開の拒否は `abort_unstarted_tune()` を 1 回呼び出す。受け付けられた作業は `execute_admitted_tune()` を 1 回呼び出す。拒否された切断公開は、応答/出力パラメータを通じてクリーンアップジョブを返す。呼び出し側は外部の分解ワーカーのためにそれを保持しなければならず、ポーリングループ内でブロッキングクリーンアップを実行してはならない。
 
-LIST is the canonical supplied record. STATUS builds a shell from the
-canonical LIST plus caller-supplied context/snapshot and delegates receiver
-projection to `dtv::status_projection`; unobserved LNB/CARD values stay absent.
-ACQUIRE, TUNE, and RELEASE are bound to the session's non-reused Engine client
-ID. TUNE retains exact requested Hz and replies only after its Engine
-completion. Wire validation remains in `ControlConnection`; receiver system,
-selection, and typed LNB values are checked against the canonical descriptor
-before admission. A host may provide an additional profile validator. LNA and
-PID requests are rejected because this Engine operation does not yet apply
-them. START is dispatched on the same Engine. STOP validates the session lease
-and stream epoch before asking the executor for the metadata-only stop result;
-the default executor returns `UNSUPPORTED` until it provides that operation.
-The host bridge turns an accepted STOP into exact-ticket cleanup and retains a
-pending tombstone when cleanup submission is temporarily rejected.
+LIST は提供される正規レコードである。STATUS は正規 LIST に呼び出し側提供のコンテキスト/スナップショットを加えてシェルを構築し、レシーバの投影を `dtv::status_projection` へ委譲する。未観測の LNB/CARD 値は非存在のままとする。ACQUIRE、TUNE、RELEASE は、セッションの再利用されない Engine クライアント ID に束縛される。TUNE は要求された厳密な Hz を保持し、Engine 完了後にのみ応答する。wire 検証は `ControlConnection` に留まる。レシーバのシステム、選択、型付き LNB 値は受付前に正規記述子と照合される。ホストは追加のプロファイルバリデータを提供してもよい。LNA および PID 要求は、現在の Engine 操作がそれらをまだ適用しないため拒否される。START は同一 Engine 上でディスパッチされる。STOP はエグゼキュータにメタデータのみの停止結果を要求する前に、セッション lease とストリーム epoch を検証する。既定のエグゼキュータはその操作を提供するまで `UNSUPPORTED` を返す。ホストブリッジは、受け付けられた STOP を厳密なチケットクリーンアップへと変換し、クリーンアップ投入が一時的に拒否された場合は保留中の廃棄標識（tombstone）を保持する。
 
-RELEASE is queued as blocking work and responds only after Engine cleanup. A
-successful completion emits `released=true, quiesced=true`; failure preserves
-the Engine error and emits both flags false. Caller code must call
-`response_sent(session, true, ...)` only after the entire response frame is
-written. Partial write or transport failure closes the session and schedules
-cleanup; queueing a frame or writing only a prefix never releases the
-one-outstanding-request gate. The host still owns transport writes and must
-not report a send completion after failure or close.
+RELEASE はブロッキング作業としてキューイングされ、Engine クリーンアップ後にのみ応答する。正常完了時は `released=true, quiesced=true` を出力し、失敗時は Engine エラーを保持して両フラグを false として出力する。呼び出し側コードは、応答フレーム全体が書き込まれた後にのみ `response_sent(session, true, ...)` を呼び出さなければならない。部分的な書き込みやトランスポートの失敗はセッションを閉じ、クリーンアップをスケジュールする。フレームをキューイングしたりプレフィックスのみを書き込んだりしても、未処理要求 1 件のゲートが解放されることは決してない。ホストは依然としてトランスポートの書き込みを所有しており、失敗や close の後に送信完了を報告してはならない。
 
-For the first Siano host bridge, the existing pinned `TunerService` remains
-the current Engine owner until a separate host increment changes the dispatch
-boundary. Do not instantiate this authority beside that service for the same
-adapter/device. The bridge must map typed jobs into its existing worker task
-types, return completions to the existing poll loop, and retain one Engine
-owner through worker drain/join. PX4, ASICEN, and PIX follow the Siano API
-connection in parallel work; no product source or pin is changed here.
+最初の Siano ホストブリッジにおいて、別のホストインクリメントがディスパッチ境界を変更するまで、既存の固定 `TunerService` が引き続き現在の Engine 所有者であり続ける。同一のアダプタ/デバイスに対して、そのサービスの傍らで本 authority をインスタンス化してはならない。ブリッジは、型付きジョブを自身の既存のワーカータスク型へマッピングし、完了通知を既存のポーリングループへ返し、ワーカーのドレイン/join を通じて 1 つの Engine 所有者を維持しなければならない。PX4、ASICEN、PIX は並行作業において Siano の API 接続に追従する。製品ソースや固定設定はここでは変更されない。

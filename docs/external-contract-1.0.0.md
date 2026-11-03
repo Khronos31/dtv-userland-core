@@ -178,7 +178,7 @@ daemon は筐体ごとに 1 プロセスを基本とする。ctl の `list` は 
 
 L2 の規範は Core の次の文書に置く。本書は入口と横断規則だけをまとめ、record の全 field を複製しない。
 
-- 封筒・frame・HELLO/ACQUIRE の先頭 subset: [`wire-subset.md`](wire-subset.md)
+- エンベロープ・frame・HELLO/ACQUIRE の先頭 subset: [`wire-subset.md`](wire-subset.md)
 - typed records と STATUS/LIST: [`wire-records.md`](wire-records.md)
 - connection gate: [`control-connection.md`](control-connection.md)
 - authority / session: [`control-authority.md`](control-authority.md)
@@ -194,12 +194,12 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 - 接続の所有は呼び出し側。Core library は socket を生成しない（host runtime が adapter として提供）。
 - endpoint の owner/mode・peer UID（POSIX）、owner SID・protected DACL（Windows）を検証する。shared group は POSIX のみ。
 
-### 4.2 封筒
+### 4.2 エンベロープ
 
 - magic は ASCII `UDTV`。legacy `PX4U` / `ASCN` は拒否し、payload を解釈しない。
 - 20 byte 固定 header。すべて little-endian。
 - major=1、minor=0。他の版は `VERSION_MISMATCH`。
-- opcode は raw u16。未知 opcode も封筒としては受理し、dispatcher が `UNSUPPORTED` を返す。
+- opcode は raw u16。未知 opcode もエンベロープとしては受理し、dispatcher が `UNSUPPORTED` を返す。
 - flags は 0/1/3 のみ。それ以外は malformed。
 - kind の組合せ: request(bit15=0, flags=0, id≠0)、response(0,1,id≠0)、error_response(0,3,id≠0)、event(1,0,id=0)。他は `PROTOCOL_ERROR`。
 - payload_length は payload を読む前に上限検査する。
@@ -229,7 +229,7 @@ L2 の規範は Core の次の文書に置く。本書は入口と横断規則�
 
 ### 4.5 版・互換
 
-- 封筒版は UDTV 1.0。HELLO の min/max で 1.0 を選ぶ。それ以外は `VERSION_MISMATCH`。
+- エンベロープバージョンは UDTV 1.0。HELLO の min/max で 1.0 を選ぶ。それ以外は `VERSION_MISMATCH`。
 - **L2 は外部契約（採用済み）。** 層モデル採用（Issue23 6603147282 の直前表 6602947137）で、wire の record・opcode と discovery/status JSON は denpa の C# 実装や ctl を含む第三者向け境界とし、version 交渉付きの規範とする。外部化そのものを未決へ戻さない。
 - Core の既存 docs（`control-client.md` / `control-connection.md`）は「同一 release 内の内部契約。release をまたぐ安定 wire API ではない」と記す。これは draft 前の記述であり、本 1.0.0 案の外部境界と整合させる更新対象とする。旧 README/docs の全面改訂を本 PR の追加 gate にしない。
 - **狭い未決:** release をまたぐ具体的な互換範囲。同一 major 内で許す差（layout 変更・feature bit・minor の扱い）と、同一 release 前提を残す範囲を決める。推奨は「minor は feature で gate し、layout 変更は明示 feature または版で区別する。L3 と同様に安定 ABI は約束しない」。
@@ -418,7 +418,7 @@ API の形（**名称・採番・構造体 layout はすべて未決**）:
 
 ## 8. 参照
 
-- 封筒・frame: [`wire-subset.md`](wire-subset.md)
+- エンベロープ・frame: [`wire-subset.md`](wire-subset.md)
 - typed records・STATUS/LIST・validation: [`wire-records.md`](wire-records.md)
 - connection gate: [`control-connection.md`](control-connection.md)
 - authority: [`control-authority.md`](control-authority.md)

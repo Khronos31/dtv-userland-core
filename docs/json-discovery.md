@@ -1,11 +1,8 @@
-# Discovery JSON projection
+# Discovery JSON 投影
 
-`discovery_json.h` projects a complete scan result into the public
-`userland.discovery` JSON shape. It consumes a scan envelope rather than a
-single `ListResponse`, so enclosure grouping and serial uniqueness are decided
-over the same observed scan.
+`discovery_json.h` は、完全なスキャン結果を公開仕様の `userland.discovery` JSON 形状へと投影する。単一の `ListResponse` ではなくスキャンエンベロープ（scan envelope）を入力とするため、同一の観測スキャン全体を通じて筐体のグループ化とシリアルの一意性を判定する。
 
-The output keeps the physical hierarchy:
+出力は物理階層を維持する:
 
 ```json
 {
@@ -36,57 +33,16 @@ The output keeps the physical hierarchy:
 }
 ```
 
-IDs are JSON numbers. VID and PID are one lowercase hexadecimal `VID:PID`
-string. A device whose receiver inventory is unknown omits `receivers`; a
-known zero-receiver device emits an empty array. The projector only emits
-enclosures and devices supplied by the scan and never invents missing parents
-or children.
+ID は JSON の数値である。VID および PID は小文字の 16 進数による `VID:PID` 文字列である。レシーバ構成が未知のデバイスは `receivers` を省略し、レシーバが 0 個であることが判明しているデバイスは空配列を出力する。本プロジェクタはスキャンによって提供された筐体とデバイスのみを出力し、欠落している親や子を勝手に創作することは決してない。
 
-Enclosure `id` and USB function `id` use the same identifier meanings as the
-STATUS projection. In receiver records, `receiver` is the receiver number and
-`device` references the containing USB function id; `local` is the receiver's
-local index on that device. Reader `device` also references a USB function id.
-Candidate `device` is the legacy device slot within the candidate observation,
-not the enclosure id or an assertion that the candidate is a child device.
+筐体の `id` および USB ファンクションの `id` は、STATUS 投影と同じ識別子の意味を持つ。レシーバレコードにおいて、`receiver` はレシーバ番号であり、`device` はそれを含む USB ファンクション ID を参照する。`local` はそのデバイス上でのレシーバのローカルインデックスである。リーダーの `device` も USB ファンクション ID を参照する。候補（candidate）の `device` は候補観測内での旧来のデバイススロットであり、筐体 ID ではなく、また候補が子デバイスであることを主張するものでもない。
 
-`serial_unique` describes how to select this enclosure when starting a daemon:
-`true` means `--device serial:…` can select it, while `false` means to use
-`--device usb:…` with its USB path because a duplicate enclosure or matching
-serial makes serial selection ambiguous. `null` retains the existing meaning:
-the serial was not observed, or the scan was incomplete and no duplicate was
-observed. For an observed serial, a duplicate status or matching serial is
-false even in an incomplete scan. A non-duplicate observed serial is true only
-after a complete scan. This describes uniqueness among enclosures in this
-scan, not a global guarantee.
+`serial_unique` は、デーモン起動時にこの筐体をどのように選択すべきかを説明する: `true` は `--device serial:…` で選択できることを意味し、`false` は重複筐体または一致するシリアルによってシリアル選択が曖昧になるため、USB パスを指定する `--device usb:…` を使用すべきであることを意味する。`null` は既存の意味を維持する。すなわち、シリアルが観測されなかったか、またはスキャンが不完全で重複が観測されなかったことを意味する。観測されたシリアルについては、不完全なスキャンであっても、重複状態または一致するシリアルが存在すれば false となる。重複のない観測シリアルは、完全なスキャンの後にのみ true となる。これは本スキャン内の筐体間における一意性を表すものであり、グローバルな保証ではない。
 
-Earlier daemon startup accepted only serial selection. M1UR and S1UR units can
-share the serial `000000000000001`, making that selection ambiguous; the
-`--device`/`--usb-path` options were added for USB-path selection and are now
-represented by the unified `--device serial:`/`usb:` forms.
+初期のデーモン起動ではシリアル選択のみを受け付けていた。M1UR および S1UR ではシリアル `000000000000001` が共有される場合があり、その選択が曖昧になる。そのため USB パス選択のための `--device`/`--usb-path` オプションが追加され、現在は統合された `--device serial:`/`usb:` 形式で表現される。
 
-scan.complete and scan.issues describe enumeration of the whole scan.
-Issues carry a stable code and human-readable detail. Enclosure status
-describes grouping and is independent: ready, incomplete, duplicate, or
-invalid_observation (or unknown when the adapter cannot classify it).
-candidates preserves alternative USB observations for
-a duplicate enclosure; those observations are not asserted as its child
-devices. Each candidate carries its device slot, nullable serial and nullable
-bus/address/port. USB observations that cannot be assigned to an enclosure
-remain in ungrouped_usb_devices, with nullable serial/model/location, VID:PID
-and a status of usable, unsupported, invalid_serial, insufficient_speed,
-invalid_topology, open_failed, or unknown.
+`scan.complete` および `scan.issues` はスキャン全体の列挙状態を説明する。issues は安定したコードと人間が読める詳細を保持する。筐体ステータスはグループ化の状態を説明し、独立している: `ready`、`incomplete`、`duplicate`、または `invalid_observation`（あるいはアダプタが分類できない場合は `unknown`）。`candidates` は重複筐体に対する代替の USB 観測結果を保持する。それらの観測結果がその子デバイスであると主張されることはない。各候補はデバイススロット、nullable なシリアル、および nullable な bus/address/port を保持する。筐体に割り当てられない USB 観測結果は `ungrouped_usb_devices` に留まり、nullable な serial/model/location、VID:PID、および `usable`、`unsupported`、`invalid_serial`、`insufficient_speed`、`invalid_topology`、`open_failed`、`unknown` のいずれかのステータスを持つ。
 
-`lnb_15v_supported` is the enclosure's static LNB capability; it is `null`
-when unknown and is not the current `lnb_15v_enabled` status. `readers` is
-omitted while the reader inventory is unknown, and is an array (including
-`[]`) when that inventory is known. Each reader identifies its reader number
-and the observed device that supplies it. Receiver numbers must be unique
-across the whole enclosure, including within one device.
+`lnb_15v_supported` は筐体の静的な LNB 機能である。未知の場合は `null` であり、現在の `lnb_15v_enabled` ステータスではない。`readers` はリーダー構成が未知の間は省略され、その構成が判明している場合は配列（`[]` を含む）となる。各リーダーはリーダー番号と、それを提供する観測デバイスを特定する。レシーバ番号は、1 つのデバイス内を含め、筐体全体を通じて一意でなければならない。
 
-`discovery_json_size` validates and measures the whole input. The encoder
-validates and measures before writing, returns `BUFFER_TOO_SMALL` for a short
-output, and leaves the output unchanged on either failure. The API is part of
-the existing `dtv::json` library; it adds no writer-only target. Scan arrays
-are borrowed pointer/count pairs, so the adapter can supply every observed
-enclosure without a fixed discovery-count limit; keep the pointed-to arrays
-unchanged for the duration of either call.
+`discovery_json_size` は入力全体を検証しサイズを計測する。エンコーダは書き込み前に検証と計測を行い、出力先不足には `BUFFER_TOO_SMALL` を返し、いずれの失敗時にも出力バッファを変更しない。この API は既存の `dtv::json` ライブラリの一部であり、出力専用ターゲットを追加するものではない。スキャン配列は借用されたポインタ/要素数のペアであるため、アダプタは固定の検出件数上限に縛られることなく観測されたすべての筐体を提供できる。いずれの呼び出しの期間中も、指し示された配列を変更してはならない。

@@ -1,193 +1,103 @@
-# UDTV 1.0 typed records
+# UDTV 1.0 型付きレコード
 
-`dtv::wire::records` (`include/dtv/userland/records.h`, `src/records.cpp`, part of the
-`dtv_userland_wire` target) is an independently written, bounded codec for the typed UDTV 1.0
-records that follow the envelope and the HELLO/ACQUIRE subset. It reuses the envelope, the
-fragment-tolerant `FrameReceiver`, and the existing HELLO request / ACQUIRE codecs unchanged; it
-is not connected to any product client, daemon, or IPC endpoint.
+`dtv::wire::records`（`include/dtv/userland/records.h`、`src/records.cpp`、`dtv_userland_wire` ターゲットの一部）は、エンベロープおよび HELLO/ACQUIRE サブセットに続く型付き UDTV 1.0 レコードのために独自実装された、上限付きコーデックである。エンベロープ、断片化に対応した `FrameReceiver`、および既存の HELLO 要求 / ACQUIRE コーデックを変更せずそのまま再利用する。製品クライアント、デーモン、IPC エンドポイントとは接続していない。
 
-## Encoding conventions
+## エンコード規約
 
-| Form | Bytes |
+| 形式 | バイト数 |
 |---|---|
-| `u8`/`u16`/`u32`/`u64`/`i32` | fixed width, little-endian |
-| `bool` | `u8` 0 or 1 |
-| `UUID`/epoch/token | 16 opaque bytes |
-| `str[N]` | `u16` byte length + UTF-8 bytes, at most `N`, no embedded NUL |
-| `bytes[N]` | `u32` length + bytes, at most `N` |
-| `arr<T,N>` | `u16` count + elements, at most `N` |
-| `opt<T>` | `u8` tag (0 absent / 1 present) + value when present |
+| `u8`/`u16`/`u32`/`u64`/`i32` | 固定幅、リトルエンディアン |
+| `bool` | `u8` の 0 または 1 |
+| `UUID`/epoch/token | 16 バイトの不透明データ（opaque bytes） |
+| `str[N]` | `u16` バイト長 + UTF-8 バイト列（最大 `N`、NUL 埋め込み不可） |
+| `bytes[N]` | `u32` 長さ + バイト列（最大 `N`） |
+| `arr<T,N>` | `u16` 要素数 + 各要素（最大 `N`） |
+| `opt<T>` | `u8` タグ（0: 非存在 / 1: 存在） + 存在時の値 |
 
-`Model` is encoded as `str[128] name`. There is no wire `id` field. In the STATUS
-enclosure and LIST/STATUS function records, the optional Model tag still precedes this value.
+`Model` は `str[128] name` としてエンコードされる。wire 上の `id` フィールドは存在しない。STATUS の enclosure および LIST/STATUS の function レコードでは、この値の直前に optional な Model タグが依然として先行する。
 
-The independent LNB power operation uses opcode `0x0039`. Its request and response bodies each
-contain the 16-byte epoch followed by `bool enabled` as one byte (`0` off, `1` on). This is the
-same-release internal control record; it does not add connection dispatch, a client helper, a
-daemon permission check, or product LNB support.
+独立した LNB 給電操作は opcode `0x0039` を使用する。その要求および応答ボディは、それぞれ 16 バイトの epoch と、それに続く 1 バイトの `bool enabled`（`0`: オフ、`1`: オン）で構成される。これは同一リリース内の内部制御レコードであり、接続ディスパッチ、クライアントヘルパー、デーモンの権限検査、製品の LNB サポートを追加するものではない。
 
-Every record is stored in explicit fixed-size storage (`WString`, `BBytes`, `BArray`,
-`Optional`); nothing allocates and no host struct is copied to or from the wire. The one
-exception is `TsData`, which aliases the packet bytes in the input view instead of storing a
-1 MiB array.
+すべてのレコードは明示的な固定サイズ領域（`WString`、`BBytes`、`BArray`、`Optional`）に格納される。動的メモリ確保は行われず、ホストの構造体をそのまま wire へ/wire からコピーすることもない。唯一の例外は `TsData` であり、1 MiB の配列を保持する代わりに入力ビュー内のパケットバイト列をエイリアス（参照）する。
 
-## Codec error contract
+## コーデックのエラー契約
 
-Decoders require the exact payload size. Within a record:
+デコーダは厳密なペイロードサイズを要求する。レコード内では次のエラーを返す:
 
-- `PROTOCOL_ERROR`: a size, count, length, optional tag, UTF-8, array-order or duplicate-ID
-  violation, and trailing bytes after the last field.
-- `INVALID_ARGUMENT`: a right-sized value that is out of range — an unknown enum, a reserved
-  bit, a zero ID/lease/generation where the spec requires nonzero, an unsupported measurement in
-  a declared set, or a semantic coupling such as `usable` without a matching generation.
-- `RESOURCE_LIMIT`: a well-formed record whose encoded size would exceed `kMaxControlPayload`
-  (65,536). It is returned before any byte is written and is distinct from `BUFFER_TOO_SMALL`,
-  which means the caller's own buffer is too short. With the current caps every legal record fits
-  under the control cap (the fully populated maximum STATUS is 58,780 bytes with 16 entries in
-  each stream counter set, including both
-  enclosure observation optionals present); the guard is kept
-  for future layouts.
-- Encoders return `INVALID_ARGUMENT` for any invalid value and `BUFFER_TOO_SMALL` for a short
-  output. An encoder measures the whole record with a counting pass first, so a short output
-  leaves the caller buffer untouched and a record is never truncated.
+- `PROTOCOL_ERROR`: サイズ、要素数、長さ、optional タグ、UTF-8、配列順序、重複 ID の違反、および最終フィールド以降の余剰バイト。
+- `INVALID_ARGUMENT`: サイズは正しいが範囲外の値。未知の enum、予約ビット、仕様上 0 以外が要求される箇所での 0 の ID/lease/generation、宣言集合に含まれない未サポート測定値、または対応する generation のない `usable` のような意味的結合の不整合。
+- `RESOURCE_LIMIT`: 正当な形式であるが、エンコード後サイズが `kMaxControlPayload` (65,536) を超えるレコード。1 バイトも書き込まれる前に返され、呼び出し側自身のバッファ不足を意味する `BUFFER_TOO_SMALL` とは区別される。現行の上限規約では、正当なすべてのレコードが制御上限内に収まる（最大構成の STATUS であっても、両方の enclosure 観測 option が存在し各ストリームカウンタ集合に 16 エントリが含まれる状態で 58,780 バイト）。このガードは将来のレイアウト変更に備えて保持されている。
+- エンコーダは、いかなる不正な値に対しても `INVALID_ARGUMENT` を返し、出力バッファ不足には `BUFFER_TOO_SMALL` を返す。エンコーダは最初にカウントパスを実行してレコード全体の長さを測るため、出力バッファ不足時に呼び出し側バッファを変更することはなく、レコードが途中で切断されることもない。
 
-## STATUS enclosure observations
+## STATUS の enclosure 観測値
 
-Within a release, `StatusResponse` encodes `opt(enclosure)` followed by
-`opt<bool> lnb_15v_enabled` and `opt<bool> card_inserted`, in that order, before `topology`.
-Each optional boolean is a one-byte presence tag (0 absent, 1 present) followed by a one-byte
-boolean (0 false, 1 true) when present. An absent value means unknown, unavailable, or unobserved;
-it is distinct from an observed `false`. `card_inserted` represents an enclosure-level internal
-card observation and is not derived by aggregating reader states. External reader observations
-remain in their reader records.
+同一リリース内において、`StatusResponse` は `opt(enclosure)`、それに続く `opt<bool> lnb_15v_enabled` および `opt<bool> card_inserted` をこの順序でエンコードしてから `topology` をエンコードする。各 optional boolean は、1 バイトの存在タグ（0: 非存在、1: 存在）と、存在時の 1 バイトの boolean（0: false、1: true）で構成される。非存在の値は、未知（unknown）、利用不可（unavailable）、または未観測（unobserved）を意味し、観測された `false` とは区別される。`card_inserted` は筐体レベルの内部カード観測値を表し、リーダー状態を集約して導出されたものではない。外部リーダーの観測値は各リーダーレコード内に保持される。
 
-The envelope version is UDTV 1.0. This record layout is supported only between daemon and
-client components from the same release. The `Model` record in this revision is name-only; its
-bytes differ from the earlier development series at Core `af82b7a`, which encoded both `id` and
-`name`. This does not assert that the complete record layout matches that development series.
-Mixed-release STATUS layouts, including the earlier main layout without the two enclosure
-observation optionals, are unsupported; the decoder retains its exact-size and strict optional-tag
-checks.
+エンベロープバージョンは UDTV 1.0 である。このレコードレイアウトは、同一リリースに属するデーモンとクライアントコンポーネント間でのみサポートされる。本リビジョンにおける `Model` レコードは name のみであり、そのバイト列は、`id` と `name` の双方をエンコードしていた Core `af82b7a` 時点の初期開発系列とは異なる。これは完全なレコードレイアウトがその開発系列と一致することを主張するものではない。2 つの enclosure 観測 option を持たなかった旧 main レイアウトを含め、異なるリリース間の STATUS レイアウトはサポート外である。デコーダは厳密なサイズ検査および厳格な optional タグ検査を維持する。
 
-## Stream counters
+## ストリームカウンタ
 
-`StreamCounters` carries 2..16 ascending entries. IDs 5 (`transmitted_packets`) and 6
-(`queue_dropped_packets`) are required; IDs 7..32 are optional, while ID 0 and IDs 33..255 are
-rejected. IDs 7..12 are `stream_bytes`, `sync_errors`, `tei_packets`, `continuity_errors`,
-`stream_usb_errors`, and `empty_intervals`; ID 13..32 are reserved for future optional counters.
-Each entry uses the existing `Counter` measurement state: `valid` includes measured zero,
-`unknown` preserves its reason, and optional `unsupported` entries are omitted from JSON and CLI
-presentation. Unknown optional entries are fully validated and skipped by projections; they never
-alias a known field name. The frame envelope remains version 1.0. Mixed-release peers remain
-unsupported; the existing exact-size and semantic validation checks are unchanged.
+`StreamCounters` は昇順に並んだ 2〜16 個のエントリを運ぶ。ID 5 (`transmitted_packets`) および 6 (`queue_dropped_packets`) は必須であり、ID 7〜32 は任意（optional）である。ID 0 および ID 33〜255 は拒否される。ID 7〜12 は `stream_bytes`、`sync_errors`、`tei_packets`、`continuity_errors`、`stream_usb_errors`、`empty_intervals` であり、ID 13〜32 は将来の任意カウンタ用に予約されている。各エントリは既存の `Counter` 測定状態を使用する。`valid` は測定された 0 を含み、`unknown` はその理由を保持し、任意の `unsupported` エントリは JSON および CLI 表示から除外される。未知の任意エントリは完全に検証され、投影処理によってスキップされる。既知のフィールド名をエイリアスすることはない。フレームエンベロープはバージョン 1.0 のままである。異なるリリースのピア間通信は未サポートのままであり、既存の厳密なサイズ検査および意味的検証検査は変更されない。
 
-## Validation split
+## 検証の分離（Validation split）
 
-Byte codecs check only what is local to a record plus the bounded containers. A separate set of
-validators checks references and context, and must run before a snapshot is published or an
-operation is dispatched:
+バイトコーデックは、レコードに局所的な内容と上限付きコンテナのみを検査する。参照やコンテキストを検査する独立したバリデータ群が存在し、スナップショットの公開や操作のディスパッチの前に必ず実行されなければならない:
 
-- `validate_error_record`, `validate_scope`
-- `validate_capabilities`, `validate_receiver_descriptor`, `validate_reader_descriptor`,
-  `validate_topology`, `validate_limits`
-- `validate_measurements` (metric ID set must equal the declared `measurement_mask`; each declared
-  metric must be present and `unknown`/`valid`, never `unsupported`)
-- `validate_stream_counters` (required IDs 5 and 6, optional IDs 7..32, at most 16 ascending
-  entries), `validate_receiver_counters` (subset of ID1..4),
-  including the saturation rule that `overflow=true` requires `value == UINT64_MAX`
-- `validate_stream_final` (reason/error coupling), `validate_receiver_status`,
-  `validate_reader_status`, `validate_card_observation`, `validate_card_session_result`,
-  `validate_card_status_response`
-- `validate_binding` (a `function_id` must exist in the same snapshot)
+- `validate_error_record`、`validate_scope`
+- `validate_capabilities`、`validate_receiver_descriptor`、`validate_reader_descriptor`、`validate_topology`、`validate_limits`
+- `validate_measurements`（測定項目 ID 集合は宣言された `measurement_mask` と一致しなければならない。宣言された各測定項目は必ず存在し、`unknown` または `valid` でなければならず、`unsupported` であってはならない）
+- `validate_stream_counters`（必須 ID 5 および 6、任意 ID 7〜32、最大 16 個の昇順エントリ）、`validate_receiver_counters`（ID 1〜4 のサブセット）。これらには `overflow=true` の場合に `value == UINT64_MAX` を要求する飽和規則が含まれる
+- `validate_stream_final`（理由とエラーの結合）、`validate_receiver_status`、`validate_reader_status`、`validate_card_observation`、`validate_card_session_result`、`validate_card_status_response`
+- `validate_binding`（`function_id` は同一スナップショット内に存在しなければならない）
 - `validate_list_response`
-- `validate_status_response_scope` (shape only) and `validate_status_response` (aggregate)
+- `validate_status_response_scope`（形状のみ）および `validate_status_response`（集約検査）
 
-`validate_status_response(value, StatusContext{list})` is the complete path a caller runs before
-publishing a snapshot or dispatching an operation. The context is a canonical, validated
-same-epoch `ListResponse`; it supplies the epoch the scope belongs to and the complete published
-function/receiver/reader descriptors. Every validator first runs the exact codec local checks
-over the value, so a direct typed caller cannot bypass enum/state/reason/reserved/cap rules with
-a `static_cast`. The aggregate then checks:
+`validate_status_response(value, StatusContext{list})` は、スナップショットの公開または操作のディスパッチ前に呼び出し側が実行する完全な検証パスである。コンテキストは、正規化・検証済みの同一 epoch の `ListResponse` である。これは scope が属する epoch と、公開された完全な function/receiver/reader 記述子を提供する。すべてのバリデータは、まず値に対してコーデック局所の厳密な検査を実行するため、型付きインターフェースを直接呼び出す側が `static_cast` を使って enum/state/reason/reserved/cap 規則を迂回することはできない。集約検査では次に以下を検証する:
 
-- the response context epoch equals the canonical list epoch;
-- duplicate IDs and membership: every response function/receiver/reader ID must exist in the
-  canonical list, and a receiver/reader descriptor must match the canonical one in `systems`,
-  `binding` and `capabilities`;
-- for a global (`enclosure`) scope the response returns the complete same-epoch function,
-  receiver and reader sets (counts and IDs equal to the canonical list), and collection presence
-  must match the canonical topology: a known canonical topology requires both collections, a
-  genuinely unknown canonical topology requires both omitted. A known empty reader set is a
-  present array of count 0;
-- for a partial scope the single returned receiver/reader is a canonical member with a matching
-  descriptor; references are still resolved against the canonical function set;
-- `Limits.max_concurrent_streams` against the canonical public receiver count, and every valid
-  measurement/counter/card sample time against `snapshot.observed_at_ns`;
-- a retained (last) stream target requires the receiver still `leased`.
+- 応答コンテキストの epoch が正規 list の epoch と等しいこと。
+- 重複 ID および所属関係: 応答に含まれるすべての function/receiver/reader ID が正規 list に存在し、receiver/reader 記述子の `systems`、`binding`、`capabilities` が正規記述子と一致すること。
+- グローバル（`enclosure`）スコープの場合、応答が同一 epoch の完全な function、receiver、reader 集合（要素数および ID が正規 list と等しい）を返し、コレクションの存在有無が正規 topology と一致すること。既知の正規 topology では両方のコレクションが存在することを要求し、真に未知の正規 topology では両方が省略されることを要求する。既知の空 reader 集合は要素数 0 の存在する配列とする。
+- 部分スコープの場合、返される単一の receiver/reader が正規メンバーであり記述子が一致すること。参照は依然として正規 function 集合に対して解決される。
+- 正規の公開レシーバ数に対する `Limits.max_concurrent_streams` の照合、および `snapshot.observed_at_ns` に対するすべての有効な測定値/カウンタ/カードサンプリング時刻の照合。
+- 保持された（前回の）ストリームターゲットでは、レシーバが依然として `leased` 状態であることを要求する。
 
-When the canonical context is missing (or its epoch does not match), the function returns
-`INVALID_ARGUMENT`: the partial record's own claims never substitute for a validated LIST.
-`validate_status_response_scope` remains a shape-only pre-check.
+正規コンテキストが存在しない場合（またはその epoch が一致しない場合）、関数は `INVALID_ARGUMENT` を返す。部分レコード自身の主張が検証済み LIST の代わりになることは決してない。`validate_status_response_scope` は形状のみの事前検査として維持される。
 
-## Not in this increment
+## 本インクリメントに含まれないもの
 
-- Dispatcher and connection state: HELLO first, negotiated version, reused/past request IDs,
-  `UNSUPPORTED` for missing required features, STATE_EVENT subscription, request/response
-  matching.
-- The 5-second frame and HELLO deadlines, sockets, timeouts, daemon/hardware integration.
-- PID-filter feature gating, profile range checks for frequency/tsid/slot, and the JSON exporter
-  and CLI translation.
-- Any product endpoint, CLI, JSON cutover, version bump or publication.
+- ディスパッチャおよび接続状態: 初回 HELLO、交渉済みバージョン、再利用または過去の request ID、不足している必須機能に対する `UNSUPPORTED`、STATE_EVENT 購読、要求と応答の突き合わせ。
+- フレームおよび HELLO の 5 秒期限、ソケット、タイムアウト、デーモンやハードウェアとの統合。
+- PID フィルタ機能のゲーティング、周波数/tsid/slot のプロファイル範囲検査、JSON エクスポータおよび CLI 変換。
+- 製品エンドポイント、CLI、JSON 切り替え、バージョン引き上げやリリース公開。
 
-This section describes the `dtv::wire` component alone. When
-`DTV_USERLAND_BUILD_CONTROL=ON`, the separate internal `dtv::control` component
-provides the socketless connection gate and response helpers described in
-[`control-connection.md`](control-connection.md); service execution and product
-integration remain outside that component.
+本節は `dtv::wire` コンポーネント単体について述べている。`DTV_USERLAND_BUILD_CONTROL=ON` の場合、分離された内部コンポーネント `dtv::control` が [`control-connection.md`](control-connection.md) に記載されたソケット不要な接続ゲートと応答ヘルパーを提供する。サービス実行や製品統合はそのコンポーネントの対象外である。
 
-## Rules taken as adopted, not open
+## 確定事項として扱う規則
 
-The review that preceded this revision flagged several points that the design documents do
-determine; they are implemented as fixed rules, not recorded as ambiguities:
+本リビジョンに先行するレビューで、設計文書によって決定されていると指摘された複数の事項が存在する。これらは曖昧さとしてではなく、確定した規則として実装されている:
 
-- Capabilities carry the LNA/LNB bodies directly under the `controls` bits with **no** optional
-  presence tag, so minimal capabilities are four zero bytes.
-- Issued lease/stream/card handle/generation IDs are nonzero; a stream scope target is nonzero
-  too; a present `Error` has a nonzero code.
-- `overflow=true` requires `value == UINT64_MAX`; a saturated counter is never a wrap.
-- A STOP completion with `quiesced=false` must carry `final.error`.
-- A TRANSMIT command is 1..4096 bytes.
-- ISDB-T cannot select TSID or slot (`selection` stays `automatic`).
-- An absent `UsbFunction.model` requires an identification reason other than `none`; a known cold
-  model may still carry `cold_model`.
-- When LNA is provided, its defaults must cover exactly the descriptor's supported systems (one
-  entry per supported system, no missing or extra, no duplicates).
-- `frequency_hz` and a present `programmed_hz` are positive and at most 2^53-1; the profile range
-  is checked outside the codec.
-- A STATUS `enclosure.identity` never asserts scan uniqueness: uniqueness is `unknown` when the
-  serial state is `present` or `unknown` (an unknown state is not confirmed absence), and
-  `not_applicable` only on confirmed `absent`. `unique_in_scan` and `duplicate` remain
-  LIST/discovery values.
-- A known topology returns both `receivers` and `readers`; a known-empty reader set is a present
-  array of count 0, not an absent one. Unknown topology omits both.
-- TUNE `timeout_ms` and the other TUNE optionals are explicitly defined by the design; the
-  "no unrequested timeout option" sentence is card-specific.
-- The detailed STOP/card/partial-scope records refine the basic draft rather than contradict it.
+- Capabilities は、`controls` ビットの直下に optional な存在タグを**伴わずに** LNA/LNB ボディを直接保持する。したがって最小 capabilities は 4 バイトのゼロである。
+- 発行される lease/stream/card handle/generation ID は 0 以外（nonzero）である。ストリームスコープのターゲットも 0 以外である。存在する `Error` は 0 以外のコードを持つ。
+- `overflow=true` は `value == UINT64_MAX` を要求する。飽和カウンタがラップ（周回）することはない。
+- `quiesced=false` を伴う STOP 完了は、必ず `final.error` を保持しなければならない。
+- TRANSMIT コマンドは 1〜4096 バイトである。
+- ISDB-T では TSID または slot を選択できない（`selection` は `automatic` のまま）。
+- 非存在の `UsbFunction.model` は、`none` 以外の識別理由（identification reason）を要求する。既知のコールドモデルは `cold_model` を保持してよい。
+- LNA が提供される場合、そのデフォルト値は記述子のサポートシステムと厳密に一致しなければならない（サポートされるシステムごとに 1 エントリ。不足、過剰、重複は不可）。
+- `frequency_hz` および存在する `programmed_hz` は正数かつ最大 2^53−1 である。プロファイル範囲はコーデックの外部で検査される。
+- STATUS の `enclosure.identity` がスキャンの一意性（uniqueness）を主張することは決してない。シリアル状態が `present` または `unknown` の場合、uniqueness は `unknown` となり（unknown 状態は不在の確定ではない）、不在（`absent`）が確認された場合のみ `not_applicable` となる。`unique_in_scan` および `duplicate` は LIST/discovery の値として残る。
+- 既知の topology は `receivers` と `readers` の両方を返す。既知の空 reader 集合は要素数 0 の存在する配列であり、非存在ではない。未知の topology は両方を省略する。
+- TUNE の `timeout_ms` およびその他の TUNE optional 項目は設計によって明示的に定義されている。「要求されないタイムアウトオプションは存在しない」という記述はカード固有のものである。
+- 詳細な STOP/カード/部分スコープのレコードは、基本的なドラフトと矛盾するものではなく、それを精緻化したものである。
 
-## Open ambiguities
+## 残された未決事項
 
-Only points that cannot be derived from the existing documents remain:
+既存文書から導出できない項目のみが残されている:
 
-1. **Zero-packet TS_DATA.** The layout fixes the maximum packet bytes and the 188 alignment but
-   does not say whether a TS_DATA event with zero packets is legal. The codec accepts it.
-2. **PID array order.** The draft requires no duplicates but does not require ascending order; the
-   codec rejects duplicates with a bitmap and preserves the transmitted order.
-3. **Peer-advertised HELLO limits.** `max_control_payload` and `max_ts_bytes` describe the peer and
-   are carried unchanged; no cross-check against the local caps is performed.
+1. **ゼロパケットの TS_DATA**: レイアウトでは最大パケットバイト数と 188 アラインメントを定めているが、0 パケットの TS_DATA イベントが正当であるかは規定していない。コーデックはこれを受理する。
+2. **PID 配列の順序**: ドラフトは重複がないことを要求しているが、昇順であることは要求していない。コーデックはビットマップにより重複を拒否し、送信された順序を保持する。
+3. **ピアが通知する HELLO 上限**: `max_control_payload` および `max_ts_bytes` はピア側の仕様を表し、そのまま運搬される。ローカル上限との相互照合は行わない。
 
-## Provenance
+## 来歴（Provenance）
 
-Requirements come from `shared/design/common-wire-draft.md`, `wire-record-layout.md`,
-`common-api-contract.md`, `json-record-contract.md` and `cli-contract-draft.md`, under the
-conditional adoption in `adoption-status.md`. The code is an independent MIT implementation
-(`independent-code-policy.md`); it copies no product payload, card protocol, hardware sequence or
-vendor asset.
+要件は、`adoption-status.md` の条件付き採用に基づき、`shared/design/common-wire-draft.md`、`wire-record-layout.md`、`common-api-contract.md`、`json-record-contract.md`、`cli-contract-draft.md` から得られている。コードは独自の MIT 実装であり（`independent-code-policy.md`）、製品のペイロード、カードプロトコル、ハードウェア手順、ベンダーのアセットをコピーしていない。

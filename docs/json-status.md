@@ -1,74 +1,43 @@
-# STATUS JSON projection
+# STATUS JSON 投影
 
-`dtv::userland::wire::status_json_size` and `encode_status_json` project a validated
-`StatusResponse` to one compact UTF-8 JSON object. The caller supplies the canonical same-epoch
-`ListResponse` used by `validate_status_response`. The encoder appends one newline, no NUL, and
-does not allocate. The input, context and output storage must not overlap and must remain
-unchanged during the call.
+`dtv::userland::wire::status_json_size` および `encode_status_json` は、検証済みの `StatusResponse` を 1 つのコンパクトな UTF-8 JSON オブジェクトへと投影する。呼び出し側は、`validate_status_response` で使用される正規の同一 epoch の `ListResponse` を提供する。エンコーダは末尾に改行 1 つを追加し、NUL は含めず、動的メモリ確保を行わない。入力、コンテキスト、出力領域は重複してはならず、呼び出し中は変更されてはならない。
 
-## Public field mapping
+## 公開フィールドマッピング
 
-The emitted root fields are `schema`, `producer`, `context`, `snapshot`, `scope`, `enclosure`,
-and `topology`. `usb_functions`, `receivers`, and `readers` are included only when their
-corresponding optional collection is present.
+出力されるルートフィールドは `schema`、`producer`、`context`、`snapshot`、`scope`、`enclosure`、`topology` である。`usb_functions`、`receivers`、`readers` は、対応する optional コレクションが存在する場合にのみ含まれる。
 
-| Emitted path | JSON representation |
+| 出力パス | JSON 表現 |
 | --- | --- |
-| `producer.product`, `producer.version`, `producer.core_version` | strings; an absent core version is `null` |
-| `context.epoch`, `context.instance`, `context.state`, `context.last_error` | lowercase hexadecimal epoch, nullable instance, readable state string, and nullable error |
-| `snapshot.sequence`, `snapshot.observed_at_ns` | decimal strings preserving all 64 bits |
-| `scope.kind`, `scope.id` | readable kind string; enclosure id is `null`, stream id is a decimal string, and receiver/reader ids are JSON numbers |
-| `enclosure.id`, `enclosure.model`, `enclosure.serial` | JSON number; model name string or `null`; serial string or `null` |
-| `enclosure.lnb_15v_enabled`, `enclosure.card_inserted` | JSON boolean or `null` |
-| `enclosure.limits.max_concurrent_streams` | JSON number or `null` |
-| `topology.state`, `topology.expected_function_count` | readable state string and JSON number or `null` |
-| `usb_functions[]` | objects with `id`, `usb`, `mode`, `location.usb_path`, `location.bus`, `location.address`, `serial`, `model`, `present`, and `last_error` |
-| `receivers[]` | objects with `descriptor`, `present`, `state`, `operation`, `leased`, `tune_revision`, `current_tune`, `last_successful_tune`, `stream`, `last_stream`, `measurements`, `statistics`, and `last_error` |
-| `receivers[].descriptor` | `receiver` number, `systems` array of formal names such as `ISDB-T` and `ISDB-S`, and nullable `binding`; a present binding has numeric `function_id` and `local_id` |
-| `receivers[].current_tune`, `receivers[].last_successful_tune` | nullable tune object with decimal-string `revision`, `system`, numeric `frequency_hz`, nullable numeric `programmed_hz`, `selection`, and `verification`; `selection.kind` is `auto`, `tsid`, or `slot`, and `selection.value` is omitted for `auto` |
-| `receivers[].stream` | nullable active stream object with decimal-string `id` and `tune_revision`, and `phase` |
-| `receivers[].last_stream` | nullable final stream object with decimal-string `id` and `tune_revision`, `reason`, nullable `error`, and `statistics` counter map |
-| `receivers[].measurements`, `receivers[].statistics` | supported measurement objects and named counters; each collection reflects only entries represented by the typed STATUS value |
-| `receivers[].statistics.receiver`, `receivers[].statistics.stream` | receiver counter map and nullable stream counter map; each counter value object contains `value`, `sampled_at_ns`, `reason`, and `overflow` |
-| `readers[]` | objects with `descriptor`, `present`, `card`, `operation`, `handles_open`, `transaction_active`, and `last_error`; `card` contains `state`, `sampled_at_ns`, and `reason` |
-| error `code` within the Core `Error` enum | its defined symbol |
-| error `code` outside that enum | `code: "UNKNOWN"` and the original numeric `numeric_code` |
+| `producer.product`, `producer.version`, `producer.core_version` | 文字列。非存在の core バージョンは `null` |
+| `context.epoch`, `context.instance`, `context.state`, `context.last_error` | 小文字 16 進数の epoch、nullable な instance、可読ステータス文字列、nullable な error |
+| `snapshot.sequence`, `snapshot.observed_at_ns` | 64 ビット全体を保持する 10 進文字列 |
+| `scope.kind`, `scope.id` | 可読 kind 文字列。enclosure id は `null`、stream id は 10 進文字列、receiver/reader id は JSON 数値 |
+| `enclosure.id`, `enclosure.model`, `enclosure.serial` | JSON 数値、モデル名文字列または `null`、シリアル文字列または `null` |
+| `enclosure.lnb_15v_enabled`, `enclosure.card_inserted` | JSON boolean または `null` |
+| `enclosure.limits.max_concurrent_streams` | JSON 数値または `null` |
+| `topology.state`, `topology.expected_function_count` | 可読 state 文字列、および JSON 数値または `null` |
+| `usb_functions[]` | `id`、`usb`、`mode`、`location.usb_path`、`location.bus`、`location.address`、`serial`、`model`、`present`、`last_error` を持つオブジェクト |
+| `receivers[]` | `descriptor`、`present`、`state`、`operation`、`leased`、`tune_revision`、`current_tune`、`last_successful_tune`、`stream`、`last_stream`、`measurements`、`statistics`、`last_error` を持つオブジェクト |
+| `receivers[].descriptor` | `receiver` 番号、`ISDB-T` や `ISDB-S` などの正式名称の `systems` 配列、nullable な `binding`。存在する binding は数値の `function_id` と `local_id` を持つ |
+| `receivers[].current_tune`, `receivers[].last_successful_tune` | 10 進文字列 `revision`、`system`、数値 `frequency_hz`、nullable な数値 `programmed_hz`、`selection`、`verification` を持つ nullable な tune オブジェクト。`selection.kind` は `auto`、`tsid`、`slot` のいずれかで、`auto` の場合 `selection.value` は省略される |
+| `receivers[].stream` | 10 進文字列の `id` と `tune_revision`、および `phase` を持つ nullable なアクティブストリームオブジェクト |
+| `receivers[].last_stream` | 10 進文字列の `id` と `tune_revision`、`reason`、nullable な `error`、`statistics` カウンタマップを持つ nullable な最終ストリームオブジェクト |
+| `receivers[].measurements`, `receivers[].statistics` | サポートされる測定値オブジェクトおよび名前付きカウンタ。各コレクションは型付き STATUS 値によって表されるエントリのみを反映する |
+| `receivers[].statistics.receiver`, `receivers[].statistics.stream` | レシーバカウンタマップおよび nullable なストリームカウンタマップ。各カウンタ値オブジェクトは `value`、`sampled_at_ns`、`reason`、`overflow` を含む |
+| `readers[]` | `descriptor`、`present`、`card`、`operation`、`handles_open`、`transaction_active`、`last_error` を持つオブジェクト。`card` は `state`、`sampled_at_ns`、`reason` を含む |
+| Core `Error` enum 内のエラー `code` | 定義されたシンボル |
+| その enum 外のエラー `code` | `code: "UNKNOWN"` および元の数値 `numeric_code` |
 
-Names such as `context`, `limits`, `measurements`, `statistics`, `tune.selection.kind`, and
-`stream.phase` are retained from the implementation's existing projection. Their presence here
-documents the emitted shape; it does not establish additional field semantics beyond the accepted
-STATUS decisions and values validated by Core.
+`context`、`limits`、`measurements`、`statistics`、`tune.selection.kind`、`stream.phase` などの名称は、既存の実装における投影から維持されている。ここでの記述は出力される形状を文書化するものであり、採択された STATUS の決定事項や Core によって検証された値を超える追加のフィールド意味論を確立するものではない。
 
-The public `model` value in STATUS and discovery JSON is the model **name only**, represented as a
-string or `null`; a model identifier is not emitted. The example name form is `"PX-Q3U4"`. This
-follows the accepted response 2.A / RC47 decision. `receivers[].descriptor.capabilities` is not
-emitted in this STATUS projection. This does not defer capability publication as a whole:
-discovery JSON publishes static reader and LNB configuration. LNA values and defaults alone remain
-held for later investigation; their publication details are not established here.
+STATUS および discovery JSON における公開 `model` 値はモデル**名のみ**であり、文字列または `null` として表現される。モデル識別子は出力されない。名前の形式例は `"PX-Q3U4"` である。これは採択された回答 2.A / RC47 決定に従う。`receivers[].descriptor.capabilities` は本 STATUS 投影では出力されない。これは機能公開全体を保留するものではない。discovery JSON は静的なリーダーおよび LNB 構成を公開する。LNA の値およびデフォルトのみが後続の調査のために保留されており、その公開の詳細はここでは確立されない。
 
-`usb_functions[]` does not emit the internal `serial_state` or `identification_reason` fields.
-Those fields describe internal query/identification state and are not part of this projection.
+`usb_functions[]` は、内部フィールドである `serial_state` や `identification_reason` を出力しない。これらのフィールドは内部の照会/識別状態を記述するものであり、本投影の一部ではない。
 
-An absent optional string or observation is emitted as JSON `null`. Internal enclosure
-`IdentitySerialState`, `Uniqueness`, `UsbFunction::serial_state`, and
-`UsbFunction::identification_reason` are not public status vocabularies. `serial_unique` is a
-whole-scan discovery result and is not computed from one STATUS response. The enclosure CARD
-field is the internal observation; it is not derived from readers, and reader state stays under
-`readers[].card`. This projection does not build the `enclosures[].devices[].receivers[]`
-whole-scan discovery hierarchy.
+非存在の optional 文字列または観測値は JSON の `null` として出力される。内部の筐体 `IdentitySerialState`、`Uniqueness`、`UsbFunction::serial_state`、`UsbFunction::identification_reason` は公開 status の語彙ではない。`serial_unique` はスキャン全体の検出結果であり、単一の STATUS 応答から算出されるものではない。筐体の CARD フィールドは内部の観測値であり、リーダーから導出されるものではなく、リーダーの状態は `readers[].card` の配下に留まる。本投影は、スキャン全体の検出階層である `enclosures[].devices[].receivers[]` を構築しない。
 
-## Writer guarantees
+## 出力処理の保証（Writer guarantees）
 
-Both public operations first run full `StatusResponse` validation against the canonical LIST.
-`status_json_size` returns the exact byte count including the final newline. `encode_status_json`
-counts before writing; invalid values, invalid output spans and short output buffers leave the
-caller buffer unchanged. Strings escape JSON quotes, backslashes and control bytes while
-preserving valid UTF-8 bytes. The internal writer uses bounded byte counting and does not expose a
-writer-only public API.
+公開される双方の操作は、まず正規 LIST に対する完全な `StatusResponse` 検証を実行する。`status_json_size` は末尾の改行を含む厳密なバイト数を返す。`encode_status_json` は書き込み前にカウントを行い、不正な値、不正な出力スパン、出力バッファ不足時には呼び出し側バッファを変更しない。文字列は JSON のクォート、バックスラッシュ、制御文字をエスケープし、正当な UTF-8 バイト列を維持する。内部ライターは上限付きバイトカウントを使用し、書き込み専用の公開 API を露出しない。
 
-The bounded writer behavior was independently implemented for the corrected public projection.
-The prior Core #13 JSON work was consulted only for the size-counting, escaping and
-validate-before-write approach; its old STATUS field map and fixture are not the public contract.
-The mapping above follows the 2026-10-19 accepted JSON decisions and the 2026-10-22 typed
-STATUS layout decision. See the agent-workspace `design/core-json-next-increment-plan-20261022.md`
-and `DECISIONS-20261021.md` for the source decisions and scope.
+この上限付きライターの振る舞いは、修正された公開投影のために独自に実装されたものである。以前の Core #13 JSON の成果は、サイズカウント、エスケープ、および書き込み前検証の手法についてのみ参照された。その古い STATUS フィールドマップおよびフィクスチャは公開契約ではない。上記のマッピングは、2026-10-19 に採択された JSON 決定および 2026-10-22 の型付き STATUS レイアウト決定に従っている。元となった決定事項および範囲については、agent-workspace の `design/core-json-next-increment-plan-20261022.md` および `DECISIONS-20261021.md` を参照のこと。
