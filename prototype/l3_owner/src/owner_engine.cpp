@@ -238,6 +238,24 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
     return result;
 }
 
+dtv_l3_result OwnerEngine::cancel_open_if_opening() {
+    Borrow borrow(*this);
+    if (!borrow) {
+        return DTV_L3_BUSY;
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (open_state_ != OpenState::Opening || close_requested_) {
+            return DTV_L3_OK;
+        }
+        close_requested_ = true;
+        open_state_ = OpenState::Closing;
+        state_condition_.notify_all();
+    }
+    finish_close();
+    return DTV_L3_ACCEPTED;
+}
+
 dtv_l3_result OwnerEngine::poll(
     const std::shared_ptr<Operation> &operation,
     dtv_l3_op_state *state) {

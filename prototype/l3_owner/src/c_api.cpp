@@ -5,6 +5,7 @@
 
 #include <atomic>
 #include <memory>
+#include <mutex>
 #include <new>
 #include <thread>
 
@@ -46,6 +47,14 @@ private:
 
 }  // namespace
 
+struct dtv_l3_open_op_state {
+    std::mutex mutex;
+    bool terminal = false;
+    bool cancel_requested = false;
+    dtv_l3_op_state state = DTV_L3_OP_RUNNING;
+    dtv_l3_result result = DTV_L3_ACCEPTED;
+};
+
 struct dtv_l3_context {
     explicit dtv_l3_context(const dtv_l3_provider &provider)
         : adapter(provider), engine(std::make_unique<l3_owner_prototype::OwnerEngine>(
@@ -59,6 +68,8 @@ struct dtv_l3_context {
     CProvider adapter;
     std::unique_ptr<l3_owner_prototype::OwnerEngine> engine;
     std::thread open_thread;
+    dtv_l3_open_op_state open_op_state;
+    std::atomic<bool> open_thread_done{false};
     std::atomic<std::size_t> outstanding_ops{0};
 };
 
@@ -69,6 +80,47 @@ struct dtv_l3_op {
 };
 
 extern "C" {
+
+static dtv_l3_result poll_open_op(dtv_l3_context *owner,
+                                  dtv_l3_op_result *result) {
+    l3_owner_prototype::OwnerEngine::Snapshot snapshot{};
+    const auto call_result = owner->engine->close_status(&snapshot);
+    if (call_result != DTV_L3_OK) {
+        return call_result;
+    }
+    std::lock_guard<std::mutex> lock(owner->open_op_state.mutex);
+    if (!owner->open_op_state.terminal &&
+        (snapshot.open_state ==
+             l3_owner_prototype::OwnerEngine::OpenState::Ready ||
+         snapshot.open_state ==
+             l3_owner_prototype::OwnerEngine::OpenState::Failed ||
+         snapshot.open_result == DTV_L3_OK)) {
+        owner->open_op_state.terminal = true;
+        owner->open_op_state.state =
+            snapshot.open_result == DTV_L3_OK ? DTV_L3_OP_DONE
+                                               : DTV_L3_OP_FAILED;
+        owner->open_op_state.result = snapshot.open_result;
+    } else if (!owner->open_op_state.terminal &&
+               snapshot.open_state ==
+                   l3_owner_prototype::OwnerEngine::OpenState::Closed) {
+        owner->open_op_state.terminal = true;
+        owner->open_op_state.state = DTV_L3_OP_FAILED;
+        owner->open_op_state.result = owner->open_op_state.cancel_requested
+                                          ? DTV_L3_CANCELLED
+                                          : DTV_L3_FAILED;
+    }
+    result->kind = DTV_L3_OP_KIND_OPEN;
+    result->state = owner->open_op_state.terminal
+                        ? owner->open_op_state.state
+                        : DTV_L3_OP_RUNNING;
+    result->result = owner->open_op_state.terminal
+                         ? owner->open_op_state.result
+                         : DTV_L3_ACCEPTED;
+    result->cleanup_epoch = snapshot.cleanup_epoch;
+    result->data = nullptr;
+    result->data_size = 0;
+    return DTV_L3_OK;
+}
 
 dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
                                uint32_t claim_count) {
@@ -92,6 +144,7 @@ dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
     try {
         owner->open_thread = std::thread([owner, claim_count] {
             owner->engine->initialize_claims(claim_count);
+            owner->open_thread_done.store(true, std::memory_order_release);
         });
     } catch (...) {
         delete op;
@@ -174,6 +227,9 @@ dtv_l3_result dtv_l3_context_release(dtv_l3_context *owner) {
     if (owner->outstanding_ops.load() != 0) {
         return DTV_L3_BUSY;
     }
+    if (!owner->open_thread_done.load(std::memory_order_acquire)) {
+        return DTV_L3_BUSY;
+    }
     if (owner->open_thread.joinable()) {
         owner->open_thread.join();
     }
@@ -190,11 +246,21 @@ dtv_l3_result dtv_l3_transfer_start(dtv_l3_context *owner,
     if (owner == nullptr || request == nullptr || op_out == nullptr) {
         return DTV_L3_INVALID;
     }
+    *op_out = nullptr;
     auto op = std::make_unique<dtv_l3_op>();
     op->owner = owner;
     op->kind = DTV_L3_OP_KIND_TRANSFER;
     const auto result = owner->engine->start(*request, &op->operation);
     if (result != DTV_L3_ACCEPTED) {
+        if (op->operation) {
+            const auto release_result = owner->engine->release_operation(
+                op->operation);
+            if (release_result != DTV_L3_OK) {
+                owner->outstanding_ops.fetch_add(1);
+                *op_out = op.release();
+                return release_result;
+            }
+        }
         return result;
     }
     owner->outstanding_ops.fetch_add(1);
@@ -207,8 +273,36 @@ dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op) {
         return DTV_L3_INVALID;
     }
     if (op->kind == DTV_L3_OP_KIND_OPEN) {
-        return op->owner->engine->close(0) == DTV_L3_INVALID ? DTV_L3_INVALID
-                                                             : DTV_L3_ACCEPTED;
+        dtv_l3_op_result result{};
+        const auto poll_result = poll_open_op(op->owner, &result);
+        if (poll_result != DTV_L3_OK) {
+            return poll_result;
+        }
+        if (result.state != DTV_L3_OP_RUNNING) {
+            return DTV_L3_OK;
+        }
+        {
+            std::lock_guard<std::mutex> lock(op->owner->open_op_state.mutex);
+            if (op->owner->open_op_state.terminal) {
+                return DTV_L3_OK;
+            }
+            op->owner->open_op_state.cancel_requested = true;
+        }
+        const auto cancel_result =
+            op->owner->engine->cancel_open_if_opening();
+        if (cancel_result == DTV_L3_ACCEPTED) {
+            return cancel_result;
+        }
+        {
+            std::lock_guard<std::mutex> lock(op->owner->open_op_state.mutex);
+            if (!op->owner->open_op_state.terminal) {
+                op->owner->open_op_state.cancel_requested = false;
+            }
+        }
+        if (cancel_result == DTV_L3_OK) {
+            return poll_open_op(op->owner, &result);
+        }
+        return cancel_result;
     }
     return op->owner->engine->cancel(op->operation);
 }
@@ -220,24 +314,7 @@ dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_result *result) {
     result->kind = op->kind;
     result->cleanup_epoch = 0;
     if (op->kind == DTV_L3_OP_KIND_OPEN) {
-        dtv_l3_open_status status{};
-        const auto call_result = dtv_l3_open_status_get(op->owner, &status);
-        if (call_result != DTV_L3_OK) {
-            return call_result;
-        }
-        result->state = status.state == DTV_L3_OPEN_READY ||
-                                status.state == DTV_L3_OPEN_FAILED ||
-                                status.state == DTV_L3_OPEN_CLOSED
-                            ? DTV_L3_OP_DONE
-                            : DTV_L3_OP_RUNNING;
-        result->result = status.state == DTV_L3_OPEN_READY
-                             ? DTV_L3_OK
-                             : status.state == DTV_L3_OPEN_FAILED
-                                   ? status.result
-                                   : DTV_L3_ACCEPTED;
-        result->data = nullptr;
-        result->data_size = 0;
-        return DTV_L3_OK;
+        return poll_open_op(op->owner, result);
     }
     return op->owner->engine->poll_result(op->operation, &result->state,
                                           &result->result, &result->data,
@@ -254,9 +331,6 @@ dtv_l3_result dtv_l3_op_release(dtv_l3_op *op) {
         const auto call_result = dtv_l3_op_poll(op, &result);
         if (call_result != DTV_L3_OK || result.state == DTV_L3_OP_RUNNING) {
             return call_result == DTV_L3_OK ? DTV_L3_BUSY : call_result;
-        }
-        if (owner->open_thread.joinable()) {
-            owner->open_thread.join();
         }
     } else {
         const auto call_result = owner->engine->release_operation(op->operation);

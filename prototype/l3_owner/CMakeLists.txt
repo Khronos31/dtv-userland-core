@@ -24,12 +24,22 @@ target_include_directories(l3_header_c PRIVATE include)
 target_link_libraries(l3_header_c PRIVATE l3_owner_model Threads::Threads)
 set_target_properties(l3_header_c PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
 
+add_executable(l3_public_contract_c tests/c_contract_regressions.c)
+target_include_directories(l3_public_contract_c PRIVATE include)
+target_link_libraries(l3_public_contract_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_public_contract_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_public_contract_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
 add_executable(l3_header_cpp tests/header_cpp.cpp)
 target_include_directories(l3_header_cpp PRIVATE include)
 target_compile_features(l3_header_cpp PRIVATE cxx_std_17)
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
@@ -39,4 +49,8 @@ if(BUILD_TESTING)
     add_test(NAME l3_owner_tests COMMAND l3_owner_tests)
     add_test(NAME l3_header_c COMMAND l3_header_c)
     add_test(NAME l3_header_cpp COMMAND l3_header_cpp)
+    add_test(NAME l3_c_reject_recovery COMMAND l3_public_contract_c reject)
+    add_test(NAME l3_c_open_cancel_local COMMAND l3_public_contract_c cancel)
+    add_test(NAME l3_c_release_nonblocking COMMAND l3_public_contract_c release)
+    add_test(NAME l3_c_open_poll_stable COMMAND l3_public_contract_c poll)
 endif()

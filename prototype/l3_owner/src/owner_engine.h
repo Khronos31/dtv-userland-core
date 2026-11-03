@@ -95,6 +95,7 @@ public:
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
     dtv_l3_result cancel(const std::shared_ptr<Operation> &operation);
+    dtv_l3_result cancel_open_if_opening();
     dtv_l3_result poll(const std::shared_ptr<Operation> &operation,
                        dtv_l3_op_state *state);
     dtv_l3_result poll_result(const std::shared_ptr<Operation> &operation,
