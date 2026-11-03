@@ -126,14 +126,14 @@
 |---|---|---|---|
 | `list` | なし | 採用済み | 全 5 製品。選択した稼働中デーモンの筐体・受信機・カードリーダー構成を人間向けに表示（デーモンの `--list-json` とは別） |
 | `status` | なし | 採用済み | 全 5 製品。稼働中デーモンの動的スナップショットを共通 JSON（`userland.status`）で出力 |
-| `card-status` | なし | 提案 | PX4/ASICEN/torne（内蔵・外部リーダーおよび挿入状態。torne は必須要件、現行 profile 欠落の改修中）、PIX（内部カードの挿入状態のみ）。Siano は非対応 |
-| `card-atr` | なし | 提案 | PX4/ASICEN/torne（外部カードセッションから ATR 取得。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
-| `card-reset` | なし | 提案 | PX4/ASICEN/torne（外部カードリーダーでカードをリセットして ATR 取得。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
-| `card-apdu` | HEX | 提案 | PX4/ASICEN/torne（外部カードセッションで 1 APDU 送受信。torne は必須要件、現行 profile 欠落の改修中）。PIX/Siano は非対応 |
+| `card-status` | なし | 提案 | PX4/ASICEN/torne（内蔵・外部リーダーおよび挿入状態。torne は必須要件、最新 main 33fda5b0 で tornectl CARD profile 接続を統合済み）、PIX（内部カードの挿入状態のみ）。Siano は非対応 |
+| `card-atr` | なし | 提案 | PX4/ASICEN/torne（外部カードセッションから ATR 取得。torne は必須要件、最新 main 33fda5b0 で tornectl CARD profile 接続を統合済み）。PIX/Siano は非対応 |
+| `card-reset` | なし | 提案 | PX4/ASICEN/torne（外部カードリーダーでカードをリセットして ATR 取得。torne は必須要件、最新 main 33fda5b0 で tornectl CARD profile 接続を統合済み）。PIX/Siano は非対応 |
+| `card-apdu` | HEX | 提案 | PX4/ASICEN/torne（外部カードセッションで 1 APDU 送受信。torne は必須要件、最新 main 33fda5b0 で tornectl CARD profile 接続を統合済み）。PIX/Siano は非対応 |
 | `lnb-on` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を直接 ON（デーモンの `--allow-lnb-power` が必要）。PIX/Siano/torne は非対応 |
 | `lnb-off` | なし | 提案 | PX4/ASICEN。筐体の LNB 15V 給電を OFF。PIX/Siano/torne は非対応 |
 
-注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である。torne においては、カードリーダーを recisdb-rs や WinSCard / PC/SC 等で扱えるようにする要件に加え、ユーザー明示指示（Issue 17 #6608385943）により **tornectl からのカード操作も必須要件** と確定した。現行 tornectl profile（`card_supported` / `internal_card_status_supported` が false）は実装上の欠落・改修中であり、正式な非対応仕様ではない。目標契約として必須であることを明記し、現行実装の改修中状況と明確に区別する。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
+注: `card-*` および `lnb-*` のサブコマンド名は設計選定案であり、ハードウェア能力差に応じた製品限定の提案である。torne においては、カードリーダーを recisdb-rs や WinSCard / PC/SC 等で扱えるようにする要件に加え、ユーザー明示指示（Issue 17 #6608385943）により **tornectl からのカード操作も必須要件** と確定している。torne リポジトリの CARD 接続 PR #46 がマージされ、最新 main（`33fda5b077792ef0806dac2358d9f7ecd96f989d`）において tornectl の CARD profile 接続が統合された。提供必須という契約は保持される。なお、Windows 環境での DLL ステージング・ビルドおよびモック/SDK ネイティブ試験は成功しているが、現版実カード・recisdb-rs 実利用・macOS ローダーによる検証は未実施であり、全 OS での互換性が実証済みであるとは扱わない。診断系のコマンド（`probe`、`shutdown`、`lnb-status`、`card-connect`、`card-disconnect` 等）は通常 ctl に追加せず、内部 IPC または個別維持とする。
 
 #### 3.2.4 Termux ランチャー（`*-termux`）の共通オプション
 
@@ -402,42 +402,50 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 API の形状（**名称・採番・構造体レイアウトはすべて未決**。以下は設計案であり、個別 API の採用ではない）:
 
-- 製品ごとに共通形式の `dtv_l3_api` を返すファクトリー（例: `px4_l3_get_api_rX`）。複数製品の静的リンク時にシンボルが衝突せず、異なるリリースのヘッダー/実装を混在させた場合はリンク時またはパッケージ照合時に明示的に失敗させる。
+- 製品ごとに同じ `dtv_l3_api` を返すファクトリー（例: `px4_l3_get_api_rX`）。複数製品の静的リンク時にシンボルを衝突させず、異なるリリースのヘッダー/実装を混在させた場合はリンク時またはパッケージ照合時に明示的に失敗させる。
 - `release_id`、`catalog`、`discover`、`submit_open`、`capabilities`、`acquire`、`submit_tune`、`submit_start`、`submit_attach`、`read`、`submit_stop`、`submit_release`、`submit_close`、`close_status`、`context_release`、`poll`、`cancel`、`op_release`、CARD 系、LNB 系。`close_status` と `context_release` は設計案の名称であり、採用済み API ではない。
-- `dtv_l3_result`（要求の即時受付結果）と `dtv_l3_completion`（操作の最終完了通知）を明確に分離する。`submit_*` の成功は要求が受理されたことのみを示し、処理の完了を意味しない。`poll` の `PENDING` は処理継続中を示す。終端結果 `TIMEOUT` は制限時間の超過を示す。要求の受付のみからハードウェアの動作完了や USB の完全停止（quiesce）を推定してはならない。
-- 完了通知は操作種別のタグ付き共用体（union）とする。open→成功・失敗を問わず所有者 context、tune→`{revision, requested_hz, programmed_hz?, verification, lock_measurement}`、start→armed stream、attach→active stream、card reset→ATR、APDU→応答バイト列、close→`{quiesced, retained_scope}`。受付前の検証失敗は副作用なしで op/context を生成しない。一度受理した open は、部分的な claim や I/O を残す失敗であっても回収可能な context を返し、ホスト側が close および最終解放を行う。
-- `op_release` は最終完了の取得後にのみ許可される。解放対象は操作結果および op ハンドルであり、内部 I/O 参照・context・プロバイダー・バッファの最終解放とは明確に分離される。結果バッファとハンドルは取得側が明示的に解放する。
+- `dtv_l3_result`（要求の即時受付結果）と `dtv_l3_completion`（操作の終端結果）を明確に分離する。`submit_*` の成功は受付のみを示す。`poll` の `PENDING` は未完了を示す。終端結果 `TIMEOUT` は期限超過を示す。受付のみから物理完了や USB の完全停止（quiesce）を推定してはならない。
+- 完了通知は操作種別のタグ付き共用体（union）。open→成功・失敗を問わず所有者 context、tune→`{revision, requested_hz, programmed_hz?, verification, lock_measurement}`、start→armed stream、attach→active stream、card reset→ATR、APDU→応答バイト列、close→`{quiesced, retained_scope}`。受付前の検証失敗は副作用なしで op/context を生成しない。一度受理した open は、部分的な claim や I/O を残す失敗であっても回収可能な context を返し、ホスト側が close および最終解放を行う。
+- `op_release` は終端完了の取得後にのみ許可される。解放対象は操作結果および op ハンドルであり、内部 I/O 参照・context・プロバイダー・バッファの最終解放とは別である。結果バッファとハンドルは取得側が明示的に解放する。
 - `read` は `DATA(n)` / `WAIT` / `EOF` / `TERMINAL(error)` を別タグで返す。バッファは呼び出し中のみ借用され、内部保持されない。`drop_total_packets`（キューで正確に破棄された数）と `upstream_loss_unknown`（USB/復元段で個数不明の欠落）を区別し、前者の増加のみでストリームを失敗とはみなさない。
-- 状態遷移: context `opening/ready/closing/closed/failed/disconnected`、stream `idle/armed/streaming/stopping/stopped/draining/error`。
-- 取り消し（cancel）: `cancel` の成功は取り消し要求の受理のみを示し、プロバイダーおよびアダプターの完了通知をもって確定する。取り消し要求の受理のみからバッファやコンテキストの解放を許可してはならない。
-- クローズ（close）: 有限の制限時間（候補 10 秒）。タイムアウト時は `{quiesced: false, retained_scope: ...}` を返し、I/O 参照や provider は解放せず保持する。プロバイダーの最終 I/O 完了と後始末を待って初めて `quiesced=true` とし、その後に一回限りの解放を行う。
-- スレッドモデル: 専用スレッドを一律必須とせず、同期 USB を前提とする製品アダプターはホスト側のワーカー実行基盤または同期ブリッジへ逃がす。
+- 状態: context `opening/ready/closing/closed/failed/disconnected`、receiver `free/leased/tuned/streaming/error`、stream `none/armed/attaching/active/closing/ended`、card `closed/open/reset/transaction/closed`。所有者ハンドルは context 世代を持ち、閉鎖後の旧ハンドルを古いものとして拒否する。
+- `tune` は system、`uint64_t` Hz、`auto|slot|tsid` の一択、LNB 電圧/許可、有限の期限を持つ。チャネル文字列の解決は Core の純粋関数で 1 回行い、要求 Hz と実際に設定した Hz を分ける。ロックを測定できない製品に架空の true を生成しない。
+- ファームウェアの供給元は `path`、呼出側 `bytes`、上限付き `read(offset, buffer)` コールバックの排他的な三形。三形ともライブラリ管理領域へコピーしてから検証・USB 書込みへ進む。各製品の manifest/format/model/SHA-256 を USB 書込み前に検証し、呼出側の自己申告ハッシュだけで任意の image を承認しない。cold で必要なら `FIRMWARE_REJECTED`、warm で不要なら無転送。L1 のデーモン `--firmware` 明示必須は維持する。
+- プロバイダーはホスト所有。`submit` は受付のみ、転送には正常/失敗/取り消しを問わず一つの最終完了を返す。`cancel` 成功は取り消し要求の受付であり、バッファ解放の許可ではない。timeout・部分転送の副作用は不明な場合があり、自動再送は行わない。ライブラリは別の libusb イベント所有者を起こさない。
+- `close` は新規受付停止→全 op/stream のキャンセル要求→コールバック回収→card/receiver/USB claim 解放、の有限のエンドツーエンド期限。ここで **操作の期限結果** と **資源の最終静定** を別に観測する。期限内に静定したときだけ `quiesced=true`。期限切れの close op は `TIMEOUT/quiesced=false` と未解放 scope を返して終結し、ホストはその op を release できるが、context・プロバイダー・バッファ・元 FD/USBDevice と内部 I/O 参照は保持する。既に close 中の context への重複 `submit_close` は新しい停止/release を行わず既存の closing 状態を返す。
+- `close_status` は同じ所有者ハンドルで非ブロッキングに再照会し、`{phase, quiesced, retained_scope, cleanup_error}` のスナップショットを返す。`quiesced=true` は全受理済み I/O の最終完了回収と card/receiver/claim の後始末が終わったときだけ単調に成立する。保持中の scope がなければ `context_release` を一回だけ許す。`context_release` は静定前なら拒否し、成功後のポインターは無効になる。内部は一回限りの release 遷移で二重コールバック/二重解放を防ぐ。
+- 進行担当を分ける。driver 実行レーンは製品の同期手順で待機し得る。USB 完了/イベントポンプ、キャンセル受付、期限通知、`close_status` の読み出しを、その占有レーンに積まない。driver と独立したイベントポンプが最終完了を進め、control/期限担当が `TIMEOUT/quiesced=false` を公開する。クリーンアップは最終転送完了後に進み、完了後だけ `quiesced=true` へ遷移する。専用スレッドを一律必須にしない。
+- 例: 受理した open が claim 後に失敗しても、終結果の所有者 context で close を依頼する。クローズ期限中に同期プロバイダーが戻らなければ control/期限担当が `TIMEOUT/quiesced=false` を返し、main は join せず応答を続ける。ホストが close op を release しても資源は残る。遅延した USB の最終完了と driver 復帰の後にクリーンアップが一回完了し、`close_status` が初めて `quiesced=true` を返す。ホストは全 op ハンドルを回収したうえで `context_release` を一回だけ実行し、プロバイダーと元 device/FD を解放できる。遅延完了だけで後始末が終わらない場合、またはプロバイダーが最終完了を失った場合は静定を偽らず保持を続ける。
+- 旧 context を閉じず同じ token/FD を新 context へ再貸出ししない。USB 断は関係する function の generation を無効にし、依存する receiver/card を終端状態にする。再接続は新 token/新 context で明示的に行い、旧ハンドルを復活させない。
+- リリース固定: 各製品リリースのヘッダー、ソースマニフェスト、Core pin、製品アダプターの組を固定する。ビルド/パッケージ時に照合し、製品名・リリース識別付きファクトリーで異版の静的リンクを失敗させる。`release_id` は一致した組の診断表示であり、異なるリリースのバイナリとの安全な runtime 交渉には使わない。
+- 検証は**提案であり未実行**: 疑似 IO で L1/L2/L3 の受付判定が同じ不正値をハードウェアへ一度も届けないこと、遅延完了後のバッファ保持、キャンセル受付と静定完了の分離、各製品の非対応機能と共有資源の BUSY、TS drop と終端。WASM リンク/ブラウザーと P/Invoke 利用者、対象 OS の USB・受信品質は別の実装後検証。
 
-### 6.3 外部利用者からの参考要望（入力資料であり、確定仕様ではない）
+### 6.3 利用者から出ている要件（参考であり、採用決定ではない）
 
-外部クライアント開発側（WebTS.app 等、PIX #78 関連）から寄せられた API 要望の整理。これらは参考情報であり、正式な外部契約として新規採用されたものではない。
+利用者から出ている要件は、正本ではなく設計の参考として扱う。個々の関数名・数値・エラー enum を自動採用しない。次は現案との対応状況であり、未対応を採用済みと書かない。
 
-WebTS.app の具体的な前提条件:
-- ブラウザー/WASM およびネイティブ環境において、呼び出し側（WebTS.app）が認可済み USB 記述子と転送プロバイダーを渡し、ライブラリ側は libusb/WinUSB 等の特定バックエンドへの直接依存を必須としない。
-- UI/メインスレッドのイベントループをブロックせず、非同期 I/O（`submit`/`completion`/`cancel`）で安全に取り消しと回収を行えること。
-- メモリコピーを増やさず、188 バイト TS パケットの連続読み出しをコピーなしまたは借用バッファで行えること。スレッドをライブラリ内で無制限に生成せず、生成する場合は数と停止方法が明示されること。
+- WebTS.app: PX4 のみを現在使用。Family ではなく部品を自前で組み立てている。非同期の submit/completion/cancel を基本にしたいが、ワーカー上の同期ファサードでも受け入れる。main とワーカーの相互待ちを作らないこと、バッファを借りる期間、キャンセル後に遅れて来る完了、クローズ期限切れ時の資源扱いを明記してほしい。内部でスレッドを作ることは要求しない。card+B25 と PIX の機器内復元を同じ API に押し込まないでほしい。
+- in-process 利用者: プロセス内での利用を希望。USB 転送は呼び出し側が渡す形を想定し、ライブラリは libusb を必須にしないことを希望する。P/Invoke から呼べる C 面を求め、安定 ABI は要求しない。Siano と PX4 を同一バイナリへ静的リンクし、外部 symbol を衝突させないこと、共通の型・関数表を持つことを希望する。同期の読み書きで足り、連続 IN は出しっぱなしの読みで扱うことを想定する。スレッドを作らないことを希望し、必要なら数と停止方法の明示を求める。
+- 既存の Family/`EnclosureFamily` は GPL-2.0-only のアダプターに依存するため、全利用者の共通境界にはできない。L3 は新しい C 面とリンク境界を分ける設計を採る。
 
-| 参考要望 | 現行外部契約案での対応状況 | 位置付け |
+| 参考要望 | 現案での扱い | 状態 |
 |---|---|---|
 | 呼び出し側が USB 転送を渡し、ライブラリは libusb を必須にしない | §6.2 の呼出側 USB プロバイダーと組込境界 | 方向は反映 |
-| P/Invoke で呼べる C API。安定 ABI は要求しない | §6 冒頭、§6.1 のリリース固定 | 反映 |
-| Siano と PX4 を同一バイナリへ静的リンクし、外部シンボルを衝突させない | §6.2 の製品名・リリース識別付きファクトリー | 方向は反映。具体的なシンボルと関数表は未決 |
+| P/Invoke で呼べる C 面。安定 ABI は要求しない | §6 冒頭、§6.1 のリリース固定 | 反映 |
+| Siano と PX4 を同一バイナリへ静的リンクし、外部 symbol を衝突させない | §6.2 の製品名・リリース識別付きファクトリー | 方向は反映。具体的な symbol と関数表は未決 |
 | 共通の型・関数表 | §6.2 の API 一覧 | 名称・レイアウトは未決 |
-| 同期の読み書き＋連続 IN の出しっぱなし読み | §6.2 は `submit`/`completion`/`cancel` を基本とし、同期ブリッジを許容 | 差異あり。同期コールバックと `stream_*` 相当の要望は未決 |
-| スレッドを自前生成しない。必要な場合は数と停止方法を明記 | §6.2「専用スレッドを一律必須にしない」 | 方向は反映。保証範囲は未決 |
-| 機材ごとの LNB on/off、非対応時は `UNSUPPORTED` | §6.2 の LNB 制御、§6.1 | 方針反映済み |
-| チューナーと同一ライブラリでカードを制御可能にする | §6.2 の CARD 制御 | 方針反映済み |
-| 複数 USB 筐体/受信機の管理、筐体単位のグルーピング | §6.2 の catalog/discover/open | 設計反映済み。詳細なキー構造は未決 |
-| デバイス取り外し時（抜去時）は GONE、close は取り外し後も呼び出し可能 | §6.2 の状態遷移および切断処理 | 方針反映済み |
-| ファームウェアをバイト列で渡し、形式・機種・SHA-256 を検証 | §6.2 のファームウェア管理 | 方針反映済み |
-| 同一エンドポイントで `bulk_read` と `stream_*` を同時に使用しない | 現行案に明記なし | 今後の検討事項（未対応提案） |
-| `usb_string` による文字列記述子の直接取得 | 現行案に明記なし | 今後の検討事項（未対応提案） |
-| 戻り値体系: 0 以上が成功、負数がエラー | §6.2 の結果表現・Error | 具体的な enum 定義は未決 |
+| 同期の読み書き＋連続 IN の出しっぱなし読み | §6.2 は `submit`/`completion`/`cancel` を基本とし、同期橋を許容 | 差異あり。同期コールバックと `stream_*` 相当の要望は未決 |
+| スレッドを作らない。必要なら数と停止方法を明記 | §6.2「専用スレッドを一律必須にしない」 | 方向は反映。保証範囲は未決 |
+| 機材ごとの LNB on/off、非対応は `UNSUPPORTED` | §6.2 の LNB 系、§6.1 | 反映 |
+| tuner と同じライブラリで CARD を扱う | §6.2 の CARD 系 | 反映 |
+| 複数 USB 筐体/receiver、筐体単位の grouping | §6.2 の catalog/discover/open | 方向は反映。`enclosure_key`/`part_count` 等の具体は未決 |
+| 抜け時は GONE、close はその後も呼べる | §6.2 の状態・切断の扱い | 反映 |
+| ファームウェアをバイト列で渡し、形式・機種・SHA-256 をライブラリで検証 | §6.2 のファームウェア | 反映 |
+| 同一 EP で `bulk_read` と `stream_*` を同時に使わない | 現案に明記なし | 未対応（提案） |
+| `usb_string` による文字列記述子の読み出し | 現案に明記なし | 未対応（提案） |
+| 戻り値は 0 以上が成功、負がエラー | §6.2 の結果・Error | 具体 enum は未決 |
+
+これらは公開契約の採用決定ではなく、次回の設計で扱う入力である。
 
 ### 6.4 設計上の未決事項
 
