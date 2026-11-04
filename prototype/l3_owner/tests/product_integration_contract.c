@@ -40,6 +40,11 @@ struct fixture {
     unsigned int bind_calls;
     unsigned int initialize_calls;
     int fail_initialize;
+    int init_mode;
+    int sync_complete;
+    dtv_l3_result sync_result;
+    int init_transfer_started;
+    int init_transfer_done;
     uint32_t lnb_mode;
     dtv_l3_open_config seen_config;
     const uint8_t *seen_firmware;
@@ -119,6 +124,17 @@ static dtv_l3_result usb_submit(void *context,
     struct pending *slot;
     (void)request;
     ++fixture->submit_calls;
+    if (fixture->sync_complete) {
+        uint8_t response[2] = {0x5a, 0x5b};
+        const dtv_l3_transfer_completion completion = {
+            .result = fixture->sync_result,
+            .data = fixture->sync_result == DTV_L3_OK ? response : NULL,
+            .size = fixture->sync_result == DTV_L3_OK ? sizeof(response) : 0,
+            .actual_length = fixture->sync_result == DTV_L3_OK ? sizeof(response) : 0,
+            .actual_length_known = 1};
+        complete(binding, transfer_id, &completion, callback_context);
+        return DTV_L3_ACCEPTED;
+    }
     slot = free_pending(fixture);
     if (slot == NULL) {
         return DTV_L3_BUSY;
@@ -152,9 +168,41 @@ static dtv_l3_result product_bind(void *context, dtv_l3_context *owner) {
 static dtv_l3_result product_initialize(void *context,
                                         dtv_l3_context *owner) {
     struct fixture *fixture = context;
-    (void)owner;
     ++fixture->initialize_calls;
-    return fixture->fail_initialize ? DTV_L3_FAILED : DTV_L3_OK;
+    if (fixture->fail_initialize) {
+        return DTV_L3_FAILED;
+    }
+    if (fixture->init_mode != 0) {
+        dtv_l3_transfer_request request;
+        dtv_l3_op *op = NULL;
+        dtv_l3_op_result result;
+        memset(&request, 0, sizeof(request));
+        request.kind = DTV_L3_TRANSFER_BULK;
+        request.endpoint = 0x81;
+        request.timeout_ms = 0;
+        request.out_size = 0;
+        request.in_capacity = 64;
+        request.claim_index = 0;
+        if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_ACCEPTED ||
+            op == NULL) {
+            return DTV_L3_FAILED;
+        }
+        fixture->init_transfer_started = 1;
+        if (dtv_l3_op_wait(op, 2000) != DTV_L3_OK ||
+            dtv_l3_op_poll(op, &result) != DTV_L3_OK) {
+            (void)dtv_l3_op_release(op);
+            return DTV_L3_FAILED;
+        }
+        const dtv_l3_result transfer_result = result.result;
+        if (dtv_l3_op_release(op) != DTV_L3_OK) {
+            return DTV_L3_FAILED;
+        }
+        fixture->init_transfer_done = 1;
+        if (fixture->init_mode == 2 || transfer_result != DTV_L3_OK) {
+            return DTV_L3_FAILED;
+        }
+    }
+    return DTV_L3_OK;
 }
 
 static dtv_l3_result product_scope(void *context,
@@ -808,6 +856,86 @@ static int test_args_factory_manifest_reject(void) {
     return 0;
 }
 
+static int test_initialize_transfer_ok(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_product_adapter adapter;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_open_status status;
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.init_mode = 1;
+    fixture.sync_complete = 1;
+    fixture.sync_result = DTV_L3_OK;
+    usb = usb_provider_for(&fixture);
+    adapter = adapter_for(&fixture, NULL);
+    opened = dtv_l3_open_ex(&usb, &adapter, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (dtv_l3_op_wait(opened.op, 2000) != DTV_L3_OK ||
+        dtv_l3_op_poll(opened.op, &result) != DTV_L3_OK ||
+        result.result != DTV_L3_OK || fixture.init_transfer_started != 1 ||
+        fixture.init_transfer_done != 1 || fixture.submit_calls != 1) {
+        return 2;
+    }
+    if (dtv_l3_open_status_get(opened.owner, &status) != DTV_L3_OK ||
+        status.state != DTV_L3_OPEN_READY) {
+        return 3;
+    }
+    if (dtv_l3_op_release(opened.op) != DTV_L3_OK ||
+        !close_and_release(opened.owner)) {
+        return 4;
+    }
+    return 0;
+}
+
+static int test_initialize_transfer_failure(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_product_adapter adapter;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_open_status status;
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.init_mode = 2;
+    fixture.sync_complete = 1;
+    fixture.sync_result = DTV_L3_OK;
+    usb = usb_provider_for(&fixture);
+    adapter = adapter_for(&fixture, NULL);
+    opened = dtv_l3_open_ex(&usb, &adapter, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (dtv_l3_op_wait(opened.op, 2000) != DTV_L3_OK ||
+        dtv_l3_op_poll(opened.op, &result) != DTV_L3_OK ||
+        result.state != DTV_L3_OP_FAILED || result.result != DTV_L3_FAILED ||
+        fixture.init_transfer_started != 1 ||
+        fixture.init_transfer_done != 1) {
+        return 2;
+    }
+    if (dtv_l3_open_status_get(opened.owner, &status) != DTV_L3_OK ||
+        status.state != DTV_L3_OPEN_FAILED) {
+        return 3;
+    }
+    if (dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 4;
+    }
+    if (dtv_l3_close(opened.owner, 2000) != DTV_L3_OK ||
+        !wait_releasable(opened.owner) ||
+        fixture.release_claim_calls != 1) {
+        return 5;
+    }
+    if (!release_owner(opened.owner)) {
+        return 6;
+    }
+    return 0;
+}
+
 static int test_initialize_failure(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
@@ -901,6 +1029,12 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "init-fail") == 0) {
         return test_initialize_failure();
+    }
+    if (strcmp(argv[1], "init-transfer-ok") == 0) {
+        return test_initialize_transfer_ok();
+    }
+    if (strcmp(argv[1], "init-transfer-fail") == 0) {
+        return test_initialize_transfer_failure();
     }
     return 65;
 }

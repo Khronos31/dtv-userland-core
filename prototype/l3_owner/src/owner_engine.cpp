@@ -17,15 +17,25 @@ constexpr int kControlLaneMask = 2;
 
 thread_local int callback_frame_depth = 0;
 thread_local bool control_lane_thread = false;
+thread_local bool initialization_lane_thread = false;
 std::atomic<int> lane_start_failure_mask{0};
 
 bool in_control_lane() {
     return control_lane_thread;
 }
 
+bool in_initialization_lane() {
+    return initialization_lane_thread;
+}
+
 struct ControlLaneGuard {
     ControlLaneGuard() { control_lane_thread = true; }
     ~ControlLaneGuard() { control_lane_thread = false; }
+};
+
+struct InitializationLaneGuard {
+    InitializationLaneGuard() { initialization_lane_thread = true; }
+    ~InitializationLaneGuard() { initialization_lane_thread = false; }
 };
 std::atomic<unsigned int> test_exception_mask{0};
 
@@ -308,6 +318,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
     if (!failed && !close_requested_ && initialize_hook_) {
         dtv_l3_result initialize_result = DTV_L3_FAILED;
         try {
+            InitializationLaneGuard initialization_guard;
             initialize_result = initialize_hook_();
         } catch (...) {
             initialize_result = DTV_L3_FAILED;
@@ -410,7 +421,13 @@ dtv_l3_result OwnerEngine::start(
         if (disconnected_) {
             return DTV_L3_DISCONNECTED;
         }
-        if (open_state_ != OpenState::Ready || close_requested_ ||
+        const bool initialization_call = in_initialization_lane();
+        const bool open_allows_start =
+            initialization_call
+                ? (open_state_ == OpenState::Opening ||
+                   open_state_ == OpenState::Ready)
+                : open_state_ == OpenState::Ready;
+        if (!open_allows_start || close_requested_ ||
             claims_[request.claim_index] != ClaimState::Ready) {
             return DTV_L3_BUSY;
         }
