@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <dtv/l3_owner.h>
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -1357,7 +1358,7 @@ static int test_g8_reader_lnb_shutdown(void) {
         fixture.release_claim_calls != 0 || fixture.shutdown_op == NULL) {
         return 12;
     }
-    fire_pending(&fixture, atomic_load(&fixture->last_submit_id));
+    fire_pending(&fixture, atomic_load(&fixture.last_submit_id));
     if (dtv_l3_op_release(fixture.shutdown_op) != DTV_L3_OK) {
         return 13;
     }
