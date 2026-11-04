@@ -34,6 +34,7 @@ struct fixture {
     unsigned int cancel_calls;
     unsigned int release_claim_calls;
     pthread_t submit_thread;
+    pthread_t completion_thread;
     pthread_t cancel_thread;
     struct pending pending[MAX_PENDING];
 };
@@ -229,6 +230,16 @@ static int wait_submit_calls(struct fixture *fixture, unsigned int expected) {
     return 0;
 }
 
+static int submit_ran_outside_completion_thread(struct fixture *fixture) {
+    pthread_t submit_thread;
+    pthread_t completion_thread;
+    pthread_mutex_lock(&fixture->mutex);
+    submit_thread = fixture->submit_thread;
+    completion_thread = fixture->completion_thread;
+    pthread_mutex_unlock(&fixture->mutex);
+    return !pthread_equal(submit_thread, completion_thread);
+}
+
 static void set_flag(struct fixture *fixture, int *flag) {
     pthread_mutex_lock(&fixture->mutex);
     *flag = 1;
@@ -313,6 +324,9 @@ static int fire_pending(struct fixture *fixture,
         .size = 0,
         .actual_length = 0,
         .actual_length_known = 1};
+    pthread_mutex_lock(&fixture->mutex);
+    fixture->completion_thread = pthread_self();
+    pthread_mutex_unlock(&fixture->mutex);
     slot.complete(slot.binding, slot.id, &completion, slot.callback_context);
     return 1;
 }
@@ -581,13 +595,13 @@ static int test_recovery_submit_without_frame_flag(void) {
         return 2;
     }
     id = only_pending_id(&fixture);
-    if (!fire_pending(&fixture, id, DTV_L3_CANCELLED) ||
-        fixture.submit_calls != 1) {
+    if (!fire_pending(&fixture, id, DTV_L3_CANCELLED)) {
         fixture_destroy(&fixture);
         return 3;
     }
     /* Recovery is submitted by the library control lane without a host drain. */
-    if (!wait_submit_calls(&fixture, 2)) {
+    if (!wait_submit_calls(&fixture, 2) ||
+        !submit_ran_outside_completion_thread(&fixture)) {
         fixture_destroy(&fixture);
         return 4;
     }
