@@ -6,6 +6,8 @@
 #include <stdio.h>
 #include <string.h>
 
+extern void l3_test_set_stream_queue_capacity(uint32_t packets);
+
 #define MAX_SCOPES 8
 #define MAX_BRIDGES 16
 #define MAX_STREAMS 64
@@ -507,6 +509,7 @@ static int test_ts_boundary_backpressure_and_eof(void) {
     dtv_l3_read_state state;
     uint8_t seed;
 
+    l3_test_set_stream_queue_capacity(4);
     add_scope(&fixture, 0, 7, DTV_L3_LEASE_SHAREABLE);
     provider = provider_for(&fixture);
     owner = open_ready(&provider);

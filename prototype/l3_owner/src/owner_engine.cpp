@@ -11,7 +11,8 @@ namespace l3_owner_prototype {
 
 namespace {
 // Prototype candidate; queue capacity is not a frozen product value.
-constexpr std::size_t kQueueCapacityPackets = 4;
+constexpr std::size_t kDefaultQueueCapacityPackets = (1u << 20) / 188;
+std::atomic<std::uint32_t> test_stream_queue_packets{0};
 constexpr int kOpenLaneMask = 1;
 constexpr int kControlLaneMask = 2;
 
@@ -87,6 +88,11 @@ OwnerEngine::OwnerEngine(Provider &provider,
       logger_(logger),
       product_adapter_(product_adapter),
       binding_(std::make_shared<Binding>(binding_value)) {
+    const std::uint32_t test_capacity =
+        test_stream_queue_packets.load(std::memory_order_acquire);
+    if (test_capacity != 0) {
+        stream_queue_packets_ = test_capacity;
+    }
     if (test_lane_start_fails(kControlLaneMask)) {
         throw LaneStartFailure{};
     }
@@ -136,6 +142,11 @@ void OwnerEngine::log(dtv_l3_log_level level,
 void OwnerEngine::set_call_flags(std::uint32_t flags) {
     std::lock_guard<std::mutex> lock(mutex_);
     call_flags_ = flags;
+}
+
+void OwnerEngine::set_stream_queue_packets(std::uint32_t packets) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    stream_queue_packets_ = packets == 0 ? 1 : packets;
 }
 
 void OwnerEngine::dispatch_cancel(const std::shared_ptr<Operation> &operation,
@@ -727,6 +738,9 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             found->second.stop_residual) {
             return DTV_L3_BUSY;
         }
+        stream = std::make_shared<StreamRecord>();
+        stream->queue_capacity = stream_queue_packets_;
+        stream->queue.assign(stream->queue_capacity * 188, 0);
         auto &bridge = bridges_[found->second.bridge_id];
         if (bridge.start_pending || bridge.stop_pending) {
             return DTV_L3_BUSY;
@@ -739,13 +753,14 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         bridge_id = found->second.bridge_id;
         receiver_id = found->second.receiver_id;
         generation = next_stream_generation_++;
-        stream = std::make_shared<StreamRecord>();
         stream->generation = generation;
         stream->lease_id = lease_id;
         stream->receiver_id = receiver_id;
         stream->bridge_id = bridge_id;
         stream->tune_revision = found->second.tune_revision;
         stream->phase = DTV_L3_STREAM_ACTIVE;
+        stream->queue_head = 0;
+        stream->queue_count = 0;
         stream->attaching = true;
         stream->sink = std::make_shared<StreamSink>();
         stream->sink->owner = this;
@@ -1145,10 +1160,12 @@ dtv_l3_result OwnerEngine::read_stream(
         std::lock_guard<std::mutex> lock(mutex_);
         std::size_t packets = 0;
         const std::size_t limit = capacity_bytes / 188;
-        while (packets < limit && !stream->queue.empty()) {
-            std::memcpy(buffer + packets * 188, stream->queue.front().data(),
-                        188);
-            stream->queue.pop_front();
+        while (packets < limit && stream->queue_count != 0) {
+            std::memcpy(buffer + packets * 188,
+                        stream->queue.data() + stream->queue_head * 188, 188);
+            stream->queue_head =
+                (stream->queue_head + 1) % stream->queue_capacity;
+            --stream->queue_count;
             ++packets;
         }
         *bytes_read = packets * 188;
@@ -1193,7 +1210,7 @@ dtv_l3_result OwnerEngine::stream_status(std::uint64_t generation,
     status->phase = stream.phase;
     status->stream_generation = stream.generation;
     status->tune_revision = stream.tune_revision;
-    status->queued_packets = stream.queue.size();
+    status->queued_packets = stream.queue_count;
     status->staged_bytes = stream.staging.size();
     status->dropped_overflow_packets = stream.dropped_overflow_packets;
     status->discarded_unread_packets = stream.discarded_unread_packets;
@@ -1240,7 +1257,7 @@ dtv_l3_result OwnerEngine::release_stream(
         stream.retire_requested = true;
         stream.retire_mode = mode;
         if (mode == DTV_L3_STREAM_RELEASE_DRAINED) {
-            if (!stream.eof_observed || !stream.queue.empty() ||
+            if (!stream.eof_observed || stream.queue_count != 0 ||
                 stream.read_borrows != 0) {
                 stream.retire_requested = false;
                 return DTV_L3_BUSY;
@@ -1467,16 +1484,24 @@ void OwnerEngine::on_ts_deliver(std::uint64_t generation,
     maybe_throw_test_exception(kTestInjectTsDeliver);
     stream.staging.insert(stream.staging.end(), data, data + size);
     bool queued = false;
-    while (stream.staging.size() >= 188) {
-        if (stream.queue.size() >= kQueueCapacityPackets) {
+    std::size_t offset = 0;
+    while (stream.staging.size() - offset >= 188) {
+        if (stream.queue_count >= stream.queue_capacity) {
             ++stream.dropped_overflow_packets;
         } else {
-            stream.queue.emplace_back(stream.staging.begin(),
-                                      stream.staging.begin() + 188);
+            const std::size_t slot =
+                (stream.queue_head + stream.queue_count) %
+                stream.queue_capacity;
+            std::memcpy(stream.queue.data() + slot * 188,
+                        stream.staging.data() + offset, 188);
+            ++stream.queue_count;
             queued = true;
         }
+        offset += 188;
+    }
+    if (offset != 0) {
         stream.staging.erase(stream.staging.begin(),
-                             stream.staging.begin() + 188);
+                             stream.staging.begin() + offset);
     }
     if (queued) {
         state_condition_.notify_all();
@@ -1493,9 +1518,10 @@ void OwnerEngine::finalize_retire_locked(std::uint64_t generation) {
         return;
     }
     if (stream.retire_mode == DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) {
-        stream.discarded_unread_packets += stream.queue.size();
+        stream.discarded_unread_packets += stream.queue_count;
     }
-    stream.queue.clear();
+    stream.queue_head = 0;
+    stream.queue_count = 0;
     stream.staging.clear();
     stream.phase = DTV_L3_STREAM_RETIRED;
     const auto lease = leases_.find(stream.lease_id);
@@ -1901,13 +1927,13 @@ dtv_l3_result OwnerEngine::wait_read_stream(
         return DTV_L3_STALE;
     }
     const auto readable = [this, &stream] {
-        return !stream->queue.empty() || stream->eof_pending ||
+        return stream->queue_count != 0 || stream->eof_pending ||
                stream->retire_requested || close_requested_ ||
                stream->phase == DTV_L3_STREAM_RETIRING ||
                stream->phase == DTV_L3_STREAM_RETIRED;
     };
-    const bool data_ready = !stream->queue.empty();
-    const bool eof_ready = stream->eof_pending && stream->queue.empty();
+    const bool data_ready = stream->queue_count != 0;
+    const bool eof_ready = stream->eof_pending && stream->queue_count == 0;
     if (!data_ready && !eof_ready) {
         ++stream->read_borrows;
         if (timeout_ms == DTV_L3_WAIT_FOREVER) {
@@ -1951,9 +1977,11 @@ dtv_l3_result OwnerEngine::wait_read_stream(
 
     std::size_t packets = 0;
     const std::size_t limit = capacity_bytes / 188;
-    while (packets < limit && !stream->queue.empty()) {
-        std::memcpy(buffer + packets * 188, stream->queue.front().data(), 188);
-        stream->queue.pop_front();
+    while (packets < limit && stream->queue_count != 0) {
+        std::memcpy(buffer + packets * 188,
+                    stream->queue.data() + stream->queue_head * 188, 188);
+        stream->queue_head = (stream->queue_head + 1) % stream->queue_capacity;
+        --stream->queue_count;
         ++packets;
     }
     *bytes_read = packets * 188;
@@ -3006,6 +3034,10 @@ bool test_lane_start_fails(int lane_mask_bit) {
 
 void set_test_exception_mask(unsigned int mask) {
     test_exception_mask.store(mask, std::memory_order_release);
+}
+
+void set_test_stream_queue_packets(std::uint32_t packets) {
+    test_stream_queue_packets.store(packets, std::memory_order_release);
 }
 
 void maybe_throw_test_exception(unsigned int bit) {

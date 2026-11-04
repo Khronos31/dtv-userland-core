@@ -184,6 +184,7 @@ public:
     void initialize_claims(std::uint32_t count);
     void abort_open_after_lane_exception();
     void set_call_flags(std::uint32_t flags);
+    void set_stream_queue_packets(std::uint32_t packets);
     void set_initialize_hook(std::function<dtv_l3_result()> hook);
     dtv_l3_result progress_recovery();
     dtv_l3_result retry_cleanup();
@@ -299,7 +300,11 @@ private:
         std::uint32_t bridge_id = 0;
         std::uint64_t tune_revision = 0;
         dtv_l3_stream_phase phase = DTV_L3_STREAM_ACTIVE;
-        std::deque<std::vector<std::uint8_t>> queue;
+        /* Preallocated packet ring; no per-packet allocation. */
+        std::vector<std::uint8_t> queue;
+        std::size_t queue_head = 0;
+        std::size_t queue_count = 0;
+        std::size_t queue_capacity = 0;
         std::vector<std::uint8_t> staging;
         std::size_t read_borrows = 0;
         std::uint64_t dropped_overflow_packets = 0;
@@ -384,6 +389,7 @@ private:
     Provider &provider_;
     dtv_l3_logger logger_;
     ProductAdapter *product_adapter_ = nullptr;
+    std::uint32_t stream_queue_packets_ = 5578;
     std::uint32_t call_flags_ =
         DTV_L3_CALL_FLAG_CANCEL_IN_FRAME | DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME;
     std::function<dtv_l3_result()> initialize_hook_;
@@ -485,6 +491,7 @@ enum : unsigned int {
     kTestInjectCleanupRegistry = 1u << 11
 };
 void set_test_exception_mask(unsigned int mask);
+void set_test_stream_queue_packets(std::uint32_t packets);
 void maybe_throw_test_exception(unsigned int bit);
 void maybe_throw_test_entry_exception();
 

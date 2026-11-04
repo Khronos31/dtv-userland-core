@@ -977,6 +977,107 @@ static int test_initialize_failure(void) {
     return 0;
 }
 
+static uint64_t now_ns(void) {
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (uint64_t)value.tv_sec * 1000000000ull + (uint64_t)value.tv_nsec;
+}
+
+static int read_packets(dtv_l3_stream *stream, uint8_t *buffer, size_t count) {
+    size_t offset = 0;
+    while (offset < count) {
+        size_t bytes = 0;
+        dtv_l3_read_state state;
+        if (dtv_l3_stream_read_ts(stream, buffer + offset * 188,
+                                  (count - offset) * 188, &bytes,
+                                  &state) != DTV_L3_OK ||
+            state != DTV_L3_READ_DATA || bytes == 0) {
+            return 0;
+        }
+        offset += bytes / 188;
+    }
+    return 1;
+}
+
+static int test_queue_capacity(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_product_adapter adapter;
+    dtv_l3_context *owner = NULL;
+    dtv_l3_lease *lease = NULL;
+    dtv_l3_stream *stream = NULL;
+    dtv_l3_stream_status status;
+    uint64_t programmed = 0;
+    uint64_t revision = 0;
+    uint8_t packets[20 * 188];
+    uint8_t readback[348 * 188];
+    uint8_t small[21 * 188];
+    uint8_t large[348 * 188];
+    uint64_t small_start;
+    uint64_t small_elapsed;
+    uint64_t large_start;
+    uint64_t large_elapsed;
+    unsigned int index;
+
+    memset(&fixture, 0, sizeof(fixture));
+    usb = usb_provider_for(&fixture);
+    adapter = adapter_for(&fixture, NULL);
+    if (!open_ready_ex(&usb, &adapter, &owner)) {
+        return 1;
+    }
+    if (dtv_l3_lease_acquire(owner, 0, &lease) != DTV_L3_OK ||
+        dtv_l3_lease_tune(lease, 500000000, &programmed, &revision) !=
+            DTV_L3_OK ||
+        dtv_l3_lease_start(lease) != DTV_L3_OK ||
+        dtv_l3_lease_attach(lease, &stream) != DTV_L3_OK || stream == NULL ||
+        fixture.deliver == NULL) {
+        return 2;
+    }
+    for (index = 0; index < sizeof(packets); ++index) {
+        packets[index] = (uint8_t)(index / 188);
+    }
+    fixture.deliver(fixture.deliver_context, packets, sizeof(packets));
+    if (dtv_l3_stream_status_get(stream, &status) != DTV_L3_OK ||
+        status.queued_packets != 20 || status.dropped_overflow_packets != 0) {
+        return 3;
+    }
+    if (!read_packets(stream, readback, 20) ||
+        memcmp(readback, packets, sizeof(packets)) != 0) {
+        return 4;
+    }
+    memset(small, 0x31, sizeof(small));
+    small_start = now_ns();
+    fixture.deliver(fixture.deliver_context, small, sizeof(small));
+    small_elapsed = now_ns() - small_start;
+    if (!read_packets(stream, readback, 21)) {
+        return 5;
+    }
+    memset(large, 0x32, sizeof(large));
+    large_start = now_ns();
+    fixture.deliver(fixture.deliver_context, large, sizeof(large));
+    large_elapsed = now_ns() - large_start;
+    if (dtv_l3_stream_status_get(stream, &status) != DTV_L3_OK ||
+        status.queued_packets != 348 ||
+        status.dropped_overflow_packets != 0) {
+        return 6;
+    }
+    if (!read_packets(stream, readback, 20)) {
+        return 7;
+    }
+    /* 64 KiB must not show per-packet quadratic staging work. */
+    if (large_elapsed > small_elapsed * 100 + 10000000ull) {
+        return 8;
+    }
+    if (dtv_l3_stream_stop(stream, 0) != DTV_L3_OK ||
+        dtv_l3_stream_release(stream, DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) !=
+            DTV_L3_OK ||
+        dtv_l3_stream_destroy(stream) != DTV_L3_OK ||
+        dtv_l3_lease_release(lease) != DTV_L3_OK) {
+        return 9;
+    }
+    return close_and_release(owner) ? 0 : 10;
+}
+
 static int test_missing_product_callbacks(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
@@ -1035,6 +1136,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "init-transfer-fail") == 0) {
         return test_initialize_transfer_failure();
+    }
+    if (strcmp(argv[1], "capacity") == 0) {
+        return test_queue_capacity();
     }
     return 65;
 }

@@ -529,6 +529,8 @@ typedef dtv_l3_result (*dtv_l3_adapter_lnb_set_fn)(
 typedef struct dtv_l3_product_adapter {
     void *product_context;
     dtv_l3_capabilities capabilities;
+    /* Zero selects the Core default (~1 MiB of 188-byte packets). */
+    uint32_t stream_queue_packets;
     const dtv_l3_capability_catalog *catalog;
     const dtv_l3_firmware *firmware;
     /*

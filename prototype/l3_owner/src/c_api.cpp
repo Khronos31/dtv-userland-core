@@ -335,6 +335,9 @@ struct dtv_l3_context {
           engine(make_engine_ex(*usb_provider, *product_adapter, usb.logger)) {
         product_adapter->set_binding(engine->binding());
         engine->set_call_flags(usb.call_flags);
+        if (adapter.stream_queue_packets != 0) {
+            engine->set_stream_queue_packets(adapter.stream_queue_packets);
+        }
         if (adapter.initialize != nullptr) {
             engine->set_initialize_hook([this] {
                 return product_view->initialize(product_view->product_context,
@@ -1246,6 +1249,11 @@ void l3_test_set_lane_start_failure_mask(int mask) {
 /* Prototype test seam; not part of the C contract. */
 void l3_test_set_exception_mask(unsigned int mask) {
     l3_owner_prototype::set_test_exception_mask(mask);
+}
+
+/* Prototype test seam; not part of the C contract. */
+void l3_test_set_stream_queue_capacity(uint32_t packets) {
+    l3_owner_prototype::set_test_stream_queue_packets(packets);
 }
 
 }  // extern "C"
