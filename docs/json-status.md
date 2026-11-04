@@ -4,10 +4,11 @@
 
 ## 公開フィールドの対応関係
 
-出力されるルートオブジェクトのフィールドは `schema`、`producer`、`context`、`snapshot`、`scope`、`enclosure`、`topology` である。`usb_functions`、`receivers`、`readers` は、対応するコレクションデータが存在する場合にのみ出力に含まれる。
+出力されるルートオブジェクトのフィールドは `schema`、`producer`、`context`、`snapshot`、`scope`、`enclosure`、`topology` である。ルートオブジェクトの `schema` は `name: "userland.status"`、`major: 1`、`minor: 0` で固定出力される。`usb_functions`、`receivers`、`readers` は、対応するコレクションデータが存在する場合にのみ出力に含まれる。
 
 | 出力 JSON パス | データ型および表現規則 |
 | --- | --- |
+| `schema.name`, `schema.major`, `schema.minor` | 文字列 `"userland.status"`、数値 1、数値 0 |
 | `producer.product`, `producer.version`, `producer.core_version` | 文字列。未定義の core バージョンは `null` |
 | `context.epoch`, `context.instance`, `context.state`, `context.last_error` | 小文字 16 進数の epoch 文字列、null 許容の instance 文字列、可読状態文字列、null 許容のエラーオブジェクト |
 | `snapshot.sequence`, `snapshot.observed_at_ns` | 64 ビット整数値をそのまま保持する 10 進文字列 |
