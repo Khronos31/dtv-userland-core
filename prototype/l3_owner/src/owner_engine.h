@@ -34,19 +34,9 @@ struct TransferKey {
     }
 };
 
-class Provider {
+class ProductAdapter {
 public:
-    virtual ~Provider() = default;
-    virtual dtv_l3_claim_result claim(Binding *binding, std::uint32_t index) = 0;
-    virtual dtv_l3_release_result release_claim(
-        Binding *binding, std::uint32_t index) = 0;
-    virtual dtv_l3_result submit(
-        Binding *binding,
-        std::uint64_t id,
-        const dtv_l3_transfer_request &request,
-        dtv_l3_transfer_complete_fn complete,
-        void *callback_context) = 0;
-    virtual dtv_l3_result cancel(Binding *binding, std::uint64_t id) = 0;
+    virtual ~ProductAdapter() = default;
     virtual dtv_l3_result scope_query(std::uint32_t receiver_id,
                                       dtv_l3_scope_info *scope) {
         (void)receiver_id;
@@ -83,6 +73,21 @@ public:
         (void)programmed_hz;
         return DTV_L3_UNSUPPORTED;
     }
+};
+
+class Provider : public ProductAdapter {
+public:
+    virtual ~Provider() = default;
+    virtual dtv_l3_claim_result claim(Binding *binding, std::uint32_t index) = 0;
+    virtual dtv_l3_release_result release_claim(
+        Binding *binding, std::uint32_t index) = 0;
+    virtual dtv_l3_result submit(
+        Binding *binding,
+        std::uint64_t id,
+        const dtv_l3_transfer_request &request,
+        dtv_l3_transfer_complete_fn complete,
+        void *callback_context) = 0;
+    virtual dtv_l3_result cancel(Binding *binding, std::uint64_t id) = 0;
     virtual dtv_l3_result claim_cancel(Binding *binding,
                                        std::uint32_t index) {
         (void)binding;
@@ -146,6 +151,10 @@ public:
     OwnerEngine(Provider &provider,
                 std::uint64_t binding_value,
                 const dtv_l3_logger &logger);
+    OwnerEngine(Provider &provider,
+                std::uint64_t binding_value,
+                const dtv_l3_logger &logger,
+                ProductAdapter *product_adapter);
     ~OwnerEngine();
 
     OwnerEngine(const OwnerEngine &) = delete;
@@ -304,6 +313,7 @@ private:
                                  std::uint64_t id,
                                  const dtv_l3_transfer_completion *completion,
                                  void *callback_context);
+    ProductAdapter &product();
     void log(dtv_l3_log_level level,
              const char *fn,
              const char *message) const noexcept;
@@ -341,6 +351,7 @@ private:
 
     Provider &provider_;
     dtv_l3_logger logger_;
+    ProductAdapter *product_adapter_ = nullptr;
     mutable std::mutex mutex_;
     bool retired_gate_ = false;
     bool released_ = false;

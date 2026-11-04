@@ -70,6 +70,16 @@ set_target_properties(l3_exception_log_c PROPERTIES
     C_EXTENSIONS NO
 )
 
+add_executable(l3_product_integration_c tests/product_integration_contract.c)
+target_include_directories(l3_product_integration_c PRIVATE include)
+target_link_libraries(l3_product_integration_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_product_integration_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_product_integration_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
 add_executable(l3_exception_log_cpp tests/exception_log_cpp.cpp)
 target_include_directories(l3_exception_log_cpp PRIVATE src)
 target_link_libraries(l3_exception_log_cpp PRIVATE l3_owner_model Threads::Threads)
@@ -91,14 +101,14 @@ set_target_properties(l3_provider_semantics_c PROPERTIES
 )
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 
 if(L3_OWNER_ENABLE_ASAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c)
         target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=address)
     endforeach()
@@ -165,4 +175,8 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_exception_cleanup_open_enqueue COMMAND l3_exception_log_c cleanup-open-enqueue)
     add_test(NAME l3_c_exception_cleanup_open_registry COMMAND l3_exception_log_c cleanup-open-registry)
     add_test(NAME l3_cpp_exception_logger COMMAND l3_exception_log_cpp)
+    add_test(NAME l3_c_product_separated COMMAND l3_product_integration_c separated)
+    add_test(NAME l3_c_product_factory COMMAND l3_product_integration_c factory)
+    add_test(NAME l3_c_product_factory_fail COMMAND l3_product_integration_c factory-fail)
+    add_test(NAME l3_c_product_missing COMMAND l3_product_integration_c missing)
 endif()

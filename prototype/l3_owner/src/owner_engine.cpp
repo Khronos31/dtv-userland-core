@@ -57,8 +57,15 @@ OwnerEngine::OwnerEngine(Provider &provider, std::uint64_t binding_value)
 OwnerEngine::OwnerEngine(Provider &provider,
                          std::uint64_t binding_value,
                          const dtv_l3_logger &logger)
+    : OwnerEngine(provider, binding_value, logger, nullptr) {}
+
+OwnerEngine::OwnerEngine(Provider &provider,
+                         std::uint64_t binding_value,
+                         const dtv_l3_logger &logger,
+                         ProductAdapter *product_adapter)
     : provider_(provider),
       logger_(logger),
+      product_adapter_(product_adapter),
       binding_(std::make_shared<Binding>(binding_value)) {
     if (test_lane_start_fails(kControlLaneMask)) {
         throw LaneStartFailure{};
@@ -84,6 +91,12 @@ OwnerEngine::~OwnerEngine() {
     if (worker_.joinable()) {
         worker_.join();
     }
+}
+
+ProductAdapter &OwnerEngine::product() {
+    return product_adapter_ == nullptr
+               ? static_cast<ProductAdapter &>(provider_)
+               : *product_adapter_;
 }
 
 void OwnerEngine::log(dtv_l3_log_level level,
@@ -408,7 +421,7 @@ dtv_l3_result OwnerEngine::acquire_lease(std::uint32_t receiver_id,
     dtv_l3_result scope_result = DTV_L3_FAILED;
     bool scope_threw = false;
     try {
-        scope_result = provider_.scope_query(receiver_id, &scope);
+        scope_result = product().scope_query(receiver_id, &scope);
     } catch (...) {
         scope_threw = true;
         scope_result = DTV_L3_FAILED;
@@ -491,7 +504,7 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
     dtv_l3_result tune_result = DTV_L3_FAILED;
     bool tune_threw = false;
     try {
-        tune_result = provider_.tune(receiver_id, requested_hz, &programmed);
+        tune_result = product().tune(receiver_id, requested_hz, &programmed);
     } catch (...) {
         tune_threw = true;
         tune_result = DTV_L3_FAILED;
@@ -625,7 +638,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         dtv_l3_result start_result = DTV_L3_FAILED;
         bool start_threw = false;
         try {
-            start_result = provider_.bridge_start(bridge_id, receiver_id);
+            start_result = product().bridge_start(bridge_id, receiver_id);
         } catch (...) {
             start_threw = true;
             start_result = DTV_L3_FAILED;
@@ -677,7 +690,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         }
         bool attach_threw = false;
         try {
-            attach_result = provider_.stream_attach(
+            attach_result = product().stream_attach(
                 generation, &StreamSink::deliver, stream->sink.get());
         } catch (...) {
             attach_threw = true;
@@ -705,7 +718,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             }
             bool stop_threw = false;
             try {
-                stop_result = provider_.stream_stop(generation);
+                stop_result = product().stream_stop(generation);
             } catch (...) {
                 stop_threw = true;
                 stop_result = DTV_L3_FAILED;
@@ -736,7 +749,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         if (stop_bridge) {
             bool bridge_threw = false;
             try {
-                bridge_result = provider_.bridge_stop(bridge_id);
+                bridge_result = product().bridge_stop(bridge_id);
             } catch (...) {
                 bridge_threw = true;
                 bridge_result = DTV_L3_FAILED;
@@ -854,7 +867,7 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
     dtv_l3_result stop_result = DTV_L3_FAILED;
     bool stop_threw = false;
     try {
-        stop_result = provider_.stream_stop(generation);
+        stop_result = product().stream_stop(generation);
     } catch (...) {
         stop_threw = true;
         stop_result = DTV_L3_FAILED;
@@ -915,7 +928,7 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
     if (need_bridge_stop) {
         bool bridge_threw = false;
         try {
-            bridge_result = provider_.bridge_stop(bridge_id);
+            bridge_result = product().bridge_stop(bridge_id);
         } catch (...) {
             bridge_threw = true;
             bridge_result = DTV_L3_FAILED;
@@ -1247,7 +1260,7 @@ dtv_l3_result OwnerEngine::release_lease(std::uint32_t lease_id) {
     dtv_l3_result stop_result = DTV_L3_FAILED;
     bool bridge_threw = false;
     try {
-        stop_result = provider_.bridge_stop(bridge_id);
+        stop_result = product().bridge_stop(bridge_id);
     } catch (...) {
         bridge_threw = true;
         stop_result = DTV_L3_FAILED;
@@ -1417,7 +1430,7 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
     dtv_l3_result stop_result = DTV_L3_FAILED;
     bool stop_threw = false;
     try {
-        stop_result = provider_.stream_stop(generation);
+        stop_result = product().stream_stop(generation);
     } catch (...) {
         stop_threw = true;
         stop_result = DTV_L3_FAILED;
@@ -1466,7 +1479,7 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
         dtv_l3_result bridge_result = DTV_L3_FAILED;
         bool bridge_threw = false;
         try {
-            bridge_result = provider_.bridge_stop(bridge_id);
+            bridge_result = product().bridge_stop(bridge_id);
         } catch (...) {
             bridge_threw = true;
             bridge_result = DTV_L3_FAILED;

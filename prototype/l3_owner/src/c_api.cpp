@@ -121,13 +121,140 @@ private:
         std::make_shared<l3_owner_prototype::Binding>(1);
 };
 
-static std::unique_ptr<l3_owner_prototype::OwnerEngine> make_engine(
+class CUsbProvider final : public l3_owner_prototype::Provider {
+public:
+    explicit CUsbProvider(const dtv_l3_usb_provider &provider)
+        : provider_(provider) {}
+
+    dtv_l3_claim_result claim(l3_owner_prototype::Binding *binding,
+                              std::uint32_t index) override {
+        return provider_.claim(provider_.provider_context, binding, index);
+    }
+
+    dtv_l3_release_result release_claim(
+        l3_owner_prototype::Binding *binding,
+        std::uint32_t index) override {
+        return provider_.release_claim(provider_.provider_context, binding,
+                                       index);
+    }
+
+    dtv_l3_result submit(l3_owner_prototype::Binding *binding,
+                         std::uint64_t id,
+                         const dtv_l3_transfer_request &request,
+                         dtv_l3_transfer_complete_fn complete,
+                         void *callback_context) override {
+        return provider_.submit(provider_.provider_context, binding, id,
+                                &request, complete, callback_context);
+    }
+
+    dtv_l3_result cancel(l3_owner_prototype::Binding *binding,
+                         std::uint64_t id) override {
+        return provider_.cancel(provider_.provider_context, binding, id);
+    }
+
+    dtv_l3_result claim_cancel(l3_owner_prototype::Binding *binding,
+                               std::uint32_t index) override {
+        if (provider_.claim_cancel == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.claim_cancel(provider_.provider_context, binding,
+                                      index);
+    }
+
+    dtv_l3_cancel_scope cancel_scope() const override {
+        return provider_.cancel_scope;
+    }
+
+private:
+    dtv_l3_usb_provider provider_;
+};
+
+class CProductAdapter final : public l3_owner_prototype::ProductAdapter {
+public:
+    explicit CProductAdapter(const dtv_l3_product_adapter &adapter)
+        : adapter_(adapter) {}
+
+    dtv_l3_result scope_query(std::uint32_t receiver_id,
+                              dtv_l3_scope_info *scope) override {
+        if (adapter_.scope_query == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.scope_query(adapter_.product_context, receiver_id,
+                                    scope);
+    }
+
+    dtv_l3_result tune(std::uint32_t receiver_id,
+                       std::uint64_t requested_hz,
+                       std::uint64_t *programmed_hz) override {
+        if (adapter_.tune == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.tune(adapter_.product_context, binding_.get(),
+                             receiver_id, requested_hz, programmed_hz);
+    }
+
+    dtv_l3_result bridge_start(std::uint32_t bridge_id,
+                               std::uint32_t receiver_id) override {
+        if (adapter_.bridge_start == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.bridge_start(adapter_.product_context, binding_.get(),
+                                     bridge_id, receiver_id);
+    }
+
+    dtv_l3_result bridge_stop(std::uint32_t bridge_id) override {
+        if (adapter_.bridge_stop == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.bridge_stop(adapter_.product_context, binding_.get(),
+                                    bridge_id);
+    }
+
+    dtv_l3_result stream_attach(std::uint64_t stream_id,
+                                dtv_l3_ts_deliver_fn deliver,
+                                void *callback_context) override {
+        if (adapter_.stream_attach == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.stream_attach(adapter_.product_context, binding_.get(),
+                                      stream_id, deliver, callback_context);
+    }
+
+    dtv_l3_result stream_stop(std::uint64_t stream_id) override {
+        if (adapter_.stream_stop == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.stream_stop(adapter_.product_context, binding_.get(),
+                                    stream_id);
+    }
+
+    void set_binding(std::shared_ptr<l3_owner_prototype::Binding> binding) {
+        binding_ = std::move(binding);
+    }
+
+private:
+    dtv_l3_product_adapter adapter_;
+    std::shared_ptr<l3_owner_prototype::Binding> binding_ =
+        std::make_shared<l3_owner_prototype::Binding>(1);
+};
+
+static std::unique_ptr<l3_owner_prototype::OwnerEngine> make_engine_legacy(
     CProvider &adapter,
     const dtv_l3_provider &provider) {
     l3_owner_prototype::maybe_throw_test_exception(
         l3_owner_prototype::kTestInjectOpenContext);
     return std::make_unique<l3_owner_prototype::OwnerEngine>(
         adapter, 1, provider.logger);
+}
+
+static std::unique_ptr<l3_owner_prototype::OwnerEngine> make_engine_ex(
+    CUsbProvider &usb_provider,
+    CProductAdapter &product_adapter,
+    const dtv_l3_logger &logger) {
+    l3_owner_prototype::maybe_throw_test_exception(
+        l3_owner_prototype::kTestInjectOpenContext);
+    return std::make_unique<l3_owner_prototype::OwnerEngine>(
+        usb_provider, 1, logger, &product_adapter);
 }
 
 }  // namespace
@@ -143,18 +270,38 @@ struct dtv_l3_open_op_state {
 
 struct dtv_l3_context {
     explicit dtv_l3_context(const dtv_l3_provider &provider)
-        : adapter(provider),
+        : legacy(std::make_unique<CProvider>(provider)),
           logger(provider.logger),
-          engine(make_engine(adapter, provider)) {
-        adapter.set_binding(engine->binding());
+          engine(make_engine_legacy(*legacy, provider)) {
+        legacy->set_binding(engine->binding());
+        capabilities.cancel_scope = provider.cancel_scope;
+    }
+    dtv_l3_context(const dtv_l3_usb_provider &usb,
+                   const dtv_l3_product_adapter &adapter)
+        : usb_provider(std::make_unique<CUsbProvider>(usb)),
+          product_adapter(std::make_unique<CProductAdapter>(adapter)),
+          product_view(&adapter),
+          capabilities(adapter.capabilities),
+          logger(usb.logger),
+          engine(make_engine_ex(*usb_provider, *product_adapter, usb.logger)) {
+        product_adapter->set_binding(engine->binding());
     }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
             open_thread.join();
         }
+        if (adapter_release != nullptr) {
+            adapter_release(adapter_owner);
+        }
     }
 
-    CProvider adapter;
+    std::unique_ptr<CProvider> legacy;
+    std::unique_ptr<CUsbProvider> usb_provider;
+    std::unique_ptr<CProductAdapter> product_adapter;
+    const dtv_l3_product_adapter *product_view = nullptr;
+    dtv_l3_capabilities capabilities{};
+    dtv_l3_adapter_release_fn adapter_release = nullptr;
+    void *adapter_owner = nullptr;
     dtv_l3_logger logger;
     std::unique_ptr<l3_owner_prototype::OwnerEngine> engine;
     std::thread open_thread;
@@ -196,19 +343,36 @@ void log_context(dtv_l3_context *owner,
     }
 }
 
-void log_provider(const dtv_l3_provider *provider,
-                  dtv_l3_log_level level,
-                  const char *fn,
-                  const char *message) noexcept {
-    if (provider == nullptr || provider->logger.fn == nullptr ||
-        level > provider->logger.min_level) {
+void log_logger(const dtv_l3_logger *logger,
+                dtv_l3_log_level level,
+                const char *fn,
+                const char *message) noexcept {
+    if (logger == nullptr || logger->fn == nullptr ||
+        level > logger->min_level) {
         return;
     }
     l3_owner_prototype::CallbackFrame frame;
     try {
-        provider->logger.fn(provider->logger.userdata, level, fn, message);
+        logger->fn(logger->userdata, level, fn, message);
     } catch (...) {
     }
+}
+
+void log_provider(const dtv_l3_provider *provider,
+                  dtv_l3_log_level level,
+                  const char *fn,
+                  const char *message) noexcept {
+    if (provider == nullptr) {
+        return;
+    }
+    log_logger(&provider->logger, level, fn, message);
+}
+
+void log_provider(const dtv_l3_logger *logger,
+                  dtv_l3_log_level level,
+                  const char *fn,
+                  const char *message) noexcept {
+    log_logger(logger, level, fn, message);
 }
 
 dtv_l3_result entry_failure(dtv_l3_context *owner,
@@ -266,25 +430,16 @@ static dtv_l3_result poll_open_op(dtv_l3_context *owner,
     return DTV_L3_OK;
 }
 
-dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
-                               uint32_t claim_count) {
-    if (provider == nullptr || provider->claim == nullptr ||
-        provider->release_claim == nullptr || provider->submit == nullptr ||
-        provider->cancel == nullptr) {
-        return {DTV_L3_INVALID, nullptr, nullptr};
-    }
-    dtv_l3_context *owner = nullptr;
+static dtv_l3_open_result finish_open(dtv_l3_context *owner,
+                                     uint32_t claim_count) {
     dtv_l3_op *op = nullptr;
     try {
-        l3_owner_prototype::maybe_throw_test_entry_exception();
-        owner = new (std::nothrow) dtv_l3_context(*provider);
-        if (owner == nullptr) {
-            return {DTV_L3_FAILED, nullptr, nullptr};
-        }
         l3_owner_prototype::maybe_throw_test_exception(
             l3_owner_prototype::kTestInjectOpenOp);
         op = new (std::nothrow) dtv_l3_op;
         if (op == nullptr) {
+            log_context(owner, DTV_L3_LOG_ERROR, "dtv_l3_open",
+                        "open allocation failed");
             delete owner;
             return {DTV_L3_FAILED, nullptr, nullptr};
         }
@@ -292,6 +447,8 @@ dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
         op->kind = DTV_L3_OP_KIND_OPEN;
         owner->outstanding_ops.store(1);
         if (l3_owner_prototype::test_lane_start_fails(kTestOpenLaneBit)) {
+            log_context(owner, DTV_L3_LOG_ERROR, "dtv_l3_open",
+                        "lane start failed");
             delete op;
             delete owner;
             return {DTV_L3_FAILED, nullptr, nullptr};
@@ -307,14 +464,119 @@ dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
             owner->open_thread_done.store(true, std::memory_order_release);
         });
     } catch (...) {
+        log_context(owner, DTV_L3_LOG_ERROR, "dtv_l3_open",
+                    "contained C++ exception");
         delete op;
+        delete owner;
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    log_context(owner, DTV_L3_LOG_INFO, "dtv_l3_open", "open accepted");
+    return {DTV_L3_ACCEPTED, owner, op};
+}
+
+dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
+                               uint32_t claim_count) {
+    if (provider == nullptr || provider->claim == nullptr ||
+        provider->release_claim == nullptr || provider->submit == nullptr ||
+        provider->cancel == nullptr) {
+        return {DTV_L3_INVALID, nullptr, nullptr};
+    }
+    dtv_l3_context *owner = nullptr;
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        owner = new (std::nothrow) dtv_l3_context(*provider);
+    } catch (...) {
         delete owner;
         log_provider(provider, DTV_L3_LOG_ERROR, "dtv_l3_open",
                      "contained C++ exception");
         return {DTV_L3_FAILED, nullptr, nullptr};
     }
-    log_context(owner, DTV_L3_LOG_INFO, "dtv_l3_open", "open accepted");
-    return {DTV_L3_ACCEPTED, owner, op};
+    if (owner == nullptr) {
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    return finish_open(owner, claim_count);
+}
+
+dtv_l3_open_result dtv_l3_open_ex(const dtv_l3_usb_provider *usb_provider,
+                                  const dtv_l3_product_adapter *adapter,
+                                  uint32_t claim_count) {
+    if (usb_provider == nullptr || usb_provider->claim == nullptr ||
+        usb_provider->release_claim == nullptr ||
+        usb_provider->submit == nullptr || usb_provider->cancel == nullptr ||
+        adapter == nullptr) {
+        return {DTV_L3_INVALID, nullptr, nullptr};
+    }
+    dtv_l3_context *owner = nullptr;
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        owner = new (std::nothrow) dtv_l3_context(*usb_provider, *adapter);
+    } catch (...) {
+        delete owner;
+        log_provider(&usb_provider->logger, DTV_L3_LOG_ERROR,
+                     "dtv_l3_open_ex", "contained C++ exception");
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    if (owner == nullptr) {
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    return finish_open(owner, claim_count);
+}
+
+dtv_l3_open_result dtv_l3_open_factory(
+    const dtv_l3_usb_provider *usb_provider,
+    const dtv_l3_adapter_factory *factory,
+    const dtv_l3_open_config *config,
+    uint32_t claim_count) {
+    if (usb_provider == nullptr || usb_provider->claim == nullptr ||
+        usb_provider->release_claim == nullptr ||
+        usb_provider->submit == nullptr || usb_provider->cancel == nullptr ||
+        factory == nullptr || factory->create == nullptr) {
+        return {DTV_L3_INVALID, nullptr, nullptr};
+    }
+    const dtv_l3_product_adapter *adapter = nullptr;
+    void *adapter_owner = nullptr;
+    dtv_l3_result created = DTV_L3_FAILED;
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        created = factory->create(factory->factory_context, config, &adapter,
+                                  &adapter_owner);
+    } catch (...) {
+        log_provider(&usb_provider->logger, DTV_L3_LOG_ERROR,
+                     "dtv_l3_open_factory", "contained C++ exception");
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    if (created != DTV_L3_OK || adapter == nullptr) {
+        if (factory->release != nullptr && adapter_owner != nullptr) {
+            factory->release(adapter_owner);
+        }
+        return {created == DTV_L3_OK ? DTV_L3_FAILED : created, nullptr,
+                nullptr};
+    }
+    const dtv_l3_open_result opened =
+        dtv_l3_open_ex(usb_provider, adapter, claim_count);
+    if (opened.result != DTV_L3_ACCEPTED) {
+        if (factory->release != nullptr && adapter_owner != nullptr) {
+            factory->release(adapter_owner);
+        }
+        return opened;
+    }
+    opened.owner->adapter_release = factory->release;
+    opened.owner->adapter_owner = adapter_owner;
+    return opened;
+}
+
+dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
+                                      dtv_l3_capabilities *capabilities) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr || capabilities == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        *capabilities = owner->capabilities;
+        return DTV_L3_OK;
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_capabilities_get");
+    }
 }
 
 dtv_l3_result dtv_l3_open_status_get(dtv_l3_context *owner,
@@ -785,10 +1047,14 @@ dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
                                     dtv_l3_reader **reader_out) {
     try {
         l3_owner_prototype::maybe_throw_test_entry_exception();
-        (void)reader_id;
-        (void)reader_out;
         if (owner == nullptr || reader_out == nullptr) {
             return DTV_L3_INVALID;
+        }
+        if (owner->product_view != nullptr &&
+            owner->product_view->reader_acquire != nullptr) {
+            *reader_out = nullptr;
+            return owner->product_view->reader_acquire(
+                owner->product_view->product_context, reader_id, reader_out);
         }
         return DTV_L3_UNSUPPORTED;
     } catch (...) {
@@ -801,9 +1067,15 @@ dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
                              uint32_t mode) {
     try {
         l3_owner_prototype::maybe_throw_test_entry_exception();
-        (void)receiver_id;
-        (void)mode;
-        return owner == nullptr ? DTV_L3_INVALID : DTV_L3_UNSUPPORTED;
+        if (owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        if (owner->product_view != nullptr &&
+            owner->product_view->lnb_set != nullptr) {
+            return owner->product_view->lnb_set(
+                owner->product_view->product_context, receiver_id, mode);
+        }
+        return DTV_L3_UNSUPPORTED;
     } catch (...) {
         return entry_failure(owner, "dtv_l3_lnb_set");
     }

@@ -309,6 +309,11 @@ typedef struct dtv_l3_logger {
     dtv_l3_log_level min_level;
 } dtv_l3_logger;
 
+/*
+ * Legacy combined provider used by the existing prototype fixtures. New
+ * integrations use dtv_l3_usb_provider plus dtv_l3_product_adapter so the host
+ * keeps only USB transport and the product library owns device semantics.
+ */
 typedef struct dtv_l3_provider {
     void *provider_context;
     dtv_l3_claim_fn claim;
@@ -327,6 +332,113 @@ typedef struct dtv_l3_provider {
     /* Context-specific diagnostics; fn == NULL disables logging. */
     dtv_l3_logger logger;
 } dtv_l3_provider;
+
+/*
+ * USB-only transport owned by the host/caller. It carries no tune, stream,
+ * firmware, CARD, or LNB policy. The same binding and local transfer ID are
+ * used by submit, cancel, and completion.
+ */
+typedef struct dtv_l3_usb_provider {
+    void *provider_context;
+    dtv_l3_claim_fn claim;
+    dtv_l3_release_claim_fn release_claim;
+    dtv_l3_transfer_submit_fn submit;
+    dtv_l3_transfer_cancel_fn cancel;
+    dtv_l3_claim_cancel_fn claim_cancel;
+    dtv_l3_cancel_scope cancel_scope;
+    dtv_l3_logger logger;
+} dtv_l3_usb_provider;
+
+typedef enum dtv_l3_firmware_source {
+    DTV_L3_FIRMWARE_NONE = 0,
+    DTV_L3_FIRMWARE_PATH = 1,
+    DTV_L3_FIRMWARE_BYTES = 2,
+    DTV_L3_FIRMWARE_READ_CALLBACK = 3
+} dtv_l3_firmware_source;
+
+/*
+ * Returns a firmware view. The data stays valid at least for the duration of
+ * the factory create call; the product adapter copies it if it retains the
+ * image beyond that call.
+ */
+typedef dtv_l3_result (*dtv_l3_firmware_read_fn)(
+    void *read_context,
+    const uint8_t **data,
+    size_t *size);
+
+typedef struct dtv_l3_firmware {
+    dtv_l3_firmware_source source;
+    const char *path;
+    const uint8_t *bytes;
+    size_t size;
+    dtv_l3_firmware_read_fn read;
+    void *read_context;
+} dtv_l3_firmware;
+
+/* Product-defined selectors are opaque to Core. */
+typedef struct dtv_l3_open_config {
+    uint32_t model;
+    uint64_t selector;
+    const dtv_l3_firmware *firmware;
+} dtv_l3_open_config;
+
+/* Capability differences stay in one common shape instead of per-product APIs. */
+typedef struct dtv_l3_capabilities {
+    uint32_t receiver_count;
+    uint32_t reader_count;
+    uint8_t lnb_power;
+    uint8_t serial;
+    uint8_t reserved[2];
+    dtv_l3_cancel_scope cancel_scope;
+} dtv_l3_capabilities;
+
+typedef dtv_l3_result (*dtv_l3_adapter_reader_acquire_fn)(
+    void *product_context,
+    uint32_t reader_id,
+    dtv_l3_reader **reader_out);
+typedef dtv_l3_result (*dtv_l3_adapter_lnb_set_fn)(
+    void *product_context,
+    uint32_t receiver_id,
+    uint32_t mode);
+
+/*
+ * Product-owned semantics. The adapter and its firmware view must outlive the
+ * owner until context_release succeeds. Core calls these callbacks outside its
+ * large lock. Missing callbacks report DTV_L3_UNSUPPORTED. product_context is
+ * separate from the host USB provider_context.
+ */
+typedef struct dtv_l3_product_adapter {
+    void *product_context;
+    dtv_l3_capabilities capabilities;
+    const dtv_l3_firmware *firmware;
+    dtv_l3_scope_query_fn scope_query;
+    dtv_l3_tune_fn tune;
+    dtv_l3_bridge_start_fn bridge_start;
+    dtv_l3_bridge_stop_fn bridge_stop;
+    dtv_l3_stream_attach_fn stream_attach;
+    dtv_l3_stream_stop_fn stream_stop;
+    dtv_l3_adapter_reader_acquire_fn reader_acquire;
+    dtv_l3_adapter_lnb_set_fn lnb_set;
+} dtv_l3_product_adapter;
+
+/*
+ * Creates one context-local adapter. The adapter returned in adapter_out is a
+ * candidate pointer owned by the product; Core never frees it. If create
+ * returns OK, release (when non-NULL) is called exactly once after the owner
+ * is destroyed or after a later open failure.
+ */
+typedef dtv_l3_result (*dtv_l3_adapter_create_fn)(
+    void *factory_context,
+    const dtv_l3_open_config *config,
+    const dtv_l3_product_adapter **adapter_out,
+    void **adapter_owner_out);
+typedef void (*dtv_l3_adapter_release_fn)(void *adapter_owner);
+
+typedef struct dtv_l3_adapter_factory {
+    void *factory_context;
+    dtv_l3_adapter_create_fn create;
+    dtv_l3_adapter_release_fn release;
+} dtv_l3_adapter_factory;
 
 typedef struct dtv_l3_open_result {
     dtv_l3_result result;
@@ -409,6 +521,16 @@ typedef struct dtv_l3_stream_status {
 /* ACCEPTED transfers an owner before claim work; later failure keeps it recoverable. */
 dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
                                uint32_t claim_count);
+dtv_l3_open_result dtv_l3_open_ex(const dtv_l3_usb_provider *usb_provider,
+                                  const dtv_l3_product_adapter *adapter,
+                                  uint32_t claim_count);
+dtv_l3_open_result dtv_l3_open_factory(
+    const dtv_l3_usb_provider *usb_provider,
+    const dtv_l3_adapter_factory *factory,
+    const dtv_l3_open_config *config,
+    uint32_t claim_count);
+dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
+                                      dtv_l3_capabilities *capabilities);
 dtv_l3_result dtv_l3_open_status_get(
     dtv_l3_context *owner,
     dtv_l3_open_status *status);
