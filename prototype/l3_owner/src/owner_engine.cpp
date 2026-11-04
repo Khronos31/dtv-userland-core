@@ -118,6 +118,11 @@ void OwnerEngine::set_submit_mode(dtv_l3_submit_mode mode) {
     submit_mode_ = mode;
 }
 
+void OwnerEngine::set_initialize_hook(std::function<dtv_l3_result()> hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    initialize_hook_ = std::move(hook);
+}
+
 void OwnerEngine::abort_open_after_lane_exception() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -239,6 +244,23 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             if (close_requested_) {
                 break;
             }
+        }
+    }
+
+    if (!failed && !close_requested_ && initialize_hook_) {
+        dtv_l3_result initialize_result = DTV_L3_FAILED;
+        try {
+            initialize_result = initialize_hook_();
+        } catch (...) {
+            initialize_result = DTV_L3_FAILED;
+        }
+        if (initialize_result != DTV_L3_OK) {
+            failed = true;
+            std::lock_guard<std::mutex> lock(mutex_);
+            open_result_ = initialize_result;
+            open_state_ = OpenState::Failed;
+            close_requested_ = true;
+            state_condition_.notify_all();
         }
     }
 
@@ -1614,8 +1636,6 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
     if (!borrow) {
         return DTV_L3_BUSY;
     }
-    std::uint32_t claim_cancel_index = 0;
-    bool do_claim_cancel = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_state_ != OpenState::Opening || close_requested_) {
@@ -1625,18 +1645,8 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
         if (initialization_phase_ != InitializationPhase::NotStarted) {
             open_state_ = OpenState::Closing;
         }
-        if (claim_in_flight_ && in_flight_claim_valid_ &&
-            in_flight_claim_index_ < claim_cancel_requested_.size() &&
-            !claim_cancel_requested_[in_flight_claim_index_]) {
-            claim_cancel_index = in_flight_claim_index_;
-            claim_cancel_requested_[claim_cancel_index] = true;
-            ++provider_calls_in_flight_;
-            do_claim_cancel = true;
-        }
+        request_claim_cancel_locked();
         state_condition_.notify_all();
-    }
-    if (do_claim_cancel) {
-        run_claim_cancel(claim_cancel_index);
     }
     finish_close();
     return DTV_L3_ACCEPTED;

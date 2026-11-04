@@ -288,6 +288,12 @@ struct dtv_l3_context {
           engine(make_engine_ex(*usb_provider, *product_adapter, usb.logger)) {
         product_adapter->set_binding(engine->binding());
         engine->set_submit_mode(usb.submit_mode);
+        if (adapter.initialize != nullptr) {
+            engine->set_initialize_hook([this] {
+                return product_view->initialize(product_view->product_context,
+                                                this);
+            });
+        }
     }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
@@ -438,6 +444,22 @@ static dtv_l3_open_result finish_open(dtv_l3_context *owner,
                                      uint32_t claim_count) {
     dtv_l3_op *op = nullptr;
     try {
+        if (owner->product_view != nullptr &&
+            owner->product_view->bind != nullptr) {
+            dtv_l3_result bind_result = DTV_L3_FAILED;
+            try {
+                bind_result = owner->product_view->bind(
+                    owner->product_view->product_context, owner);
+            } catch (...) {
+                bind_result = DTV_L3_FAILED;
+            }
+            if (bind_result != DTV_L3_OK) {
+                log_context(owner, DTV_L3_LOG_ERROR, "dtv_l3_open",
+                            "product bind failed");
+                delete owner;
+                return {DTV_L3_FAILED, nullptr, nullptr};
+            }
+        }
         l3_owner_prototype::maybe_throw_test_exception(
             l3_owner_prototype::kTestInjectOpenOp);
         op = new (std::nothrow) dtv_l3_op;

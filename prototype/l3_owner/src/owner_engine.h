@@ -163,6 +163,7 @@ public:
     void initialize_claims(std::uint32_t count);
     void abort_open_after_lane_exception();
     void set_submit_mode(dtv_l3_submit_mode mode);
+    void set_initialize_hook(std::function<dtv_l3_result()> hook);
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
@@ -356,6 +357,7 @@ private:
     dtv_l3_logger logger_;
     ProductAdapter *product_adapter_ = nullptr;
     dtv_l3_submit_mode submit_mode_ = DTV_L3_SUBMIT_NONBLOCKING;
+    std::function<dtv_l3_result()> initialize_hook_;
     mutable std::mutex mutex_;
     bool retired_gate_ = false;
     bool released_ = false;

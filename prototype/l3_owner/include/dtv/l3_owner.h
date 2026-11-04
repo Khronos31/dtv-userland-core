@@ -488,6 +488,14 @@ typedef struct dtv_l3_product_adapter {
     dtv_l3_capabilities capabilities;
     const dtv_l3_capability_catalog *catalog;
     const dtv_l3_firmware *firmware;
+    /*
+     * Optional owner binding. Core calls bind before the first claim. The
+     * adapter must not retain a raw handle after context_release. It should
+     * perform USB work through owner entry points, not directly.
+     */
+    dtv_l3_result (*bind)(void *product_context, dtv_l3_context *owner);
+    /* Called on the initialization lane after claims are ready and before READY. */
+    dtv_l3_result (*initialize)(void *product_context, dtv_l3_context *owner);
     dtv_l3_scope_query_fn scope_query;
     dtv_l3_tune_fn tune;
     dtv_l3_bridge_start_fn bridge_start;

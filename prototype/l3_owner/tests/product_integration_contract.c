@@ -31,6 +31,9 @@ struct fixture {
     unsigned int lnb_calls;
     unsigned int factory_create_calls;
     unsigned int factory_release_calls;
+    unsigned int bind_calls;
+    unsigned int initialize_calls;
+    int fail_initialize;
     uint32_t lnb_mode;
     dtv_l3_open_config seen_config;
     const uint8_t *seen_firmware;
@@ -131,6 +134,21 @@ static dtv_l3_result usb_cancel(void *context,
     (void)transfer_id;
     ++fixture->cancel_calls;
     return DTV_L3_ACCEPTED;
+}
+
+static dtv_l3_result product_bind(void *context, dtv_l3_context *owner) {
+    struct fixture *fixture = context;
+    (void)owner;
+    ++fixture->bind_calls;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_initialize(void *context,
+                                        dtv_l3_context *owner) {
+    struct fixture *fixture = context;
+    (void)owner;
+    ++fixture->initialize_calls;
+    return fixture->fail_initialize ? DTV_L3_FAILED : DTV_L3_OK;
 }
 
 static dtv_l3_result product_scope(void *context,
@@ -242,6 +260,8 @@ static dtv_l3_product_adapter adapter_for(struct fixture *fixture,
                          .serial = 0,
                          .cancel_scope = DTV_L3_CANCEL_SCOPE_PIPE},
         .firmware = firmware,
+        .bind = product_bind,
+        .initialize = product_initialize,
         .scope_query = product_scope,
         .tune = product_tune,
         .bridge_start = product_bridge_start,
@@ -441,6 +461,9 @@ static int test_separated_open(void) {
     adapter = adapter_for(&fixture, &firmware_view);
     if (!open_ready_ex(&usb, &adapter, &owner)) {
         return 1;
+    }
+    if (fixture.bind_calls != 1 || fixture.initialize_calls != 1) {
+        return 21;
     }
     if (dtv_l3_capabilities_get(owner, &capabilities) != DTV_L3_OK ||
         capabilities.receiver_count != 2 || capabilities.reader_count != 1 ||
@@ -746,6 +769,47 @@ static int test_args_factory_manifest_reject(void) {
     return 0;
 }
 
+static int test_initialize_failure(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_product_adapter adapter;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_open_status status;
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.fail_initialize = 1;
+    usb = usb_provider_for(&fixture);
+    adapter = adapter_for(&fixture, NULL);
+    opened = dtv_l3_open_ex(&usb, &adapter, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (dtv_l3_op_wait(opened.op, 2000) != DTV_L3_OK ||
+        dtv_l3_op_poll(opened.op, &result) != DTV_L3_OK ||
+        result.state != DTV_L3_OP_FAILED || result.result != DTV_L3_FAILED) {
+        return 2;
+    }
+    if (dtv_l3_open_status_get(opened.owner, &status) != DTV_L3_OK ||
+        status.state != DTV_L3_OPEN_FAILED || fixture.initialize_calls != 1 ||
+        fixture.bind_calls != 1) {
+        return 3;
+    }
+    if (dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 4;
+    }
+    if (dtv_l3_close(opened.owner, 2000) != DTV_L3_OK ||
+        !wait_releasable(opened.owner) ||
+        fixture.release_claim_calls != 1) {
+        return 5;
+    }
+    if (!release_owner(opened.owner)) {
+        return 6;
+    }
+    return 0;
+}
+
 static int test_missing_product_callbacks(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
@@ -795,6 +859,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "args-manifest-reject") == 0) {
         return test_args_factory_manifest_reject();
+    }
+    if (strcmp(argv[1], "init-fail") == 0) {
+        return test_initialize_failure();
     }
     return 65;
 }
