@@ -357,31 +357,6 @@ struct dtv_l3_context {
                                                 this);
             });
         }
-        if (adapter.reader_close != nullptr || adapter.lnb_restore != nullptr) {
-            engine->set_shutdown_hook([this] {
-                std::lock_guard<std::mutex> lock(reader_mutex);
-                if (product_view->reader_close != nullptr) {
-                    for (auto &entry : readers) {
-                        if (!entry.second->retired && entry.second->session != nullptr) {
-                            (void)product_view->reader_close(
-                                product_view->product_context,
-                                entry.second->session,
-                                DTV_L3_CARD_DISPOSITION_LEAVE, 0);
-                        }
-                    }
-                }
-                if (product_view->lnb_restore != nullptr) {
-                    for (auto &entry : lnb_states) {
-                        dtv_l3_restore_result restoration =
-                            DTV_L3_RESTORE_UNKNOWN;
-                        (void)product_view->lnb_restore(
-                            product_view->product_context, entry.first,
-                            &restoration);
-                        entry.second.restoration = restoration;
-                    }
-                }
-            });
-        }
     }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
@@ -406,6 +381,7 @@ struct dtv_l3_context {
     std::map<std::uint32_t, dtv_l3_lnb_state> lnb_states;
     std::uint64_t next_reader_generation = 1;
     std::uint8_t power_permission = 0;
+    bool shutdown_hook_installed = false;
     const dtv_l3_capability_catalog *catalog = nullptr;
     dtv_l3_adapter_release_fn adapter_release = nullptr;
     void *adapter_owner = nullptr;
@@ -416,6 +392,37 @@ struct dtv_l3_context {
     std::atomic<bool> open_thread_done{false};
     std::atomic<std::size_t> outstanding_ops{0};
 };
+
+static void install_shutdown_hook(dtv_l3_context *owner) {
+    std::lock_guard<std::mutex> lock(owner->reader_mutex);
+    if (owner->shutdown_hook_installed || owner->product_view == nullptr) {
+        return;
+    }
+    owner->shutdown_hook_installed = true;
+    owner->engine->set_shutdown_hook([owner] {
+        std::lock_guard<std::mutex> guard(owner->reader_mutex);
+        if (owner->product_view->reader_close != nullptr) {
+            for (auto &entry : owner->readers) {
+                if (!entry.second->retired &&
+                    entry.second->session != nullptr) {
+                    (void)owner->product_view->reader_close(
+                        owner->product_view->product_context,
+                        entry.second->session,
+                        DTV_L3_CARD_DISPOSITION_LEAVE, 0);
+                }
+            }
+        }
+        if (owner->product_view->lnb_restore != nullptr) {
+            for (auto &entry : owner->lnb_states) {
+                dtv_l3_restore_result restoration = DTV_L3_RESTORE_UNKNOWN;
+                (void)owner->product_view->lnb_restore(
+                    owner->product_view->product_context, entry.first,
+                    &restoration);
+                entry.second.restoration = restoration;
+            }
+        }
+    });
+}
 
 struct dtv_l3_op {
     dtv_l3_context *owner = nullptr;
@@ -1378,6 +1385,7 @@ dtv_l3_result dtv_l3_reader_open(dtv_l3_context *owner,
         if (atr_length != nullptr) {
             *atr_length = length;
         }
+        install_shutdown_hook(owner);
         return DTV_L3_OK;
     } catch (...) {
         return entry_failure(owner, "dtv_l3_reader_open");
@@ -1549,6 +1557,9 @@ dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
         if (result == DTV_L3_OK || result == DTV_L3_OUTCOME_UNKNOWN) {
             std::lock_guard<std::mutex> lock(owner->reader_mutex);
             owner->lnb_states[scope_id] = *out;
+        }
+        if (result == DTV_L3_OK) {
+            install_shutdown_hook(owner);
         }
         return result;
     } catch (...) {
