@@ -142,7 +142,8 @@ public:
             if (require_registered_cancel && found == transfers.end()) {
                 return DTV_L3_INVALID;
             }
-        if (cancel_completes_transfer && found != transfers.end()) {
+            accepted_cancelled.push_back(TransferKey{binding, id});
+            if (cancel_completes_transfer && found != transfers.end()) {
                 pending = found->second;
                 transfers.erase(found);
                 complete_now = true;
@@ -336,6 +337,49 @@ public:
         });
     }
 
+    bool wait_for_cancel_count_for(Binding *binding,
+                                   std::uint64_t id,
+                                   std::size_t expected,
+                                   std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cancel_condition.wait_for(lock, timeout, [&] {
+            std::size_t count = 0;
+            for (const auto &key : cancelled) {
+                if (key.binding == binding && key.id == id) {
+                    ++count;
+                }
+            }
+            return count >= expected;
+        });
+    }
+
+    std::size_t accepted_cancel_count(Binding *binding, std::uint64_t id) {
+        std::lock_guard<std::mutex> lock(mutex);
+        std::size_t count = 0;
+        for (const auto &key : accepted_cancelled) {
+            if (key.binding == binding && key.id == id) {
+                ++count;
+            }
+        }
+        return count;
+    }
+
+    bool wait_for_accepted_cancel_count_for(Binding *binding,
+                                            std::uint64_t id,
+                                            std::size_t expected,
+                                            std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex);
+        return cancel_condition.wait_for(lock, timeout, [&] {
+            std::size_t count = 0;
+            for (const auto &key : accepted_cancelled) {
+                if (key.binding == binding && key.id == id) {
+                    ++count;
+                }
+            }
+            return count >= expected;
+        });
+    }
+
     std::size_t released_claim_count() {
         std::lock_guard<std::mutex> lock(mutex);
         return released_claims.size();
@@ -354,6 +398,7 @@ public:
     std::vector<std::pair<std::uint32_t, std::uint32_t>> usb_destinations;
     std::vector<std::uint32_t> usb_functions;
     std::vector<TransferKey> cancelled;
+    std::vector<TransferKey> accepted_cancelled;
     std::shared_ptr<TestBarrier> claim_barrier;
     std::shared_ptr<TestBarrier> submit_barrier;
     std::shared_ptr<TestBarrier> submit_return_barrier;
@@ -891,6 +936,7 @@ void test_provider_route_slots_control_and_layered_rejection() {
     auto control = request_for(payload);
     control.kind = DTV_L3_TRANSFER_CONTROL;
     control.endpoint = 0;
+    control.in_capacity = 0;
     control.claim_index = 1;
     control.control = {0x40, 0x55, 0x1234, 0x0044};
     std::shared_ptr<OwnerEngine::Operation> control_op;
@@ -956,6 +1002,7 @@ void test_provider_route_slots_control_and_layered_rejection() {
     auto same_control = request_for(payload);
     same_control.kind = DTV_L3_TRANSFER_CONTROL;
     same_control.endpoint = 0;
+    same_control.in_capacity = 0;
     same_control.claim_index = 1;
     same_control.control = {0x40, 0x55, 0x1234, 0x0044};
     std::shared_ptr<OwnerEngine::Operation> control_x_op;
@@ -1924,6 +1971,130 @@ void test_claim_cancel_accepted_does_not_settle_claim() {
     CHECK(owner.release() == DTV_L3_OK);
 }
 
+void test_resubmit_cancel_window_replays_after_acceptance() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 90);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload;
+    auto request = request_for(payload);
+    request.resubmit_on_provider_abort = 1;
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    CHECK(owner.start(request, &operation) == DTV_L3_ACCEPTED);
+    const auto binding = owner.binding();
+    provider.require_registered_cancel = true;
+    auto barrier = std::make_shared<TestBarrier>();
+    provider.submit_barrier = barrier;
+    bool fired = false;
+    std::thread trigger([&] {
+        fired = provider.fire(binding.get(), operation->id,
+                              DTV_L3_CANCELLED);
+    });
+    barrier->wait_until_arrived();
+    CHECK(owner.cancel(operation) == DTV_L3_INVALID);
+    barrier->release();
+    trigger.join();
+    CHECK(fired);
+    const auto new_id = operation->id;
+    CHECK(provider.wait_for_cancel_count_for(
+        binding.get(), new_id, 2, std::chrono::seconds(2)));
+    CHECK(provider.cancel_count(binding.get(), new_id) == 2);
+    CHECK(owner.release_operation(operation) == DTV_L3_BUSY);
+    CHECK(provider.fire(binding.get(), new_id, DTV_L3_CANCELLED));
+    CHECK(operation->state == DTV_L3_OP_FAILED);
+    CHECK(operation->result == DTV_L3_CANCELLED);
+    CHECK(operation->cancel_cause == DTV_L3_CANCEL_CAUSE_REQUESTED);
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.releasable;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_resubmit_close_window_replays_after_acceptance() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 91);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload;
+    auto request = request_for(payload);
+    request.resubmit_on_provider_abort = 1;
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    CHECK(owner.start(request, &operation) == DTV_L3_ACCEPTED);
+    const auto binding = owner.binding();
+    provider.require_registered_cancel = true;
+    auto barrier = std::make_shared<TestBarrier>();
+    provider.submit_barrier = barrier;
+    bool fired = false;
+    std::thread trigger([&] {
+        fired = provider.fire(binding.get(), operation->id,
+                              DTV_L3_CANCELLED);
+    });
+    barrier->wait_until_arrived();
+    const auto close_result = owner.close(0);
+    CHECK(close_result == DTV_L3_TIMEOUT || close_result == DTV_L3_OK);
+    barrier->release();
+    trigger.join();
+    CHECK(fired);
+    const auto new_id = operation->id;
+    CHECK(provider.wait_for_accepted_cancel_count_for(
+        binding.get(), new_id, 1, std::chrono::seconds(2)));
+    CHECK(provider.accepted_cancel_count(binding.get(), new_id) == 1);
+    CHECK(provider.cancel_count(binding.get(), new_id) >= 1);
+    CHECK(owner.release_operation(operation) == DTV_L3_BUSY);
+    CHECK(provider.fire(binding.get(), new_id, DTV_L3_CANCELLED));
+    CHECK(operation->state == DTV_L3_OP_FAILED);
+    CHECK(operation->result == DTV_L3_CANCELLED);
+    CHECK(operation->cancel_cause == DTV_L3_CANCEL_CAUSE_REQUESTED);
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.releasable;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_resubmit_disconnect_window_cancels_accepted_id() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 92);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload;
+    auto request = request_for(payload);
+    request.resubmit_on_provider_abort = 1;
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    std::shared_ptr<OwnerEngine::Operation> sibling;
+    CHECK(owner.start(request, &operation) == DTV_L3_ACCEPTED);
+    request.resubmit_on_provider_abort = 0;
+    CHECK(owner.start(request, &sibling) == DTV_L3_ACCEPTED);
+    const auto binding = owner.binding();
+    provider.require_registered_cancel = true;
+    auto barrier = std::make_shared<TestBarrier>();
+    provider.submit_barrier = barrier;
+    bool fired = false;
+    std::thread trigger([&] {
+        fired = provider.fire(binding.get(), operation->id,
+                              DTV_L3_CANCELLED);
+    });
+    barrier->wait_until_arrived();
+    CHECK(provider.fire(binding.get(), sibling->id, DTV_L3_DISCONNECTED));
+    CHECK(operation->state == DTV_L3_OP_FAILED);
+    CHECK(operation->result == DTV_L3_DISCONNECTED);
+    barrier->release();
+    trigger.join();
+    CHECK(fired);
+    const auto new_id = operation->id;
+    CHECK(provider.wait_for_accepted_cancel_count_for(
+        binding.get(), new_id, 1, std::chrono::seconds(2)));
+    CHECK(provider.accepted_cancel_count(binding.get(), new_id) == 1);
+    CHECK(provider.cancel_count(binding.get(), new_id) == 1);
+    CHECK(provider.fire(binding.get(), new_id, DTV_L3_DISCONNECTED));
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(owner.release_operation(sibling) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.releasable;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -1958,5 +2129,8 @@ int main() {
     test_callback_frame_close_does_not_wait();
     test_claim_cancel_before_initialize_is_not_sent();
     test_claim_cancel_accepted_does_not_settle_claim();
+    test_resubmit_cancel_window_replays_after_acceptance();
+    test_resubmit_close_window_replays_after_acceptance();
+    test_resubmit_disconnect_window_cancels_accepted_id();
     return failures == 0 ? 0 : 1;
 }

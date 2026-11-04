@@ -212,7 +212,7 @@ dtv_l3_result OwnerEngine::start(
          (request.endpoint != 0 ||
           ((request.control.request_type & 0x80u) != 0
                ? request.out_size != 0
-               : request.out_size == 0 && request.in_capacity != 0))) ||
+               : request.in_capacity != 0))) ||
         (request.kind != DTV_L3_TRANSFER_BULK &&
          request.kind != DTV_L3_TRANSFER_CONTROL)) {
         return DTV_L3_INVALID;
@@ -248,6 +248,13 @@ dtv_l3_result OwnerEngine::start(
                 return DTV_L3_INVALID;
             }
         }
+        for (const auto &entry : in_flight_) {
+            const auto &other = entry.second;
+            if (other->pipe_key == pipe_key &&
+                other->request_template.timeout_ms != request.timeout_ms) {
+                return DTV_L3_INVALID;
+            }
+        }
         binding = binding_;
         op->owner = this;
         op->binding = binding;
@@ -271,6 +278,7 @@ dtv_l3_result OwnerEngine::start(
     const auto result = provider_.submit(
         binding.get(), op->id, provider_request, &OwnerEngine::completion_thunk,
         op.get());
+    bool pending_resubmit = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
@@ -279,9 +287,10 @@ dtv_l3_result OwnerEngine::start(
             if (!op->completion_received) {
                 in_flight_.emplace(op->id, op);
             }
-            if (op->cancel_requested) {
+            if (op->cancel_requested && !op->resubmit_pending) {
                 queue_cancel_locked(op);
             }
+            pending_resubmit = op->resubmit_pending;
         } else {
             if (op->state == DTV_L3_OP_OPENING ||
                 op->state == DTV_L3_OP_RUNNING) {
@@ -289,9 +298,13 @@ dtv_l3_result OwnerEngine::start(
                 op->result = result;
             }
             op->submitted = true;
+            op->resubmit_pending = false;
         }
         state_condition_.notify_all();
         work_condition_.notify_all();
+    }
+    if (pending_resubmit) {
+        resubmit_operation(op);
     }
     finish_close();
     return result;
@@ -1881,8 +1894,6 @@ void OwnerEngine::on_completion(
     bool matched = false;
     bool do_resubmit = false;
     std::shared_ptr<Operation> op_shared;
-    dtv_l3_transfer_request resubmit_request{};
-    std::uint64_t resubmit_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto in_flight = in_flight_.find(id);
@@ -1907,33 +1918,31 @@ void OwnerEngine::on_completion(
                 const bool proven_unsent =
                     completion.actual_length_known != 0 &&
                     completion.actual_length == 0;
+                const bool can_resubmit =
+                    op.cancel_cause == DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT &&
+                    op.request_template.resubmit_on_provider_abort != 0 &&
+                    !op.cancel_requested && !close_requested_ &&
+                    !disconnected_;
                 if (outbound && !proven_unsent) {
                     op.result = DTV_L3_OUTCOME_UNKNOWN;
                     op.state = DTV_L3_OP_FAILED;
                 } else if (outbound) {
                     op.result = DTV_L3_CANCELLED;
                     op.state = DTV_L3_OP_FAILED;
-                } else if (op.cancel_cause ==
-                               DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT &&
-                           op.request_template.resubmit_on_provider_abort != 0 &&
-                           op.submitted && !op.cancel_requested &&
-                           !close_requested_ && !disconnected_) {
-                    op.provider_abort_resubmits++;
-                    op.completion_received = false;
-                    op.submitted = false;
-                    op.cancel_sent = false;
-                    op.cancel_in_progress = false;
-                    const auto old_id = op.id;
-                    const auto new_id = next_transfer_id_++;
-                    operations_.erase(old_id);
-                    op.id = new_id;
-                    operations_.emplace(new_id, op_shared);
-                    resubmit_request = op.request_template;
-                    if (!op.retained_payload.empty()) {
-                        resubmit_request.out_data =
-                            op.retained_payload.data();
+                } else if (can_resubmit && !op.submitted) {
+                    if (op.provider_abort_resubmits == 0) {
+                        /*
+                         * The completion ran inside submit. Keep the logical
+                         * operation open and resubmit after the submit stack
+                         * returns; a synchronous abort of the retry is
+                         * terminal instead of recursing.
+                         */
+                        op.resubmit_pending = true;
+                    } else {
+                        op.result = DTV_L3_CANCELLED;
+                        op.state = DTV_L3_OP_FAILED;
                     }
-                    resubmit_id = new_id;
+                } else if (can_resubmit) {
                     do_resubmit = true;
                 } else {
                     op.result = DTV_L3_CANCELLED;
@@ -1978,35 +1987,99 @@ void OwnerEngine::on_completion(
         return;
     }
     if (do_resubmit) {
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            ++provider_calls_in_flight_;
-        }
-        CallbackFrame frame;
-        const auto submit_result = provider_.submit(
-            op_shared->binding.get(), resubmit_id, resubmit_request,
-            &OwnerEngine::completion_thunk, op_shared.get());
-        {
-            std::lock_guard<std::mutex> lock(mutex_);
-            --provider_calls_in_flight_;
-            if (submit_result == DTV_L3_ACCEPTED) {
-                op_shared->submitted = true;
-                if (!op_shared->completion_received) {
-                    const auto found = operations_.find(resubmit_id);
-                    if (found != operations_.end()) {
-                        in_flight_.emplace(resubmit_id, found->second);
-                    }
-                }
-            } else if (op_shared->state == DTV_L3_OP_OPENING ||
-                       op_shared->state == DTV_L3_OP_RUNNING) {
-                op_shared->state = DTV_L3_OP_FAILED;
-                op_shared->result = submit_result;
-            }
-            should_finish_close = close_requested_;
-            state_condition_.notify_all();
-        }
+        resubmit_operation(op_shared);
     }
     if (should_finish_close) {
+        finish_close();
+    }
+}
+
+void OwnerEngine::resubmit_operation(
+    const std::shared_ptr<Operation> &operation) {
+    if (!operation) {
+        return;
+    }
+    bool do_submit = false;
+    bool need_finish_close = false;
+    dtv_l3_transfer_request request{};
+    std::uint64_t new_id = 0;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        operation->resubmit_pending = false;
+        if (operation->state == DTV_L3_OP_DONE ||
+            operation->state == DTV_L3_OP_FAILED) {
+            need_finish_close = close_requested_;
+        } else if (operation->cancel_requested || close_requested_ ||
+                   disconnected_) {
+            operation->completion_received = true;
+            operation->submitted = true;
+            operation->cancel_cause =
+                disconnected_ ? DTV_L3_CANCEL_CAUSE_NONE
+                              : DTV_L3_CANCEL_CAUSE_REQUESTED;
+            operation->result = disconnected_ ? DTV_L3_DISCONNECTED
+                                              : DTV_L3_CANCELLED;
+            operation->state = DTV_L3_OP_FAILED;
+            state_condition_.notify_all();
+            work_condition_.notify_all();
+            need_finish_close = close_requested_;
+        } else {
+            operation->provider_abort_resubmits++;
+            operation->completion_received = false;
+            operation->submitted = false;
+            operation->cancel_sent = false;
+            operation->cancel_in_progress = false;
+            const auto old_id = operation->id;
+            new_id = next_transfer_id_++;
+            operations_.erase(old_id);
+            operation->id = new_id;
+            operations_.emplace(new_id, operation);
+            request = operation->request_template;
+            if (!operation->retained_payload.empty()) {
+                request.out_data = operation->retained_payload.data();
+            }
+            ++provider_calls_in_flight_;
+            do_submit = true;
+        }
+    }
+    if (!do_submit) {
+        if (need_finish_close) {
+            finish_close();
+        }
+        return;
+    }
+
+    CallbackFrame frame;
+    const auto result = provider_.submit(
+        operation->binding.get(), new_id, request,
+        &OwnerEngine::completion_thunk, operation.get());
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        if (result == DTV_L3_ACCEPTED) {
+            operation->submitted = true;
+            if (!operation->completion_received) {
+                in_flight_.emplace(new_id, operation);
+            }
+            if (!operation->completion_received &&
+                (operation->cancel_requested || close_requested_ ||
+                 disconnected_)) {
+                queue_cancel_locked(operation, true);
+            }
+        } else if (operation->state == DTV_L3_OP_OPENING ||
+                   operation->state == DTV_L3_OP_RUNNING) {
+            operation->state = DTV_L3_OP_FAILED;
+            if (operation->cancel_requested || close_requested_) {
+                operation->cancel_cause = DTV_L3_CANCEL_CAUSE_REQUESTED;
+                operation->result = DTV_L3_CANCELLED;
+            } else {
+                operation->result = result;
+            }
+        }
+        need_finish_close = close_requested_;
+        state_condition_.notify_all();
+        work_condition_.notify_all();
+    }
+    if (need_finish_close) {
         finish_close();
     }
 }
@@ -2035,11 +2108,18 @@ void OwnerEngine::finish_close() {
 }
 
 void OwnerEngine::queue_cancel_locked(
-    const std::shared_ptr<Operation> &operation) {
-    if (operation->cancel_in_progress ||
-        operation->cancel_sent || operation->state == DTV_L3_OP_DONE ||
-        operation->state == DTV_L3_OP_FAILED) {
+    const std::shared_ptr<Operation> &operation,
+    bool allow_terminal) {
+    if (operation->cancel_in_progress || operation->cancel_sent) {
         return;
+    }
+    if (operation->state == DTV_L3_OP_DONE ||
+        operation->state == DTV_L3_OP_FAILED) {
+        const bool outstanding =
+            in_flight_.find(operation->id) != in_flight_.end();
+        if (!allow_terminal || !outstanding) {
+            return;
+        }
     }
     operation->cancel_in_progress = true;
     ++provider_calls_in_flight_;

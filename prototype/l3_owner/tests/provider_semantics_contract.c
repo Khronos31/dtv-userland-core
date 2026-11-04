@@ -691,7 +691,17 @@ static int test_control_direction(void) {
         op != NULL || fixture.submit_calls != 0) {
         return 3;
     }
+    request.control.request_type = 0x40;
+    request.out_data = payload;
+    request.out_size = sizeof(payload);
+    request.in_capacity = 8;
+    if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_INVALID ||
+        op != NULL || fixture.submit_calls != 0) {
+        return 9;
+    }
     request.control.request_type = 0xc0;
+    request.out_data = NULL;
+    request.out_size = 0;
     request.in_capacity = 8;
     if (!start_transfer(owner, &request, &op) ||
         fixture.submit_calls != 1) {
@@ -771,6 +781,108 @@ static int test_pipe_timeout_conflict(void) {
         return 11;
     }
     return close_and_release(owner) ? 0 : 12;
+}
+
+static int test_pipe_timeout_after_deadline(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider;
+    dtv_l3_context *owner;
+    dtv_l3_op *expired_op = NULL;
+    dtv_l3_op *same_policy_op = NULL;
+    dtv_l3_op_result result;
+    dtv_l3_transfer_request request;
+    uint64_t expired_id;
+    uint64_t same_policy_id;
+
+    provider = provider_for(&fixture);
+    owner = open_ready(&provider);
+    if (owner == NULL) {
+        return 1;
+    }
+    request = bulk_request(0x81, 0, NULL, 0, 64);
+    request.deadline_ns = monotonic_now_ns() + 40000000ull;
+    if (!start_transfer(owner, &request, &expired_op)) {
+        return 2;
+    }
+    expired_id = only_pending_id(&fixture, 0);
+    if (expired_id == 0) {
+        return 3;
+    }
+    sleep_ms(120);
+    if (!wait_op_terminal(expired_op, &result) ||
+        result.state != DTV_L3_OP_FAILED ||
+        result.result != DTV_L3_TIMEOUT || fixture.cancel_calls != 0) {
+        return 4;
+    }
+    if (dtv_l3_op_release(expired_op) != DTV_L3_OK) {
+        return 13;
+    }
+    expired_op = NULL;
+    request = bulk_request(0x81, 1000, NULL, 0, 64);
+    if (dtv_l3_transfer_start(owner, &request, &same_policy_op) !=
+            DTV_L3_INVALID ||
+        same_policy_op != NULL || fixture.submit_calls != 1 ||
+        fixture.pipe_timeout_conflict) {
+        return 5;
+    }
+    request = bulk_request(0x81, 0, NULL, 0, 64);
+    if (!start_transfer(owner, &request, &same_policy_op) ||
+        fixture.submit_calls != 2) {
+        return 6;
+    }
+    same_policy_id = only_pending_id(&fixture, expired_id);
+    if (same_policy_id == 0) {
+        return 7;
+    }
+    if (!fire_pending(&fixture, expired_id, DTV_L3_OK, NULL, 0, 0, 1)) {
+        return 8;
+    }
+    if (!fire_pending(&fixture, same_policy_id, DTV_L3_OK, NULL, 0, 0, 1)) {
+        return 9;
+    }
+    if (!wait_op_terminal(same_policy_op, &result) ||
+        result.state != DTV_L3_OP_DONE) {
+        return 10;
+    }
+    if (dtv_l3_op_release(same_policy_op) != DTV_L3_OK) {
+        return 11;
+    }
+    return close_and_release(owner) ? 0 : 12;
+}
+
+static int test_sync_abort_resubmit(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider;
+    dtv_l3_context *owner;
+    dtv_l3_op *op = NULL;
+    dtv_l3_op_result result;
+    dtv_l3_transfer_request request;
+
+    fixture.sync_complete = 1;
+    fixture.sync_result = DTV_L3_CANCELLED;
+    fixture.sync_size = 0;
+    provider = provider_for(&fixture);
+    owner = open_ready(&provider);
+    if (owner == NULL) {
+        return 1;
+    }
+    request = bulk_request(0x81, 0, NULL, 0, 64);
+    request.resubmit_on_provider_abort = 1;
+    if (!start_transfer(owner, &request, &op)) {
+        return 2;
+    }
+    if (!wait_op_terminal(op, &result) ||
+        result.state != DTV_L3_OP_FAILED ||
+        result.result != DTV_L3_CANCELLED ||
+        result.cancel_cause != DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT ||
+        result.provider_abort_resubmits != 1 || fixture.submit_calls != 2 ||
+        fixture.submit_calls > 2) {
+        return 3;
+    }
+    if (dtv_l3_op_release(op) != DTV_L3_OK) {
+        return 4;
+    }
+    return close_and_release(owner) ? 0 : 5;
 }
 
 struct context_run {
@@ -875,6 +987,12 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "pipe-timeout") == 0) {
         return test_pipe_timeout_conflict();
+    }
+    if (strcmp(argv[1], "pipe-timeout-deadline") == 0) {
+        return test_pipe_timeout_after_deadline();
+    }
+    if (strcmp(argv[1], "sync-abort-resubmit") == 0) {
+        return test_sync_abort_resubmit();
     }
     if (strcmp(argv[1], "two-contexts") == 0) {
         return test_two_contexts();

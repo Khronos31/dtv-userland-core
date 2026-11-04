@@ -136,6 +136,7 @@ public:
         bool released = false;
         bool submitted = false;
         bool completion_received = false;
+        bool resubmit_pending = false;
         bool cancel_requested = false;
         bool cancel_in_progress = false;
         bool cancel_sent = false;
@@ -315,13 +316,15 @@ private:
     void finalize_retire_locked(std::uint64_t generation);
     void refresh_lease_locked(std::uint32_t lease_id);
     void retire_stream_for_close(std::uint64_t generation);
-    void queue_cancel_locked(const std::shared_ptr<Operation> &operation);
+    void queue_cancel_locked(const std::shared_ptr<Operation> &operation,
+                             bool allow_terminal = false);
     void run_cancel(const std::shared_ptr<Operation> &operation,
                     bool before_submit);
     void run_cleanup();
     bool cleanup_claims_locked() const;
     void request_claim_cancel_locked();
     void run_claim_cancel(std::uint32_t index);
+    void resubmit_operation(const std::shared_ptr<Operation> &operation);
     bool control_lane_may_exit_locked() const;
     void maybe_commit_control_exit_locked();
     bool lanes_exit_committed_locked() const;
