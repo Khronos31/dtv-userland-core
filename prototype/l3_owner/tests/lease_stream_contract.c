@@ -704,7 +704,7 @@ static int test_unsupported_card_and_lnb(void) {
     }
     if (dtv_l3_reader_acquire(owner, 0, &reader) != DTV_L3_UNSUPPORTED ||
         reader != NULL ||
-        dtv_l3_lnb_set(owner, 0, 1) != DTV_L3_UNSUPPORTED ||
+        dtv_l3_lnb_set(owner, 0, DTV_L3_LNB_ON_15V, 0, NULL) != DTV_L3_UNSUPPORTED ||
         fixture.attach_calls != 0 || fixture.tune_calls != 0 ||
         fixture.start_calls[7] != 0 || fixture.stop_calls[7] != 0) {
         return 2;

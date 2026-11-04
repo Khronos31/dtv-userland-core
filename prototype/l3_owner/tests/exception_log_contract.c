@@ -625,7 +625,7 @@ static int test_entry_guards(void) {
         return 7;
     }
     l3_test_set_exception_mask(INJECT_ENTRY);
-    if (dtv_l3_lnb_set(owner, 0, 0) != DTV_L3_FAILED) {
+    if (dtv_l3_lnb_set(owner, 0, DTV_L3_LNB_OFF, 0, NULL) != DTV_L3_FAILED) {
         return 8;
     }
 
