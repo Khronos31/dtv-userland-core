@@ -801,6 +801,47 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
             bool quiesced = terminal &&
                 terminal.value().stream_id == data.ticket.stream_id &&
                 terminal.value().quiesced;
+            if (!terminal || !quiesced || completion.error != Error::OK) {
+                std::fprintf(stderr,
+                    "Core bridge stream cleanup slot=%u generation=%llu "
+                    "client=%llu lease=%llu stream=%llu reservation=%llu "
+                    "completion_client=%llu completion_lease=%llu "
+                    "completion_ticket_client=%llu completion_ticket_slot=%zu "
+                    "completion_ticket_stream=%llu "
+                    "completion_ticket_reservation=%llu "
+                    "operation=%u completion_error=%u stop_valid=%u "
+                    "stop_stream=%llu stop_terminal=%u stop_quiesced=%u "
+                    "stop_cleanup_error=%u terminal_found=%u terminal_error=%u "
+                    "terminal_stream=%llu terminal_kind=%u terminal_quiesced=%u "
+                    "terminal_cleanup_error=%u\n",
+                    static_cast<unsigned>(completion.data_slot),
+                    static_cast<unsigned long long>(completion.data_generation),
+                    static_cast<unsigned long long>(data.ticket.client_id),
+                    static_cast<unsigned long long>(data.lease_id),
+                    static_cast<unsigned long long>(data.ticket.stream_id),
+                    static_cast<unsigned long long>(data.ticket.reservation),
+                    static_cast<unsigned long long>(completion.client_id),
+                    static_cast<unsigned long long>(completion.lease_id),
+                    static_cast<unsigned long long>(completion.stream_ticket.client_id),
+                    completion.stream_ticket.slot,
+                    static_cast<unsigned long long>(completion.stream_ticket.stream_id),
+                    static_cast<unsigned long long>(completion.stream_ticket.reservation),
+                    static_cast<unsigned>(completion.operation),
+                    static_cast<unsigned>(completion.error),
+                    completion.v1_stop_valid ? 1U : 0U,
+                    static_cast<unsigned long long>(completion.v1_stop.stream_id),
+                    static_cast<unsigned>(completion.v1_stop.terminal),
+                    completion.v1_stop.quiesced ? 1U : 0U,
+                    static_cast<unsigned>(completion.v1_stop.cleanup_error),
+                    terminal ? 1U : 0U,
+                    terminal ? 0U : static_cast<unsigned>(terminal.error()),
+                    terminal ? static_cast<unsigned long long>(terminal.value().stream_id)
+                             : 0ULL,
+                    terminal ? static_cast<unsigned>(terminal.value().terminal) : 0U,
+                    terminal && terminal.value().quiesced ? 1U : 0U,
+                    terminal ? static_cast<unsigned>(terminal.value().cleanup_error)
+                             : 0U);
+            }
 #if defined(PX4_HOST_AUTHORITY_BRIDGE_TEST_ACCESS)
             terminal_observed_ = static_cast<bool>(terminal);
             terminal_quiesced_ = quiesced;

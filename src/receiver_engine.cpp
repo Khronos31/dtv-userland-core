@@ -3,6 +3,7 @@
 
 #include <cassert>
 #include <cstddef>
+#include <cstdio>
 #include <limits>
 
 namespace dtv::userland::detail {
@@ -1449,29 +1450,66 @@ Result<void> ReceiverEngine::run_stream_cleanup_v1(
         attachment.token = ticket.token;
     }
     Error first = Error::OK;
+    bool capture_stop_attempted = false;
+    Error capture_stop_error = Error::OK;
     if (capture_maybe) {
+        capture_stop_attempted = true;
         const auto stopped = backend_.stop_capture(receivers_[slot], system);
         observe_disconnect(slot, stopped.error());
-        if (!stopped) first = stopped.error();
+        if (!stopped) {
+            capture_stop_error = stopped.error();
+            first = stopped.error();
+        }
     }
     bool detach_clean = true;
     bool final_created = false;
+    bool detach_attempted = false;
+    Error detach_error = Error::OK;
     if (attached_maybe && stream_control_ != nullptr) {
+        detach_attempted = true;
         const auto detached = stream_control_->detach(attachment);
         observe_disconnect(slot, detached.error());
         detach_clean = detached || detached.error() == Error::NOT_FOUND;
         final_created = static_cast<bool>(detached);
-        if (!detach_clean && first == Error::OK) first = detached.error();
+        if (!detach_clean) {
+            detach_error = detached.error();
+            if (first == Error::OK) first = detached.error();
+        }
     }
+    bool owner_match = false;
+    bool recorded_quiesced = false;
+    Error recorded_error = first;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const int index = find_lease_locked(client_id, lease_id);
         if (index >= 0 && leases_[static_cast<std::size_t>(index)].instance ==
                               ticket.lease_instance) {
+            owner_match = true;
             if (final_created)
                 leases_[static_cast<std::size_t>(index)].stream_final_physical = true;
             record_stream_cleanup_locked(slot, first, detach_clean && first == Error::OK);
+            recorded_quiesced = leases_[static_cast<std::size_t>(index)].stream_quiesced;
+            recorded_error = leases_[static_cast<std::size_t>(index)].stream_cleanup_error;
         }
+    }
+    if (!owner_match || recorded_error != Error::OK || !recorded_quiesced) {
+        std::fprintf(stderr,
+            "Core stream cleanup slot=%zu receiver=%u client=%llu lease=%llu "
+            "stream=%llu reservation=%llu owner_match=%u capture_possible=%u "
+            "stop_attempted=%u stop_error=%u attached_possible=%u "
+            "detach_attempted=%u detach_clean=%u detach_error=%u final_created=%u "
+            "result=%u recorded_error=%u quiesced=%u\n",
+            ticket.slot, static_cast<unsigned>(receivers_[slot]),
+            static_cast<unsigned long long>(client_id),
+            static_cast<unsigned long long>(lease_id),
+            static_cast<unsigned long long>(ticket.stream_id),
+            static_cast<unsigned long long>(ticket.reservation), owner_match ? 1U : 0U,
+            capture_maybe ? 1U : 0U, capture_stop_attempted ? 1U : 0U,
+            static_cast<unsigned>(capture_stop_error), attached_maybe ? 1U : 0U,
+            detach_attempted ? 1U : 0U, detach_clean ? 1U : 0U,
+            static_cast<unsigned>(detach_error), final_created ? 1U : 0U,
+            static_cast<unsigned>(first), static_cast<unsigned>(recorded_error),
+            recorded_quiesced ? 1U : 0U);
     }
     return first == Error::OK ? Result<void>::success()
                               : Result<void>::failure(first);
