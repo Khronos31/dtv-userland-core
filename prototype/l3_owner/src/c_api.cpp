@@ -1214,14 +1214,10 @@ dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
                                     dtv_l3_reader **reader_out) {
     try {
         l3_owner_prototype::maybe_throw_test_entry_exception();
+        (void)reader_id;
+        (void)reader_out;
         if (owner == nullptr || reader_out == nullptr) {
             return DTV_L3_INVALID;
-        }
-        if (owner->product_view != nullptr &&
-            owner->product_view->reader_acquire != nullptr) {
-            *reader_out = nullptr;
-            return owner->product_view->reader_acquire(
-                owner->product_view->product_context, reader_id, reader_out);
         }
         return DTV_L3_UNSUPPORTED;
     } catch (...) {
@@ -1234,15 +1230,9 @@ dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
                              uint32_t mode) {
     try {
         l3_owner_prototype::maybe_throw_test_entry_exception();
-        if (owner == nullptr) {
-            return DTV_L3_INVALID;
-        }
-        if (owner->product_view != nullptr &&
-            owner->product_view->lnb_set != nullptr) {
-            return owner->product_view->lnb_set(
-                owner->product_view->product_context, receiver_id, mode);
-        }
-        return DTV_L3_UNSUPPORTED;
+        (void)receiver_id;
+        (void)mode;
+        return owner == nullptr ? DTV_L3_INVALID : DTV_L3_UNSUPPORTED;
     } catch (...) {
         return entry_failure(owner, "dtv_l3_lnb_set");
     }

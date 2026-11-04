@@ -548,8 +548,6 @@ typedef struct dtv_l3_product_adapter {
     dtv_l3_stream_attach_ex_fn stream_attach_ex;
     dtv_l3_stream_stop_fn stream_stop;
     dtv_l3_stream_stop_ex_fn stream_stop_ex;
-    dtv_l3_adapter_reader_acquire_fn reader_acquire;
-    dtv_l3_adapter_lnb_set_fn lnb_set;
 } dtv_l3_product_adapter;
 
 /*

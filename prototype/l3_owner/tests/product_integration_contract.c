@@ -35,8 +35,6 @@ struct fixture {
     unsigned int bridge_stop_calls;
     unsigned int attach_calls;
     unsigned int stream_stop_calls;
-    unsigned int reader_calls;
-    unsigned int lnb_calls;
     unsigned int factory_create_calls;
     unsigned int factory_release_calls;
     unsigned int bind_calls;
@@ -275,26 +273,6 @@ static dtv_l3_result product_stream_stop(void *context,
     return DTV_L3_OK;
 }
 
-static dtv_l3_result product_reader(void *context,
-                                    uint32_t reader_id,
-                                    dtv_l3_reader **reader_out) {
-    struct fixture *fixture = context;
-    (void)reader_id;
-    ++fixture->reader_calls;
-    *reader_out = (dtv_l3_reader *)fixture;
-    return DTV_L3_OK;
-}
-
-static dtv_l3_result product_lnb(void *context,
-                                 uint32_t receiver_id,
-                                 uint32_t mode) {
-    struct fixture *fixture = context;
-    (void)receiver_id;
-    ++fixture->lnb_calls;
-    fixture->lnb_mode = mode;
-    return DTV_L3_OK;
-}
-
 static dtv_l3_usb_provider usb_provider_for(struct fixture *fixture) {
     return (dtv_l3_usb_provider){
         .provider_context = fixture,
@@ -325,9 +303,7 @@ static dtv_l3_product_adapter adapter_for(struct fixture *fixture,
         .stream_attach = product_attach,
         .stream_attach_ex = product_attach_ex,
         .stream_stop = product_stream_stop,
-        .stream_stop_ex = product_stop_ex,
-        .reader_acquire = product_reader,
-        .lnb_set = product_lnb};
+        .stream_stop_ex = product_stop_ex};
 }
 
 static int wait_op_terminal(dtv_l3_op *op, dtv_l3_op_result *result) {
@@ -490,13 +466,9 @@ static int exercise_product(dtv_l3_context *owner, struct fixture *fixture) {
         dtv_l3_lease_release(lease) != DTV_L3_OK) {
         return 15;
     }
-    if (dtv_l3_reader_acquire(owner, 0, &reader) != DTV_L3_OK ||
-        reader == NULL || fixture->reader_calls != 1) {
+    if (dtv_l3_reader_acquire(owner, 0, &reader) != DTV_L3_UNSUPPORTED ||
+        dtv_l3_lnb_set(owner, 0, 1) != DTV_L3_UNSUPPORTED) {
         return 16;
-    }
-    if (dtv_l3_lnb_set(owner, 0, 1) != DTV_L3_OK || fixture->lnb_calls != 1 ||
-        fixture->lnb_mode != 1) {
-        return 17;
     }
     if (fixture->tune_ex_calls != 1 || fixture->bridge_start_calls != 1 ||
         fixture->attach_ex_calls != 1 || fixture->stop_ex_calls != 1 ||

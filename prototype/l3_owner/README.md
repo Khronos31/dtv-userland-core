@@ -14,13 +14,14 @@ New integrations use two structures instead of the legacy combined
 - `dtv_l3_usb_provider`: host-owned USB transport only (claim, release_claim,
   submit, cancel, claim_cancel, cancel_scope, logger).
 - `dtv_l3_product_adapter`: product-owned semantics (capabilities, firmware,
-  scope, tune, bridge, stream, optional CARD/LNB callbacks).
+  scope, tune, bridge, stream). CARD/LNB remain UNSUPPORTED in this candidate.
 
 `dtv_l3_open_ex` accepts both. `dtv_l3_open_factory` runs a product factory with
 `dtv_l3_open_config` (model, opaque selector, firmware PATH/BYTES/read callback)
 and calls the factory release once after the owner is destroyed. Capabilities
 stay in one common shape and missing adapter callbacks report
-`DTV_L3_UNSUPPORTED`. The legacy `dtv_l3_open` path remains for the existing
+`DTV_L3_UNSUPPORTED`. CARD/LNB stay UNSUPPORTED until the separate CARD/LNB
+contract work. The legacy `dtv_l3_open` path remains for the existing
 fixtures and forwards the combined provider to the same engine.
 
 The host provider has no tune/stream/firmware policy. Product adapters and the
