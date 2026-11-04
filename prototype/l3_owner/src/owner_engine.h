@@ -428,7 +428,9 @@ enum : unsigned int {
     kTestInjectCancel = 1u << 6,
     kTestInjectReleaseClaim = 1u << 7,
     kTestInjectCompletionCopy = 1u << 8,
-    kTestInjectTsDeliver = 1u << 9
+    kTestInjectTsDeliver = 1u << 9,
+    kTestInjectCleanupEnqueue = 1u << 10,
+    kTestInjectCleanupRegistry = 1u << 11
 };
 void set_test_exception_mask(unsigned int mask);
 void maybe_throw_test_exception(unsigned int bit);

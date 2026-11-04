@@ -2,6 +2,7 @@
 #define _POSIX_C_SOURCE 200809L
 #include <dtv/l3_owner.h>
 
+#include <stdatomic.h>
 #include <stdint.h>
 #include <stdio.h>
 #include <string.h>
@@ -22,6 +23,8 @@
 #define INJECT_RELEASE_CLAIM 0x0080u
 #define INJECT_COMPLETION_COPY 0x0100u
 #define INJECT_TS_DELIVER 0x0200u
+#define INJECT_CLEANUP_ENQUEUE 0x0400u
+#define INJECT_CLEANUP_REGISTRY 0x0800u
 
 extern void l3_test_set_lane_start_failure_mask(int mask);
 extern void l3_test_set_exception_mask(unsigned int mask);
@@ -69,6 +72,11 @@ struct fixture {
     unsigned int attach_calls;
     unsigned int stream_stop_calls;
     int release_claim_fail_once;
+    int claim_cancel_unblocks;
+    atomic_int hold_claim;
+    atomic_int claim_entered;
+    atomic_int claim_cancel_called;
+    unsigned int claim_cancel_calls;
     struct pending pending[MAX_PENDING];
     dtv_l3_ts_deliver_fn deliver;
     void *deliver_context;
@@ -118,6 +126,9 @@ static struct fixture fixture_new(void) {
         (dtv_l3_claim_result){DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
     fixture.submit_result = DTV_L3_ACCEPTED;
     fixture.log_min = DTV_L3_LOG_ERROR;
+    atomic_init(&fixture.hold_claim, 0);
+    atomic_init(&fixture.claim_entered, 0);
+    atomic_init(&fixture.claim_cancel_called, 0);
     return fixture;
 }
 
@@ -149,7 +160,24 @@ static dtv_l3_claim_result provider_claim(void *context,
     (void)binding;
     (void)claim_index;
     ++fixture->claim_calls;
+    if (atomic_load(&fixture->hold_claim)) {
+        atomic_store(&fixture->claim_entered, 1);
+        while (!atomic_load(&fixture->claim_cancel_called)) {
+            sleep_ms(1);
+        }
+    }
     return fixture->claim_result;
+}
+
+static dtv_l3_result provider_claim_cancel(void *context,
+                                           dtv_l3_provider_binding *binding,
+                                           uint32_t claim_index) {
+    struct fixture *fixture = context;
+    (void)binding;
+    (void)claim_index;
+    ++fixture->claim_cancel_calls;
+    atomic_store(&fixture->claim_cancel_called, 1);
+    return DTV_L3_ACCEPTED;
 }
 
 static dtv_l3_release_result provider_release_claim(
@@ -298,6 +326,7 @@ static dtv_l3_provider provider_for(struct fixture *fixture) {
         .stream_attach = provider_stream_attach,
         .stream_stop = provider_stream_stop,
         .tune = provider_tune,
+        .claim_cancel = provider_claim_cancel,
         .cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER,
         .logger = {log_callback, &fixture->logs, fixture->log_min}};
 }
@@ -342,6 +371,32 @@ static int wait_releasable(dtv_l3_context *owner) {
         }
         if (status.releasable) {
             return 1;
+        }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
+static int wait_atomic_flag(atomic_int *flag) {
+    unsigned int attempt;
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        if (atomic_load(flag)) {
+            return 1;
+        }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
+static int cleanup_retry_until_accepted(dtv_l3_context *owner) {
+    unsigned int attempt;
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        const dtv_l3_result result = dtv_l3_cleanup_retry(owner);
+        if (result == DTV_L3_ACCEPTED) {
+            return 1;
+        }
+        if (result != DTV_L3_BUSY) {
+            return 0;
         }
         sleep_ms(1);
     }
@@ -417,6 +472,95 @@ static int start_one(dtv_l3_context *owner,
     (void)fixture;
     return dtv_l3_transfer_start(owner, &request, op) == DTV_L3_ACCEPTED &&
            *op != NULL;
+}
+
+static int test_cleanup_failure_after_ready(unsigned int inject_bit) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider;
+    dtv_l3_context *owner;
+    dtv_l3_close_status status;
+
+    provider = provider_for(&fixture);
+    owner = open_ready(&provider);
+    if (owner == NULL) {
+        return 1;
+    }
+    l3_test_set_exception_mask(inject_bit);
+    if (dtv_l3_close(owner, 0) != DTV_L3_TIMEOUT) {
+        return 2;
+    }
+    if (dtv_l3_close_status_get(owner, &status) != DTV_L3_OK ||
+        status.releasable || status.cleanup_complete ||
+        fixture.release_claim_calls != 0) {
+        return 3;
+    }
+    if (dtv_l3_context_release(owner) != DTV_L3_BUSY) {
+        return 4;
+    }
+    if (!cleanup_retry_until_accepted(owner)) {
+        return 5;
+    }
+    if (!wait_releasable(owner)) {
+        return 6;
+    }
+    if (fixture.release_claim_calls != 1) {
+        return 7;
+    }
+    if (dtv_l3_context_release(owner) != DTV_L3_OK) {
+        return 8;
+    }
+    return 0;
+}
+
+static int test_cleanup_failure_during_open(unsigned int inject_bit) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    unsigned int attempt;
+
+    fixture.claim_cancel_unblocks = 1;
+    atomic_store(&fixture.hold_claim, 1);
+    provider = provider_for(&fixture);
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (!wait_atomic_flag(&fixture.claim_entered)) {
+        return 2;
+    }
+    l3_test_set_exception_mask(inject_bit);
+    if (dtv_l3_close(opened.owner, 0) != DTV_L3_TIMEOUT) {
+        return 3;
+    }
+    if (!cleanup_retry_until_accepted(opened.owner)) {
+        return 4;
+    }
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        if (dtv_l3_op_poll(opened.op, &result) != DTV_L3_OK) {
+            return 5;
+        }
+        if (result.state == DTV_L3_OP_DONE ||
+            result.state == DTV_L3_OP_FAILED) {
+            break;
+        }
+        sleep_ms(1);
+    }
+    if (result.state != DTV_L3_OP_FAILED ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 6;
+    }
+    if (!wait_releasable(opened.owner)) {
+        return 7;
+    }
+    if (fixture.release_claim_calls != 1) {
+        return 8;
+    }
+    if (dtv_l3_context_release(opened.owner) != DTV_L3_OK) {
+        return 9;
+    }
+    return 0;
 }
 
 static int test_entry_guards(void) {
@@ -1054,6 +1198,18 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "stderr") == 0) {
         return test_no_stderr();
+    }
+    if (strcmp(argv[1], "cleanup-enqueue") == 0) {
+        return test_cleanup_failure_after_ready(INJECT_CLEANUP_ENQUEUE);
+    }
+    if (strcmp(argv[1], "cleanup-registry") == 0) {
+        return test_cleanup_failure_after_ready(INJECT_CLEANUP_REGISTRY);
+    }
+    if (strcmp(argv[1], "cleanup-open-enqueue") == 0) {
+        return test_cleanup_failure_during_open(INJECT_CLEANUP_ENQUEUE);
+    }
+    if (strcmp(argv[1], "cleanup-open-registry") == 0) {
+        return test_cleanup_failure_during_open(INJECT_CLEANUP_REGISTRY);
     }
     return 65;
 }

@@ -311,6 +311,16 @@ public:
         return true;
     }
 
+    std::size_t claim_cancel_call_count() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return claim_cancel_calls;
+    }
+
+    std::uint32_t claim_cancel_recorded_index() {
+        std::lock_guard<std::mutex> lock(mutex);
+        return claim_cancel_index;
+    }
+
     std::size_t cancel_count(Binding *binding, std::uint64_t id) {
         std::lock_guard<std::mutex> lock(mutex);
         std::size_t count = 0;
@@ -1928,7 +1938,7 @@ void test_claim_cancel_before_initialize_is_not_sent() {
     CHECK(owner.close(0) == DTV_L3_TIMEOUT);
     owner.initialize_claims(1);
     CHECK(provider.claim_calls.empty());
-    CHECK(provider.claim_cancel_calls == 0);
+    CHECK(provider.claim_cancel_call_count() == 0);
     CHECK(provider.cancelled.empty());
     CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
         return snapshot.physical_quiesced && snapshot.cleanup_complete &&
@@ -1949,12 +1959,12 @@ void test_claim_cancel_accepted_does_not_settle_claim() {
     CHECK(owner.close(0) == DTV_L3_TIMEOUT);
     const auto deadline = std::chrono::steady_clock::now() +
                           std::chrono::seconds(2);
-    while (provider.claim_cancel_calls == 0 &&
+    while (provider.claim_cancel_call_count() == 0 &&
            std::chrono::steady_clock::now() < deadline) {
         std::this_thread::yield();
     }
-    CHECK(provider.claim_cancel_calls == 1);
-    CHECK(provider.claim_cancel_index == 0);
+    CHECK(provider.claim_cancel_call_count() == 1);
+    CHECK(provider.claim_cancel_recorded_index() == 0);
     CHECK(provider.cancelled.empty());
     CHECK(provider.released_claim_count() == 0);
     CHECK(owner.live_stream_count() == 0);

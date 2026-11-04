@@ -2350,26 +2350,47 @@ void OwnerEngine::resubmit_operation(
 }
 
 void OwnerEngine::finish_close() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (!close_requested_ || cleanup_started_ || cleanup_attempted_ ||
-        cleanup_complete_ ||
-        (initialization_phase_ != InitializationPhase::ResponsibilitiesRegistered &&
-         initialization_phase_ != InitializationPhase::Returned) ||
-        open_state_ == OpenState::Opening || provider_calls_in_flight_ != 0) {
-        return;
-    }
-    for (const auto &entry : operations_) {
-        if (entry.second->state == DTV_L3_OP_OPENING ||
-            entry.second->state == DTV_L3_OP_RUNNING) {
+    bool enqueue_failed = false;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!close_requested_ || cleanup_started_ || cleanup_attempted_ ||
+            cleanup_complete_ ||
+            (initialization_phase_ !=
+                 InitializationPhase::ResponsibilitiesRegistered &&
+             initialization_phase_ != InitializationPhase::Returned) ||
+            open_state_ == OpenState::Opening ||
+            provider_calls_in_flight_ != 0) {
             return;
         }
+        for (const auto &entry : operations_) {
+            if (entry.second->state == DTV_L3_OP_OPENING ||
+                entry.second->state == DTV_L3_OP_RUNNING) {
+                return;
+            }
+        }
+        if (!physical_settled_locked()) {
+            return;
+        }
+        cleanup_started_ = true;
+        cleanup_attempted_ = true;
+        try {
+            maybe_throw_test_exception(kTestInjectCleanupEnqueue);
+            enqueue_locked([this] { run_cleanup(); });
+        } catch (...) {
+            /*
+             * No cleanup work ran. Keep cleanup_attempted_ set so the host can
+             * re-enter through cleanup_retry; do not report quiescence.
+             */
+            cleanup_started_ = false;
+            enqueue_failed = true;
+            state_condition_.notify_all();
+            work_condition_.notify_all();
+        }
     }
-    if (!physical_settled_locked()) {
-        return;
+    if (enqueue_failed) {
+        log(DTV_L3_LOG_ERROR, "cleanup.enqueue",
+            "contained C++ exception");
     }
-    cleanup_started_ = true;
-    cleanup_attempted_ = true;
-    enqueue_locked([this] { run_cleanup(); });
 }
 
 void OwnerEngine::queue_cancel_locked(
@@ -2430,7 +2451,9 @@ void OwnerEngine::run_cancel(const std::shared_ptr<Operation> &operation,
 void OwnerEngine::run_cleanup() {
     std::shared_ptr<Binding> binding;
     std::vector<std::uint32_t> release_indices;
-    {
+    bool registry_failed = false;
+    try {
+        maybe_throw_test_exception(kTestInjectCleanupRegistry);
         std::lock_guard<std::mutex> lock(mutex_);
         binding = binding_;
         for (std::uint32_t index = 0; index < claims_.size(); ++index) {
@@ -2439,6 +2462,20 @@ void OwnerEngine::run_cleanup() {
                 release_indices.push_back(index);
             }
         }
+    } catch (...) {
+        registry_failed = true;
+    }
+    if (registry_failed) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            /* No claim was released; leave cleanup_attempted_ for a retry. */
+            cleanup_started_ = false;
+            state_condition_.notify_all();
+            work_condition_.notify_all();
+        }
+        log(DTV_L3_LOG_ERROR, "cleanup.registry",
+            "contained C++ exception");
+        return;
     }
 
     for (auto index = release_indices.rbegin(); index != release_indices.rend();
