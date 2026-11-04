@@ -475,7 +475,7 @@ static int test_blocking_claim_wait_close(void) {
     }
     if (fixture.claim_cancel_calls != 1 || fixture.claim_cancel_index != 0 ||
         fixture.claim_cancel_binding != fixture.claim_binding ||
-        fixture.release_claim_calls != 0) {
+        fixture.release_claim_calls != 0 || fixture.cancel_calls != 0) {
         return 4;
     }
     if (!wait_value(&call.done, 1, 2000) || call.result != DTV_L3_CLOSING) {
@@ -1000,7 +1000,7 @@ static int test_claim_cancel_return(void) {
     }
     if (fixture.claim_cancel_calls != 1 || fixture.claim_cancel_index != 0 ||
         fixture.claim_cancel_binding != fixture.claim_binding ||
-        fixture.claim_binding == NULL) {
+        fixture.claim_binding == NULL || fixture.cancel_calls != 0) {
         return 3;
     }
     if (!wait_op_terminal(opened.op, &result) ||
@@ -1034,7 +1034,7 @@ static int test_claim_cancel_unsupported(void) {
     if (dtv_l3_close(opened.owner, 200) != DTV_L3_TIMEOUT) {
         return 2;
     }
-    if (fixture.claim_cancel_calls != 0 ||
+    if (fixture.claim_cancel_calls != 0 || fixture.cancel_calls != 0 ||
         dtv_l3_context_release(opened.owner) != DTV_L3_BUSY) {
         return 3;
     }
@@ -1064,7 +1064,7 @@ static int test_claim_cancel_after_ready(void) {
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK) {
         return 2;
     }
-    if (fixture.claim_cancel_calls != 0) {
+    if (fixture.claim_cancel_calls != 0 || fixture.cancel_calls != 0) {
         return 3;
     }
     return dtv_l3_context_release(owner) == DTV_L3_OK ? 0 : 4;

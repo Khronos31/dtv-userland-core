@@ -1881,6 +1881,7 @@ void test_claim_cancel_before_initialize_is_not_sent() {
     owner.initialize_claims(1);
     CHECK(provider.claim_calls.empty());
     CHECK(provider.claim_cancel_calls == 0);
+    CHECK(provider.cancelled.empty());
     CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
         return snapshot.physical_quiesced && snapshot.cleanup_complete &&
                snapshot.control_lane == DTV_L3_LANE_EXITED;
@@ -1906,6 +1907,7 @@ void test_claim_cancel_accepted_does_not_settle_claim() {
     }
     CHECK(provider.claim_cancel_calls == 1);
     CHECK(provider.claim_cancel_index == 0);
+    CHECK(provider.cancelled.empty());
     CHECK(provider.released_claim_count() == 0);
     CHECK(owner.live_stream_count() == 0);
     OwnerEngine::Snapshot snapshot{};
