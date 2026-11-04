@@ -41,8 +41,69 @@ public:
         return provider_.cancel(provider_.provider_context, binding, id);
     }
 
+    dtv_l3_result scope_query(std::uint32_t receiver_id,
+                              dtv_l3_scope_info *scope) override {
+        if (provider_.scope_query == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.scope_query(provider_.provider_context, receiver_id,
+                                     scope);
+    }
+
+    dtv_l3_result bridge_start(std::uint32_t bridge_id,
+                               std::uint32_t receiver_id) override {
+        if (provider_.bridge_start == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.bridge_start(provider_.provider_context, binding_.get(),
+                                      bridge_id, receiver_id);
+    }
+
+    dtv_l3_result bridge_stop(std::uint32_t bridge_id) override {
+        if (provider_.bridge_stop == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.bridge_stop(provider_.provider_context, binding_.get(),
+                                     bridge_id);
+    }
+
+    dtv_l3_result stream_attach(std::uint64_t stream_id,
+                                dtv_l3_ts_deliver_fn deliver,
+                                void *callback_context) override {
+        if (provider_.stream_attach == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.stream_attach(provider_.provider_context,
+                                       binding_.get(), stream_id, deliver,
+                                       callback_context);
+    }
+
+    dtv_l3_result stream_stop(std::uint64_t stream_id) override {
+        if (provider_.stream_stop == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.stream_stop(provider_.provider_context, binding_.get(),
+                                     stream_id);
+    }
+
+    dtv_l3_result tune(std::uint32_t receiver_id,
+                       std::uint64_t requested_hz,
+                       std::uint64_t *programmed_hz) override {
+        if (provider_.tune == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.tune(provider_.provider_context, binding_.get(),
+                              receiver_id, requested_hz, programmed_hz);
+    }
+
+    void set_binding(std::shared_ptr<l3_owner_prototype::Binding> binding) {
+        binding_ = std::move(binding);
+    }
+
 private:
     dtv_l3_provider provider_;
+    std::shared_ptr<l3_owner_prototype::Binding> binding_ =
+        std::make_shared<l3_owner_prototype::Binding>(1);
 };
 
 }  // namespace
@@ -59,7 +120,9 @@ struct dtv_l3_open_op_state {
 struct dtv_l3_context {
     explicit dtv_l3_context(const dtv_l3_provider &provider)
         : adapter(provider), engine(std::make_unique<l3_owner_prototype::OwnerEngine>(
-                                         adapter, 1)) {}
+                                         adapter, 1)) {
+        adapter.set_binding(engine->binding());
+    }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
             open_thread.join();
@@ -78,6 +141,16 @@ struct dtv_l3_op {
     dtv_l3_context *owner = nullptr;
     dtv_l3_op_kind kind = DTV_L3_OP_KIND_OPEN;
     std::shared_ptr<l3_owner_prototype::OwnerEngine::Operation> operation;
+};
+
+struct dtv_l3_lease {
+    dtv_l3_context *owner = nullptr;
+    std::uint32_t id = 0;
+};
+
+struct dtv_l3_stream {
+    dtv_l3_context *owner = nullptr;
+    std::uint64_t generation = 0;
 };
 
 extern "C" {
@@ -339,6 +412,148 @@ dtv_l3_result dtv_l3_op_release(dtv_l3_op *op) {
     owner->outstanding_ops.fetch_sub(1);
     delete op;
     return DTV_L3_OK;
+}
+
+dtv_l3_result dtv_l3_lease_acquire(dtv_l3_context *owner,
+                                   uint32_t receiver_id,
+                                   dtv_l3_lease **lease_out) {
+    if (owner == nullptr || lease_out == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    *lease_out = nullptr;
+    auto lease = std::make_unique<dtv_l3_lease>();
+    std::uint32_t id = 0;
+    const auto result = owner->engine->acquire_lease(receiver_id, &id);
+    if (result != DTV_L3_OK) {
+        return result;
+    }
+    lease->owner = owner;
+    lease->id = id;
+    *lease_out = lease.release();
+    return DTV_L3_OK;
+}
+
+dtv_l3_result dtv_l3_lease_tune(dtv_l3_lease *lease,
+                                uint64_t requested_hz,
+                                uint64_t *programmed_hz,
+                                uint64_t *tune_revision) {
+    if (lease == nullptr || lease->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return lease->owner->engine->tune_lease(lease->id, requested_hz,
+                                            programmed_hz, tune_revision);
+}
+
+dtv_l3_result dtv_l3_lease_start(dtv_l3_lease *lease) {
+    if (lease == nullptr || lease->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return lease->owner->engine->start_lease(lease->id);
+}
+
+dtv_l3_result dtv_l3_lease_attach(dtv_l3_lease *lease,
+                                  dtv_l3_stream **stream_out) {
+    if (lease == nullptr || lease->owner == nullptr || stream_out == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    *stream_out = nullptr;
+    auto stream = std::make_unique<dtv_l3_stream>();
+    std::uint64_t generation = 0;
+    const auto result =
+        lease->owner->engine->attach_lease(lease->id, &generation);
+    if (result != DTV_L3_OK) {
+        return result;
+    }
+    stream->owner = lease->owner;
+    stream->generation = generation;
+    *stream_out = stream.release();
+    return DTV_L3_OK;
+}
+
+dtv_l3_result dtv_l3_lease_status_get(dtv_l3_lease *lease,
+                                      dtv_l3_lease_status *status) {
+    if (lease == nullptr || lease->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return lease->owner->engine->lease_status(lease->id, status);
+}
+
+dtv_l3_result dtv_l3_lease_release(dtv_l3_lease *lease) {
+    if (lease == nullptr || lease->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    const auto result = lease->owner->engine->release_lease(lease->id);
+    if (result == DTV_L3_OK) {
+        delete lease;
+    }
+    return result;
+}
+
+dtv_l3_result dtv_l3_stream_stop(dtv_l3_stream *stream, uint32_t timeout_ms) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return stream->owner->engine->stop_stream(stream->generation, timeout_ms);
+}
+
+dtv_l3_result dtv_l3_stream_read_ts(dtv_l3_stream *stream,
+                                    uint8_t *buffer,
+                                    size_t capacity_bytes,
+                                    size_t *bytes_read,
+                                    dtv_l3_read_state *state) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return stream->owner->engine->read_stream(stream->generation, buffer,
+                                              capacity_bytes, bytes_read, state);
+}
+
+dtv_l3_result dtv_l3_stream_status_get(dtv_l3_stream *stream,
+                                       dtv_l3_stream_status *status) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return stream->owner->engine->stream_status(stream->generation, status);
+}
+
+dtv_l3_result dtv_l3_stream_release(dtv_l3_stream *stream,
+                                    dtv_l3_stream_release_mode mode) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return stream->owner->engine->release_stream(stream->generation, mode);
+}
+
+dtv_l3_result dtv_l3_stream_destroy(dtv_l3_stream *stream) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    const auto result =
+        stream->owner->engine->destroy_stream(stream->generation);
+    if (result == DTV_L3_OK || result == DTV_L3_STALE) {
+        delete stream;
+        return DTV_L3_OK;
+    }
+    return result;
+}
+
+dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
+                                    uint32_t reader_id,
+                                    dtv_l3_reader **reader_out) {
+    (void)reader_id;
+    (void)reader_out;
+    if (owner == nullptr || reader_out == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return DTV_L3_UNSUPPORTED;
+}
+
+dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
+                             uint32_t receiver_id,
+                             uint32_t mode) {
+    (void)receiver_id;
+    (void)mode;
+    return owner == nullptr ? DTV_L3_INVALID : DTV_L3_UNSUPPORTED;
 }
 
 }  // extern "C"

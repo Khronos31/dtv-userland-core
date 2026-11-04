@@ -126,8 +126,11 @@ static struct fixture fixture_new(void) {
 }
 
 static dtv_l3_provider provider_for(struct fixture *fixture) {
-    return (dtv_l3_provider){fixture, provider_claim, provider_release,
-                             provider_submit, provider_cancel};
+    return (dtv_l3_provider){.provider_context = fixture,
+                             .claim = provider_claim,
+                             .release_claim = provider_release,
+                             .submit = provider_submit,
+                             .cancel = provider_cancel};
 }
 
 static int wait_open(dtv_l3_op *op, dtv_l3_op_result *result) {

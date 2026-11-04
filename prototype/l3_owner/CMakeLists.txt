@@ -39,12 +39,22 @@ set_target_properties(l3_public_contract_c PROPERTIES
     C_EXTENSIONS NO
 )
 
+add_executable(l3_lease_stream_c tests/lease_stream_contract.c)
+target_include_directories(l3_lease_stream_c PRIVATE include)
+target_link_libraries(l3_lease_stream_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_lease_stream_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_lease_stream_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
 add_executable(l3_header_cpp tests/header_cpp.cpp)
 target_include_directories(l3_header_cpp PRIVATE include)
 target_compile_features(l3_header_cpp PRIVATE cxx_std_17)
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
@@ -62,4 +72,13 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_open_cancel_repeat COMMAND l3_public_contract_c repeat-cancel)
     add_test(NAME l3_c_open_epoch_stable COMMAND l3_public_contract_c epoch)
     add_test(NAME l3_c_open_cancel_after_setup COMMAND l3_public_contract_c after-setup)
+    add_test(NAME l3_c_lease_share_exclusive COMMAND l3_lease_stream_c share)
+    add_test(NAME l3_c_lease_tuning_generations COMMAND l3_lease_stream_c tuning)
+    add_test(NAME l3_c_lease_ts_boundary COMMAND l3_lease_stream_c ts)
+    add_test(NAME l3_c_lease_drain_eof COMMAND l3_lease_stream_c drain)
+    add_test(NAME l3_c_lease_discard_unread COMMAND l3_lease_stream_c discard)
+    add_test(NAME l3_c_lease_unsupported COMMAND l3_lease_stream_c unsupported)
+    add_test(NAME l3_c_lease_attach_fail COMMAND l3_lease_stream_c attach-fail)
+    add_test(NAME l3_c_lease_stop_residual COMMAND l3_lease_stream_c residual)
+    add_test(NAME l3_c_lease_close COMMAND l3_lease_stream_c close)
 endif()

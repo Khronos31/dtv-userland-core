@@ -45,6 +45,42 @@ public:
         dtv_l3_transfer_complete_fn complete,
         void *callback_context) = 0;
     virtual dtv_l3_result cancel(Binding *binding, std::uint64_t id) = 0;
+    virtual dtv_l3_result scope_query(std::uint32_t receiver_id,
+                                      dtv_l3_scope_info *scope) {
+        (void)receiver_id;
+        (void)scope;
+        return DTV_L3_UNSUPPORTED;
+    }
+    virtual dtv_l3_result bridge_start(std::uint32_t bridge_id,
+                                       std::uint32_t receiver_id) {
+        (void)bridge_id;
+        (void)receiver_id;
+        return DTV_L3_UNSUPPORTED;
+    }
+    virtual dtv_l3_result bridge_stop(std::uint32_t bridge_id) {
+        (void)bridge_id;
+        return DTV_L3_UNSUPPORTED;
+    }
+    virtual dtv_l3_result stream_attach(std::uint64_t stream_id,
+                                        dtv_l3_ts_deliver_fn deliver,
+                                        void *callback_context) {
+        (void)stream_id;
+        (void)deliver;
+        (void)callback_context;
+        return DTV_L3_UNSUPPORTED;
+    }
+    virtual dtv_l3_result stream_stop(std::uint64_t stream_id) {
+        (void)stream_id;
+        return DTV_L3_UNSUPPORTED;
+    }
+    virtual dtv_l3_result tune(std::uint32_t receiver_id,
+                               std::uint64_t requested_hz,
+                               std::uint64_t *programmed_hz) {
+        (void)receiver_id;
+        (void)requested_hz;
+        (void)programmed_hz;
+        return DTV_L3_UNSUPPORTED;
+    }
 };
 
 class OwnerEngine {
@@ -94,6 +130,32 @@ public:
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
+    dtv_l3_result acquire_lease(std::uint32_t receiver_id,
+                                std::uint32_t *lease_id);
+    dtv_l3_result tune_lease(std::uint32_t lease_id,
+                             std::uint64_t requested_hz,
+                             std::uint64_t *programmed_hz,
+                             std::uint64_t *tune_revision);
+    dtv_l3_result start_lease(std::uint32_t lease_id);
+    dtv_l3_result attach_lease(std::uint32_t lease_id,
+                               std::uint64_t *stream_generation);
+    dtv_l3_result lease_status(std::uint32_t lease_id,
+                               dtv_l3_lease_status *status);
+    dtv_l3_result release_lease(std::uint32_t lease_id);
+    dtv_l3_result stop_stream(std::uint64_t generation,
+                              std::uint32_t timeout_ms);
+    dtv_l3_result read_stream(
+        std::uint64_t generation,
+        std::uint8_t *buffer,
+        std::size_t capacity_bytes,
+        std::size_t *bytes_read,
+        dtv_l3_read_state *state,
+        const std::function<void()> &after_borrow = {});
+    dtv_l3_result stream_status(std::uint64_t generation,
+                                dtv_l3_stream_status *status);
+    dtv_l3_result release_stream(std::uint64_t generation,
+                                 dtv_l3_stream_release_mode mode);
+    dtv_l3_result destroy_stream(std::uint64_t generation);
     dtv_l3_result cancel(const std::shared_ptr<Operation> &operation);
     dtv_l3_result cancel_open_if_opening();
     dtv_l3_result poll(const std::shared_ptr<Operation> &operation,
@@ -113,6 +175,8 @@ public:
     std::size_t cleanup_count() const;
     std::size_t release_count() const;
     std::size_t live_operation_count() const;
+    std::size_t live_lease_count() const;
+    std::size_t live_stream_count() const;
     std::weak_ptr<void> stream_lifetime() const;
 
 private:
@@ -121,6 +185,61 @@ private:
         InProgress,
         ResponsibilitiesRegistered,
         Returned
+    };
+
+    struct StreamSink;
+
+    struct BridgeRecord {
+        std::size_t users = 0;
+        bool running = false;
+        bool start_pending = false;
+        bool stop_residual = false;
+        std::uint64_t start_count = 0;
+        std::uint64_t stop_count = 0;
+    };
+
+    struct LeaseRecord {
+        std::uint32_t receiver_id = 0;
+        std::uint32_t bridge_id = 0;
+        std::uint32_t compatibility = DTV_L3_LEASE_SHAREABLE;
+        dtv_l3_lease_state state = DTV_L3_LEASE_FREE;
+        std::uint64_t tune_revision = 0;
+        std::uint64_t requested_hz = 0;
+        std::uint64_t programmed_hz = 0;
+        std::uint64_t active_stream = 0;
+        bool stop_residual = false;
+    };
+
+    struct StreamRecord {
+        std::uint64_t generation = 0;
+        std::uint32_t lease_id = 0;
+        std::uint32_t receiver_id = 0;
+        std::uint32_t bridge_id = 0;
+        std::uint64_t tune_revision = 0;
+        dtv_l3_stream_phase phase = DTV_L3_STREAM_ACTIVE;
+        std::deque<std::vector<std::uint8_t>> queue;
+        std::vector<std::uint8_t> staging;
+        std::size_t read_borrows = 0;
+        std::uint64_t dropped_overflow_packets = 0;
+        std::uint64_t discarded_unread_packets = 0;
+        bool eof_pending = false;
+        bool eof_observed = false;
+        bool physical_stopped = false;
+        bool retire_requested = false;
+        dtv_l3_stream_release_mode retire_mode =
+            DTV_L3_STREAM_RELEASE_DRAINED;
+        bool stopping = false;
+        bool close_retire = false;
+        std::shared_ptr<StreamSink> sink;
+    };
+
+    struct StreamSink {
+        OwnerEngine *owner = nullptr;
+        std::uint64_t generation = 0;
+        Binding *binding = nullptr;
+        static void deliver(void *callback_context,
+                            const std::uint8_t *data,
+                            std::size_t size);
     };
 
     class Borrow {
@@ -142,7 +261,13 @@ private:
                        std::uint64_t id,
                        const dtv_l3_transfer_completion &completion,
                        Operation *operation);
+    bool active_streams_locked() const;
     void finish_close();
+    void on_ts_deliver(std::uint64_t generation,
+                       const std::uint8_t *data,
+                       std::size_t size);
+    void finalize_retire_locked(std::uint64_t generation);
+    void retire_stream_for_close(std::uint64_t generation);
     void queue_cancel_locked(const std::shared_ptr<Operation> &operation);
     void run_cancel(const std::shared_ptr<Operation> &operation,
                     bool before_submit);
@@ -178,9 +303,14 @@ private:
     dtv_l3_result open_result_ = DTV_L3_ACCEPTED;
     bool restoration_failed_ = false;
     std::uint64_t next_transfer_id_ = 1;
+    std::uint32_t next_lease_id_ = 1;
+    std::uint64_t next_stream_generation_ = 1;
     std::shared_ptr<Binding> binding_;
     std::shared_ptr<void> stream_ = std::make_shared<int>(1);
     std::map<std::uint64_t, std::shared_ptr<Operation>> operations_;
+    std::map<std::uint32_t, LeaseRecord> leases_;
+    std::map<std::uint32_t, BridgeRecord> bridges_;
+    std::map<std::uint64_t, std::shared_ptr<StreamRecord>> streams_;
     std::deque<std::function<void()>> work_queue_;
     std::condition_variable work_condition_;
     std::condition_variable state_condition_;
