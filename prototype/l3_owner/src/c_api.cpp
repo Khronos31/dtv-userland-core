@@ -193,6 +193,52 @@ public:
                              receiver_id, requested_hz, programmed_hz);
     }
 
+    dtv_l3_result tune_ex(std::uint32_t receiver_id,
+                          const dtv_l3_tune_request &request,
+                          std::uint64_t *programmed_hz) override {
+        if (adapter_.tune_ex != nullptr) {
+            return adapter_.tune_ex(adapter_.product_context, binding_.get(),
+                                    receiver_id, &request, programmed_hz);
+        }
+        if (adapter_.tune == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.tune(adapter_.product_context, binding_.get(),
+                             receiver_id, request.requested_hz, programmed_hz);
+    }
+
+    dtv_l3_result stream_attach_ex(std::uint64_t stream_id,
+                                   std::uint32_t receiver_id,
+                                   std::uint32_t bridge_id,
+                                   dtv_l3_ts_deliver_fn deliver,
+                                   void *callback_context) override {
+        if (adapter_.stream_attach_ex != nullptr) {
+            return adapter_.stream_attach_ex(
+                adapter_.product_context, binding_.get(), stream_id,
+                receiver_id, bridge_id, deliver, callback_context);
+        }
+        if (adapter_.stream_attach == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.stream_attach(adapter_.product_context, binding_.get(),
+                                      stream_id, deliver, callback_context);
+    }
+
+    dtv_l3_result stream_stop_ex(std::uint64_t stream_id,
+                                 std::uint32_t receiver_id,
+                                 std::uint32_t bridge_id) override {
+        if (adapter_.stream_stop_ex != nullptr) {
+            return adapter_.stream_stop_ex(adapter_.product_context,
+                                           binding_.get(), stream_id,
+                                           receiver_id, bridge_id);
+        }
+        if (adapter_.stream_stop == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return adapter_.stream_stop(adapter_.product_context, binding_.get(),
+                                    stream_id);
+    }
+
     dtv_l3_result bridge_start(std::uint32_t bridge_id,
                                std::uint32_t receiver_id) override {
         if (adapter_.bridge_start == nullptr) {
@@ -274,7 +320,8 @@ struct dtv_l3_context {
           logger(provider.logger),
           engine(make_engine_legacy(*legacy, provider)) {
         legacy->set_binding(engine->binding());
-        engine->set_submit_mode(DTV_L3_SUBMIT_NONBLOCKING);
+        engine->set_call_flags(DTV_L3_CALL_FLAG_CANCEL_IN_FRAME |
+                               DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME);
         capabilities.cancel_scope = provider.cancel_scope;
     }
     dtv_l3_context(const dtv_l3_usb_provider &usb,
@@ -287,7 +334,7 @@ struct dtv_l3_context {
           logger(usb.logger),
           engine(make_engine_ex(*usb_provider, *product_adapter, usb.logger)) {
         product_adapter->set_binding(engine->binding());
-        engine->set_submit_mode(usb.submit_mode);
+        engine->set_call_flags(usb.call_flags);
         if (adapter.initialize != nullptr) {
             engine->set_initialize_hook([this] {
                 return product_view->initialize(product_view->product_context,
@@ -653,6 +700,18 @@ dtv_l3_result dtv_l3_capabilities_get_catalog(
     }
 }
 
+dtv_l3_result dtv_l3_progress(dtv_l3_context *owner) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        return owner->engine->progress_recovery();
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_progress");
+    }
+}
+
 dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
                                       dtv_l3_capabilities *capabilities) {
     try {
@@ -796,6 +855,7 @@ dtv_l3_result dtv_l3_transfer_start(dtv_l3_context *owner,
             return DTV_L3_INVALID;
         }
         *op_out = nullptr;
+        (void)owner->engine->progress_recovery();
         auto op = std::make_unique<dtv_l3_op>();
         op->owner = owner;
         op->kind = DTV_L3_OP_KIND_TRANSFER;
@@ -826,6 +886,7 @@ dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op) {
         if (op == nullptr || op->owner == nullptr) {
             return DTV_L3_INVALID;
         }
+        (void)op->owner->engine->progress_recovery();
         if (op->kind == DTV_L3_OP_KIND_OPEN) {
             dtv_l3_op_result result{};
             const auto poll_result = poll_open_op(op->owner, &result);
@@ -885,6 +946,7 @@ dtv_l3_result dtv_l3_op_wait(dtv_l3_op *op, uint32_t timeout_ms) {
         if (op == nullptr || op->owner == nullptr) {
             return DTV_L3_INVALID;
         }
+        (void)op->owner->engine->progress_recovery();
         if (op->kind == DTV_L3_OP_KIND_OPEN) {
             dtv_l3_op_result result{};
             const auto call_result = poll_open_op(op->owner, &result);
@@ -970,6 +1032,23 @@ dtv_l3_result dtv_l3_lease_tune(dtv_l3_lease *lease,
                                                 programmed_hz, tune_revision);
     } catch (...) {
         return entry_failure(lease != nullptr ? lease->owner : nullptr, "dtv_l3_lease_tune");
+    }
+}
+
+dtv_l3_result dtv_l3_lease_tune_ex(dtv_l3_lease *lease,
+                                   const dtv_l3_tune_request *request,
+                                   uint64_t *programmed_hz,
+                                   uint64_t *tune_revision) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (lease == nullptr || lease->owner == nullptr || request == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        return lease->owner->engine->tune_lease_ex(
+            lease->id, *request, programmed_hz, tune_revision);
+    } catch (...) {
+        return entry_failure(lease != nullptr ? lease->owner : nullptr,
+                             "dtv_l3_lease_tune_ex");
     }
 }
 

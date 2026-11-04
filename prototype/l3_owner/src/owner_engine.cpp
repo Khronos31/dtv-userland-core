@@ -16,7 +16,17 @@ constexpr int kOpenLaneMask = 1;
 constexpr int kControlLaneMask = 2;
 
 thread_local int callback_frame_depth = 0;
+thread_local bool control_lane_thread = false;
 std::atomic<int> lane_start_failure_mask{0};
+
+bool in_control_lane() {
+    return control_lane_thread;
+}
+
+struct ControlLaneGuard {
+    ControlLaneGuard() { control_lane_thread = true; }
+    ~ControlLaneGuard() { control_lane_thread = false; }
+};
 std::atomic<unsigned int> test_exception_mask{0};
 
 void throw_if_test_bit(unsigned int bit) {
@@ -113,9 +123,57 @@ void OwnerEngine::log(dtv_l3_log_level level,
     }
 }
 
-void OwnerEngine::set_submit_mode(dtv_l3_submit_mode mode) {
+void OwnerEngine::set_call_flags(std::uint32_t flags) {
     std::lock_guard<std::mutex> lock(mutex_);
-    submit_mode_ = mode;
+    call_flags_ = flags;
+}
+
+void OwnerEngine::dispatch_cancel(const std::shared_ptr<Operation> &operation,
+                                  bool before_submit) {
+    if ((in_callback_frame() &&
+         (call_flags_ & DTV_L3_CALL_FLAG_CANCEL_IN_FRAME) == 0) ||
+        in_control_lane()) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        recovery_queue_.push_back(RecoveryWork{false, operation, before_submit});
+        state_condition_.notify_all();
+        return;
+    }
+    run_cancel(operation, before_submit);
+}
+
+dtv_l3_result OwnerEngine::progress_recovery() {
+    if (in_callback_frame() || in_control_lane()) {
+        return DTV_L3_BUSY;
+    }
+    for (;;) {
+        RecoveryWork work;
+        std::shared_ptr<Operation> pending_submit;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            if (!recovery_queue_.empty()) {
+                work = recovery_queue_.front();
+                recovery_queue_.pop_front();
+            } else {
+                for (const auto &entry : operations_) {
+                    if (entry.second->resubmit_pending) {
+                        pending_submit = entry.second;
+                        break;
+                    }
+                }
+                if (!pending_submit) {
+                    break;
+                }
+            }
+        }
+        if (pending_submit) {
+            resubmit_operation(pending_submit);
+        } else if (work.submit) {
+            resubmit_operation(work.operation);
+        } else {
+            run_cancel(work.operation, work.before_submit);
+        }
+    }
+    return DTV_L3_OK;
 }
 
 void OwnerEngine::set_initialize_hook(std::function<dtv_l3_result()> hook) {
@@ -321,10 +379,6 @@ dtv_l3_result OwnerEngine::start(
         (request.out_size != 0 && request.out_data == nullptr)) {
         return DTV_L3_INVALID;
     }
-    if (request.resubmit_on_provider_abort != 0 &&
-        submit_mode_ != DTV_L3_SUBMIT_NONBLOCKING) {
-        return DTV_L3_INVALID;
-    }
     if ((request.kind == DTV_L3_TRANSFER_BULK &&
          (request.endpoint == 0 || request.control.request_type != 0 ||
           request.control.request != 0 || request.control.value != 0 ||
@@ -442,7 +496,7 @@ dtv_l3_result OwnerEngine::start(
             "contained C++ exception");
     }
     if (cancel_now) {
-        run_cancel(op, false);
+        dispatch_cancel(op, false);
     }
     if (pending_resubmit) {
         resubmit_operation(op);
@@ -513,6 +567,18 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
                                       std::uint64_t requested_hz,
                                       std::uint64_t *programmed_hz,
                                       std::uint64_t *tune_revision) {
+    dtv_l3_tune_request request{};
+    request.system = DTV_L3_TUNE_SYSTEM_AUTO;
+    request.selection = DTV_L3_TUNE_SELECTION_AUTO;
+    request.requested_hz = requested_hz;
+    return tune_lease_ex(lease_id, request, programmed_hz, tune_revision);
+}
+
+dtv_l3_result OwnerEngine::tune_lease_ex(
+    std::uint32_t lease_id,
+    const dtv_l3_tune_request &tune_request,
+    std::uint64_t *programmed_hz,
+    std::uint64_t *tune_revision) {
     if (programmed_hz == nullptr || tune_revision == nullptr) {
         return DTV_L3_INVALID;
     }
@@ -543,11 +609,11 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
         ++provider_calls_in_flight_;
     }
 
-    std::uint64_t programmed = requested_hz;
+    std::uint64_t programmed = tune_request.requested_hz;
     dtv_l3_result tune_result = DTV_L3_FAILED;
     bool tune_threw = false;
     try {
-        tune_result = product().tune(receiver_id, requested_hz, &programmed);
+        tune_result = product().tune_ex(receiver_id, tune_request, &programmed);
     } catch (...) {
         tune_threw = true;
         tune_result = DTV_L3_FAILED;
@@ -572,7 +638,7 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
             } else {
                 ++found->second.tune_revision;
                 found->second.state = DTV_L3_LEASE_TUNED;
-                found->second.requested_hz = requested_hz;
+                found->second.requested_hz = tune_request.requested_hz;
                 found->second.programmed_hz = programmed;
                 *programmed_hz = programmed;
                 *tune_revision = found->second.tune_revision;
@@ -733,8 +799,9 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         }
         bool attach_threw = false;
         try {
-            attach_result = product().stream_attach(
-                generation, &StreamSink::deliver, stream->sink.get());
+            attach_result = product().stream_attach_ex(
+                generation, receiver_id, bridge_id, &StreamSink::deliver,
+                stream->sink.get());
         } catch (...) {
             attach_threw = true;
             attach_result = DTV_L3_FAILED;
@@ -761,7 +828,8 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             }
             bool stop_threw = false;
             try {
-                stop_result = product().stream_stop(generation);
+                stop_result = product().stream_stop_ex(
+                    generation, stream->receiver_id, stream->bridge_id);
             } catch (...) {
                 stop_threw = true;
                 stop_result = DTV_L3_FAILED;
@@ -910,7 +978,8 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
     dtv_l3_result stop_result = DTV_L3_FAILED;
     bool stop_threw = false;
     try {
-        stop_result = product().stream_stop(generation);
+        stop_result = product().stream_stop_ex(
+            generation, stream->receiver_id, stream->bridge_id);
     } catch (...) {
         stop_threw = true;
         stop_result = DTV_L3_FAILED;
@@ -1473,7 +1542,8 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
     dtv_l3_result stop_result = DTV_L3_FAILED;
     bool stop_threw = false;
     try {
-        stop_result = product().stream_stop(generation);
+        stop_result = product().stream_stop_ex(
+            generation, stream->receiver_id, stream->bridge_id);
     } catch (...) {
         stop_threw = true;
         stop_result = DTV_L3_FAILED;
@@ -1625,7 +1695,7 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
             "contained C++ exception");
     }
     if (retry_cancel) {
-        run_cancel(operation, false);
+        dispatch_cancel(operation, false);
     }
     finish_close();
     return result;
@@ -1926,6 +1996,20 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         close_requested_ = true;
+        while (!recovery_queue_.empty()) {
+            const RecoveryWork work = recovery_queue_.front();
+            recovery_queue_.pop_front();
+            if (work.submit) {
+                enqueue_locked([this, operation = work.operation] {
+                    resubmit_operation(operation);
+                });
+            } else {
+                enqueue_locked([this, operation = work.operation,
+                                before_submit = work.before_submit] {
+                    run_cancel(operation, before_submit);
+                });
+            }
+        }
         if (open_state_ != OpenState::Opening && open_state_ != OpenState::Failed &&
             open_state_ != OpenState::Closed) {
             open_state_ = OpenState::Closing;
@@ -2303,7 +2387,15 @@ void OwnerEngine::on_completion(
         return;
     }
     if (do_resubmit) {
-        resubmit_operation(op_shared);
+        if (in_control_lane() ||
+            (in_callback_frame() &&
+             (call_flags_ & DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME) == 0)) {
+            std::lock_guard<std::mutex> lock(mutex_);
+            op_shared->resubmit_pending = true;
+            state_condition_.notify_all();
+        } else {
+            resubmit_operation(op_shared);
+        }
     }
     if (should_finish_close) {
         finish_close();
@@ -2313,6 +2405,14 @@ void OwnerEngine::on_completion(
 void OwnerEngine::resubmit_operation(
     const std::shared_ptr<Operation> &operation) {
     if (!operation) {
+        return;
+    }
+    if (in_control_lane() ||
+        (in_callback_frame() &&
+         (call_flags_ & DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME) == 0)) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        operation->resubmit_pending = true;
+        state_condition_.notify_all();
         return;
     }
     bool do_submit = false;
@@ -2415,7 +2515,7 @@ void OwnerEngine::resubmit_operation(
             "contained C++ exception");
     }
     if (cancel_now) {
-        run_cancel(operation, false);
+        dispatch_cancel(operation, false);
     }
     if (need_finish_close) {
         finish_close();
@@ -2732,6 +2832,7 @@ OwnerEngine::next_deadline_locked() const {
 }
 
 void OwnerEngine::worker_loop() {
+    ControlLaneGuard lane_guard;
     for (;;) {
         std::function<void()> work;
         {

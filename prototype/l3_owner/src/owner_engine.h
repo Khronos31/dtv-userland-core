@@ -73,6 +73,27 @@ public:
         (void)programmed_hz;
         return DTV_L3_UNSUPPORTED;
     }
+    virtual dtv_l3_result tune_ex(std::uint32_t receiver_id,
+                                  const dtv_l3_tune_request &request,
+                                  std::uint64_t *programmed_hz) {
+        return tune(receiver_id, request.requested_hz, programmed_hz);
+    }
+    virtual dtv_l3_result stream_attach_ex(std::uint64_t stream_id,
+                                           std::uint32_t receiver_id,
+                                           std::uint32_t bridge_id,
+                                           dtv_l3_ts_deliver_fn deliver,
+                                           void *callback_context) {
+        (void)receiver_id;
+        (void)bridge_id;
+        return stream_attach(stream_id, deliver, callback_context);
+    }
+    virtual dtv_l3_result stream_stop_ex(std::uint64_t stream_id,
+                                         std::uint32_t receiver_id,
+                                         std::uint32_t bridge_id) {
+        (void)receiver_id;
+        (void)bridge_id;
+        return stream_stop(stream_id);
+    }
 };
 
 class Provider : public ProductAdapter {
@@ -162,8 +183,9 @@ public:
 
     void initialize_claims(std::uint32_t count);
     void abort_open_after_lane_exception();
-    void set_submit_mode(dtv_l3_submit_mode mode);
+    void set_call_flags(std::uint32_t flags);
     void set_initialize_hook(std::function<dtv_l3_result()> hook);
+    dtv_l3_result progress_recovery();
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
@@ -173,6 +195,10 @@ public:
                              std::uint64_t requested_hz,
                              std::uint64_t *programmed_hz,
                              std::uint64_t *tune_revision);
+    dtv_l3_result tune_lease_ex(std::uint32_t lease_id,
+                                const dtv_l3_tune_request &request,
+                                std::uint64_t *programmed_hz,
+                                std::uint64_t *tune_revision);
     dtv_l3_result start_lease(std::uint32_t lease_id);
     dtv_l3_result attach_lease(std::uint32_t lease_id,
                                std::uint64_t *stream_generation);
@@ -337,6 +363,8 @@ private:
     void finalize_retire_locked(std::uint64_t generation);
     void refresh_lease_locked(std::uint32_t lease_id);
     void retire_stream_for_close(std::uint64_t generation);
+    void dispatch_cancel(const std::shared_ptr<Operation> &operation,
+                         bool before_submit);
     void queue_cancel_locked(const std::shared_ptr<Operation> &operation,
                              bool allow_terminal = false);
     void run_cancel(const std::shared_ptr<Operation> &operation,
@@ -356,8 +384,15 @@ private:
     Provider &provider_;
     dtv_l3_logger logger_;
     ProductAdapter *product_adapter_ = nullptr;
-    dtv_l3_submit_mode submit_mode_ = DTV_L3_SUBMIT_NONBLOCKING;
+    std::uint32_t call_flags_ =
+        DTV_L3_CALL_FLAG_CANCEL_IN_FRAME | DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME;
     std::function<dtv_l3_result()> initialize_hook_;
+    struct RecoveryWork {
+        bool submit = false;
+        std::shared_ptr<Operation> operation;
+        bool before_submit = false;
+    };
+    std::deque<RecoveryWork> recovery_queue_;
     mutable std::mutex mutex_;
     bool retired_gate_ = false;
     bool released_ = false;

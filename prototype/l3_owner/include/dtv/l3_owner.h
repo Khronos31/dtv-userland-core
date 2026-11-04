@@ -338,12 +338,8 @@ typedef struct dtv_l3_provider {
  * firmware, CARD, or LNB policy. The same binding and local transfer ID are
  * used by submit, cancel, and completion.
  */
-typedef enum dtv_l3_submit_mode {
-    /* Device I/O and completion do not block the submit caller. */
-    DTV_L3_SUBMIT_NONBLOCKING = 0,
-    /* submit may block; the owner never calls it from the control lane. */
-    DTV_L3_SUBMIT_MAY_BLOCK = 1
-} dtv_l3_submit_mode;
+#define DTV_L3_CALL_FLAG_CANCEL_IN_FRAME 0x0001u
+#define DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME 0x0002u
 
 typedef struct dtv_l3_usb_provider {
     void *provider_context;
@@ -353,8 +349,14 @@ typedef struct dtv_l3_usb_provider {
     dtv_l3_transfer_cancel_fn cancel;
     dtv_l3_claim_cancel_fn claim_cancel;
     dtv_l3_cancel_scope cancel_scope;
-    /* Zero is NONBLOCKING for existing single-pipe providers. */
-    dtv_l3_submit_mode submit_mode;
+    /*
+     * Default 0. CANCEL_IN_FRAME means cancel returns without waiting for a
+     * completion callback and may be called inside completion/logger frames.
+     * SUBMIT_IN_FRAME means submit does not wait for device I/O or completion
+     * and may be called inside those frames. Without a flag, the owner defers
+     * that work to a host-thread recovery queue.
+     */
+    uint32_t call_flags;
     dtv_l3_logger logger;
 } dtv_l3_usb_provider;
 
@@ -468,6 +470,47 @@ typedef struct dtv_l3_capability_catalog {
     dtv_l3_support ts_form;
 } dtv_l3_capability_catalog;
 
+typedef enum dtv_l3_tune_system {
+    DTV_L3_TUNE_SYSTEM_AUTO = 0,
+    DTV_L3_TUNE_SYSTEM_ISDB_T = 1,
+    DTV_L3_TUNE_SYSTEM_ISDB_S = 2
+} dtv_l3_tune_system;
+
+typedef enum dtv_l3_tune_selection {
+    DTV_L3_TUNE_SELECTION_AUTO = 0,
+    DTV_L3_TUNE_SELECTION_SLOT = 1,
+    DTV_L3_TUNE_SELECTION_TSID = 2
+} dtv_l3_tune_selection;
+
+typedef struct dtv_l3_tune_request {
+    uint32_t system;
+    uint32_t selection;
+    uint64_t requested_hz;
+    uint32_t slot;
+    uint32_t tsid;
+} dtv_l3_tune_request;
+
+typedef dtv_l3_result (*dtv_l3_tune_ex_fn)(
+    void *product_context,
+    dtv_l3_provider_binding *binding,
+    uint32_t receiver_id,
+    const dtv_l3_tune_request *request,
+    uint64_t *programmed_hz);
+typedef dtv_l3_result (*dtv_l3_stream_attach_ex_fn)(
+    void *product_context,
+    dtv_l3_provider_binding *binding,
+    uint64_t stream_id,
+    uint32_t receiver_id,
+    uint32_t bridge_id,
+    dtv_l3_ts_deliver_fn deliver,
+    void *callback_context);
+typedef dtv_l3_result (*dtv_l3_stream_stop_ex_fn)(
+    void *product_context,
+    dtv_l3_provider_binding *binding,
+    uint64_t stream_id,
+    uint32_t receiver_id,
+    uint32_t bridge_id);
+
 typedef dtv_l3_result (*dtv_l3_adapter_reader_acquire_fn)(
     void *product_context,
     uint32_t reader_id,
@@ -498,10 +541,13 @@ typedef struct dtv_l3_product_adapter {
     dtv_l3_result (*initialize)(void *product_context, dtv_l3_context *owner);
     dtv_l3_scope_query_fn scope_query;
     dtv_l3_tune_fn tune;
+    dtv_l3_tune_ex_fn tune_ex;
     dtv_l3_bridge_start_fn bridge_start;
     dtv_l3_bridge_stop_fn bridge_stop;
     dtv_l3_stream_attach_fn stream_attach;
+    dtv_l3_stream_attach_ex_fn stream_attach_ex;
     dtv_l3_stream_stop_fn stream_stop;
+    dtv_l3_stream_stop_ex_fn stream_stop_ex;
     dtv_l3_adapter_reader_acquire_fn reader_acquire;
     dtv_l3_adapter_lnb_set_fn lnb_set;
 } dtv_l3_product_adapter;
@@ -668,6 +714,13 @@ dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
 dtv_l3_result dtv_l3_capabilities_get_catalog(
     dtv_l3_context *owner,
     const dtv_l3_capability_catalog **catalog);
+/*
+ * Runs deferred cancel/submit recovery work on the calling host thread. It
+ * must be called outside a callback frame and not from the control lane.
+ * op_wait/op_poll/read_ts_wait remain state-only; this entry is the explicit
+ * opt-in drain point until the wait contract is decided.
+ */
+dtv_l3_result dtv_l3_progress(dtv_l3_context *owner);
 dtv_l3_result dtv_l3_open_status_get(
     dtv_l3_context *owner,
     dtv_l3_open_status *status);
@@ -717,6 +770,10 @@ dtv_l3_result dtv_l3_lease_tune(dtv_l3_lease *lease,
                                 uint64_t requested_hz,
                                 uint64_t *programmed_hz,
                                 uint64_t *tune_revision);
+dtv_l3_result dtv_l3_lease_tune_ex(dtv_l3_lease *lease,
+                                   const dtv_l3_tune_request *request,
+                                   uint64_t *programmed_hz,
+                                   uint64_t *tune_revision);
 dtv_l3_result dtv_l3_lease_start(dtv_l3_lease *lease);
 dtv_l3_result dtv_l3_lease_attach(dtv_l3_lease *lease,
                                   dtv_l3_stream **stream_out);

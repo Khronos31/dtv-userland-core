@@ -183,7 +183,7 @@ static void fixture_destroy(struct fixture *fixture) {
 }
 
 static dtv_l3_usb_provider provider_for(struct fixture *fixture,
-                                        dtv_l3_submit_mode mode) {
+                                        uint32_t call_flags) {
     return (dtv_l3_usb_provider){
         .provider_context = fixture,
         .claim = provider_claim,
@@ -192,7 +192,7 @@ static dtv_l3_usb_provider provider_for(struct fixture *fixture,
         .cancel = provider_cancel,
         .claim_cancel = provider_claim_cancel,
         .cancel_scope = DTV_L3_CANCEL_SCOPE_TRANSFER,
-        .submit_mode = mode};
+        .call_flags = call_flags};
 }
 
 static dtv_l3_product_adapter dummy_adapter(void) {
@@ -339,7 +339,8 @@ static int test_cancel_thread_before_close(void) {
     pthread_t caller = pthread_self();
 
     fixture_init(&fixture);
-    usb = provider_for(&fixture, DTV_L3_SUBMIT_NONBLOCKING);
+    usb = provider_for(&fixture, DTV_L3_CALL_FLAG_CANCEL_IN_FRAME |
+                                       DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME);
     if (!open_ready(&usb, &adapter, &owner)) {
         fixture_destroy(&fixture);
         return 1;
@@ -403,7 +404,8 @@ static int test_deadline_while_cancel_blocks(void) {
 
     fixture_init(&fixture);
     fixture.cancel_block = 1;
-    usb = provider_for(&fixture, DTV_L3_SUBMIT_NONBLOCKING);
+    usb = provider_for(&fixture, DTV_L3_CALL_FLAG_CANCEL_IN_FRAME |
+                                       DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME);
     if (!open_ready(&usb, &adapter, &owner)) {
         fixture_destroy(&fixture);
         return 1;
@@ -490,7 +492,7 @@ static int test_may_block_submit_and_deadline(void) {
 
     fixture_init(&fixture);
     fixture.submit_block_endpoint = 0x02;
-    usb = provider_for(&fixture, DTV_L3_SUBMIT_MAY_BLOCK);
+    usb = provider_for(&fixture, 0);
     if (!open_ready(&usb, &adapter, &owner)) {
         fixture_destroy(&fixture);
         return 1;
@@ -542,31 +544,51 @@ static int test_may_block_submit_and_deadline(void) {
     return 0;
 }
 
-static int test_may_block_rejects_resubmit(void) {
+static int test_recovery_submit_without_frame_flag(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
     dtv_l3_product_adapter adapter = dummy_adapter();
     dtv_l3_context *owner = NULL;
     dtv_l3_op *op = NULL;
+    dtv_l3_op_result result;
     dtv_l3_transfer_request request;
+    uint64_t id;
 
     fixture_init(&fixture);
-    usb = provider_for(&fixture, DTV_L3_SUBMIT_MAY_BLOCK);
+    usb = provider_for(&fixture, 0);
     if (!open_ready(&usb, &adapter, &owner)) {
         fixture_destroy(&fixture);
         return 1;
     }
     request = request_for(0x81, 0, 0);
     request.resubmit_on_provider_abort = 1;
-    if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_INVALID ||
-        op != NULL || fixture.submit_calls != 0) {
+    if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_ACCEPTED ||
+        op == NULL || fixture.submit_calls != 1) {
         fixture_destroy(&fixture);
         return 2;
+    }
+    id = only_pending_id(&fixture);
+    if (!fire_pending(&fixture, id, DTV_L3_CANCELLED) ||
+        fixture.submit_calls != 1) {
+        fixture_destroy(&fixture);
+        return 3;
+    }
+    /* No SUBMIT_IN_FRAME flag: recovery waits for an explicit host drain. */
+    if (dtv_l3_progress(owner) != DTV_L3_OK || fixture.submit_calls != 2) {
+        fixture_destroy(&fixture);
+        return 4;
+    }
+    id = only_pending_id(&fixture);
+    if (!fire_pending(&fixture, id, DTV_L3_OK) ||
+        !wait_op_terminal(op, &result) || result.state != DTV_L3_OP_DONE ||
+        dtv_l3_op_release(op) != DTV_L3_OK) {
+        fixture_destroy(&fixture);
+        return 5;
     }
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK || !wait_releasable(owner) ||
         !release_owner(owner)) {
         fixture_destroy(&fixture);
-        return 3;
+        return 6;
     }
     fixture_destroy(&fixture);
     return 0;
@@ -581,7 +603,8 @@ static int test_close_timeout_while_release_blocks(void) {
 
     fixture_init(&fixture);
     fixture.release_block = 1;
-    usb = provider_for(&fixture, DTV_L3_SUBMIT_NONBLOCKING);
+    usb = provider_for(&fixture, DTV_L3_CALL_FLAG_CANCEL_IN_FRAME |
+                                       DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME);
     if (!open_ready(&usb, &adapter, &owner)) {
         fixture_destroy(&fixture);
         return 1;
@@ -629,8 +652,8 @@ int main(int argc, char **argv) {
     if (strcmp(argv[1], "may-block-submit") == 0) {
         return test_may_block_submit_and_deadline();
     }
-    if (strcmp(argv[1], "may-block-resubmit") == 0) {
-        return test_may_block_rejects_resubmit();
+    if (strcmp(argv[1], "recovery-submit") == 0) {
+        return test_recovery_submit_without_frame_flag();
     }
     if (strcmp(argv[1], "release-block-close") == 0) {
         return test_close_timeout_while_release_blocks();

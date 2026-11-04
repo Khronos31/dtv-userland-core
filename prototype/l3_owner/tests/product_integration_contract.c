@@ -23,6 +23,14 @@ struct fixture {
     unsigned int submit_calls;
     unsigned int cancel_calls;
     unsigned int tune_calls;
+    unsigned int tune_ex_calls;
+    unsigned int attach_ex_calls;
+    unsigned int stop_ex_calls;
+    uint32_t seen_tune_system;
+    uint32_t seen_tune_selection;
+    uint32_t seen_tune_receiver;
+    uint32_t seen_attach_receiver;
+    uint32_t seen_attach_bridge;
     unsigned int bridge_start_calls;
     unsigned int bridge_stop_calls;
     unsigned int attach_calls;
@@ -174,6 +182,53 @@ static dtv_l3_result product_tune(void *context,
     return DTV_L3_OK;
 }
 
+static dtv_l3_result product_tune_ex(void *context,
+                                   dtv_l3_provider_binding *binding,
+                                   uint32_t receiver_id,
+                                   const dtv_l3_tune_request *request,
+                                   uint64_t *programmed_hz) {
+    struct fixture *fixture = context;
+    (void)binding;
+    ++fixture->tune_ex_calls;
+    fixture->seen_tune_system = request->system;
+    fixture->seen_tune_selection = request->selection;
+    fixture->seen_tune_receiver = receiver_id;
+    *programmed_hz = request->requested_hz;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_attach_ex(void *context,
+                                     dtv_l3_provider_binding *binding,
+                                     uint64_t stream_id,
+                                     uint32_t receiver_id,
+                                     uint32_t bridge_id,
+                                     dtv_l3_ts_deliver_fn deliver,
+                                     void *callback_context) {
+    struct fixture *fixture = context;
+    (void)binding;
+    (void)stream_id;
+    ++fixture->attach_ex_calls;
+    fixture->seen_attach_receiver = receiver_id;
+    fixture->seen_attach_bridge = bridge_id;
+    fixture->deliver = deliver;
+    fixture->deliver_context = callback_context;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_stop_ex(void *context,
+                                   dtv_l3_provider_binding *binding,
+                                   uint64_t stream_id,
+                                   uint32_t receiver_id,
+                                   uint32_t bridge_id) {
+    struct fixture *fixture = context;
+    (void)binding;
+    (void)stream_id;
+    (void)receiver_id;
+    (void)bridge_id;
+    ++fixture->stop_ex_calls;
+    return DTV_L3_OK;
+}
+
 static dtv_l3_result product_bridge_start(void *context,
                                           dtv_l3_provider_binding *binding,
                                           uint32_t bridge_id,
@@ -264,10 +319,13 @@ static dtv_l3_product_adapter adapter_for(struct fixture *fixture,
         .initialize = product_initialize,
         .scope_query = product_scope,
         .tune = product_tune,
+        .tune_ex = product_tune_ex,
         .bridge_start = product_bridge_start,
         .bridge_stop = product_bridge_stop,
         .stream_attach = product_attach,
+        .stream_attach_ex = product_attach_ex,
         .stream_stop = product_stream_stop,
+        .stream_stop_ex = product_stop_ex,
         .reader_acquire = product_reader,
         .lnb_set = product_lnb};
 }
@@ -402,8 +460,12 @@ static int exercise_product(dtv_l3_context *owner, struct fixture *fixture) {
         dtv_l3_op_release(op) != DTV_L3_OK) {
         return 11;
     }
+    dtv_l3_tune_request tune_request = {
+        .system = DTV_L3_TUNE_SYSTEM_ISDB_T,
+        .selection = DTV_L3_TUNE_SELECTION_AUTO,
+        .requested_hz = 500000000};
     if (dtv_l3_lease_acquire(owner, 0, &lease) != DTV_L3_OK ||
-        dtv_l3_lease_tune(lease, 500000000, &programmed, &revision) !=
+        dtv_l3_lease_tune_ex(lease, &tune_request, &programmed, &revision) !=
             DTV_L3_OK ||
         dtv_l3_lease_start(lease) != DTV_L3_OK ||
         dtv_l3_lease_attach(lease, &stream) != DTV_L3_OK ||
@@ -436,8 +498,13 @@ static int exercise_product(dtv_l3_context *owner, struct fixture *fixture) {
         fixture->lnb_mode != 1) {
         return 17;
     }
-    if (fixture->tune_calls != 1 || fixture->bridge_start_calls != 1 ||
-        fixture->attach_calls != 1 || fixture->stream_stop_calls != 1) {
+    if (fixture->tune_ex_calls != 1 || fixture->bridge_start_calls != 1 ||
+        fixture->attach_ex_calls != 1 || fixture->stop_ex_calls != 1 ||
+        fixture->seen_tune_system != DTV_L3_TUNE_SYSTEM_ISDB_T ||
+        fixture->seen_tune_selection != DTV_L3_TUNE_SELECTION_AUTO ||
+        fixture->seen_tune_receiver != 0 ||
+        fixture->seen_attach_receiver != 0 ||
+        fixture->seen_attach_bridge != 3) {
         return 18;
     }
     return 0;
