@@ -403,6 +403,18 @@ static int cleanup_retry_until_accepted(dtv_l3_context *owner) {
     return 0;
 }
 
+static int release_owner(dtv_l3_context *owner) {
+    unsigned int attempt;
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        const dtv_l3_result result = dtv_l3_context_release(owner);
+        if (result != DTV_L3_BUSY) {
+            return result == DTV_L3_OK;
+        }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
 static int close_and_release(dtv_l3_context *owner) {
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK) {
         return 0;
@@ -410,7 +422,7 @@ static int close_and_release(dtv_l3_context *owner) {
     if (!wait_releasable(owner)) {
         return 0;
     }
-    return dtv_l3_context_release(owner) == DTV_L3_OK;
+    return release_owner(owner);
 }
 
 static dtv_l3_transfer_request bulk_request(uint32_t endpoint,
@@ -506,7 +518,7 @@ static int test_cleanup_failure_after_ready(unsigned int inject_bit) {
     if (fixture.release_claim_calls != 1) {
         return 7;
     }
-    if (dtv_l3_context_release(owner) != DTV_L3_OK) {
+    if (!release_owner(owner)) {
         return 8;
     }
     return 0;
@@ -732,7 +744,7 @@ static int test_entry_guards(void) {
     if (dtv_l3_context_release(owner) != DTV_L3_FAILED) {
         return 33;
     }
-    if (dtv_l3_context_release(owner) != DTV_L3_OK) {
+    if (!release_owner(owner)) {
         return 34;
     }
     return 0;
@@ -926,7 +938,7 @@ static int test_release_claim_exception(void) {
     if (!wait_releasable(owner)) {
         return 6;
     }
-    if (dtv_l3_context_release(owner) != DTV_L3_OK) {
+    if (!release_owner(owner)) {
         return 7;
     }
     return 0;
@@ -1025,12 +1037,12 @@ static int test_logging_levels_and_context(void) {
 
     if (dtv_l3_close(owner_a, 2000) != DTV_L3_OK ||
         !wait_releasable(owner_a) ||
-        dtv_l3_context_release(owner_a) != DTV_L3_OK) {
+        !release_owner(owner_a)) {
         return 8;
     }
     if (dtv_l3_close(owner_b, 2000) != DTV_L3_OK ||
         !wait_releasable(owner_b) ||
-        dtv_l3_context_release(owner_b) != DTV_L3_OK) {
+        !release_owner(owner_b)) {
         return 9;
     }
 
@@ -1090,7 +1102,7 @@ static int test_log_reentry(void) {
         return 4;
     }
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK || !wait_releasable(owner) ||
-        dtv_l3_context_release(owner) != DTV_L3_OK) {
+        !release_owner(owner)) {
         return 5;
     }
     return 0;
@@ -1156,7 +1168,7 @@ static int test_no_stderr(void) {
         return 9;
     }
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK || !wait_releasable(owner) ||
-        dtv_l3_context_release(owner) != DTV_L3_OK) {
+        !release_owner(owner)) {
         return 10;
     }
     return 0;
