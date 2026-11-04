@@ -79,8 +79,8 @@
 | `--group` | なし | 採用済み。POSIX グループと Windows ACL を区別。POSIX 環境では明示的な `--runtime-dir` の指定が必須（省略時は引数エラー 2、自動 private root を group 共有に使用しない）。OS 非対応引数は既存の未知引数/2 を維持（ユーザー回答 6610524673） |
 | `--fd` | 10 進整数 FD | 採用済み。借用した USB デバイスのファイルディスクリプタ（FD: 3..INT_MAX）。数・値の範囲はハードウェア能力差（§5） |
 | `--exit-on-stdin-eof` | なし | 採用済み。Windows 限定・オプトイン・既定オフ。POSIX は現行どおり未知引数/2 |
-| `--models` | なし | 採用済み。接続を試行せず、対応機種名＋VID:PID を静的なプレーンテキストで出力。他引数との併用は引数エラー 2（ユーザー回答 6610524673、§3.3） |
-| `--list-json` | なし | 採用済み。接続中の discovery JSON を出力。単独要求として優先し、通常の不正引数より先に処理（ユーザー回答 6610524673、§3.3） |
+| `--models` | なし | 採用済み。接続を試行せず、対応機種名＋VID:PID を静的なプレーンテキストで出力。他引数との併用は引数エラー 2（ただし `--help`/`--version` との同時指定時はそちらを優先し正常終了 0、ユーザー回答 6610524673、§3.3） |
+| `--list-json` | なし | 採用済み。接続中の discovery JSON を出力。単独要求として優先し、通常の不正引数より先に処理（`--help`/`--version` との同時指定時はそちらの優先を下げない、ユーザー回答 6610524673、§3.3） |
 | `--allow-lnb-power` | なし | 採用済み。PX4/ASICEN などの ISDB-S 15V 要求の許可。PIX の `--lna` と混同しない |
 | `--verbose` / `-v` | なし | 一部製品の既存オプション。全製品での必須化は行わず、既存実装の範囲を維持（ユーザー回答 6610524673） |
 | `--pid` / `-p` | PID フィルター | 必要製品のみ提供（ハードウェア能力差を保持、ユーザー回答 6610524673）。全製品での必須化は行わない |
@@ -163,8 +163,8 @@
 1. `--help` および `--version` は、他の引数に構文エラーや不正があってもメタデータを表示して **正常終了（終了コード 0）** する。
 2. `--help` と `--version` が同時に指定された場合は **`--help`** を優先して表示し正常終了する。
 3. メタデータの解決は、通常引数の構文解析、デーモン接続、USB discovery、権限取得よりも前に行う。
-4. `--models` は、他引数との併用を引数エラー（終了コード 2）とする（ユーザー回答 6610524673）。ヘルプおよびバージョンと同様に接続試行前の静的メタデータ要求として処理するが、他引数が混在した場合は拒否する。
-5. `--list-json` は単独要求として優先し、通常の不正引数より先に処理する（ユーザー回答 6610524673）。`--models` と同じ併用拒否は適用せず、接続中の discovery JSON を出力する。
+4. `--models` は、他引数との併用を引数エラー（終了コード 2）とする（ユーザー回答 6610524673）。ただし、`--help` または `--version` が同時に指定された場合は 1 および 2 の規則が優先し、ヘルプまたはバージョンを表示して正常終了（終了コード 0）する。ヘルプ・バージョン以外の他引数が混在した場合に終了コード 2 で拒否する。
+5. `--list-json` は単独要求として優先し、通常の不正引数より先に処理する（ユーザー回答 6610524673）。`--models` と同じ併用拒否（終了コード 2）は適用せず、接続中の discovery JSON を出力する。ただし、`--help` または `--version` が同時に指定された場合はそちらの優先度を下げず、1 および 2 に従ってヘルプまたはバージョンを表示し正常終了（終了コード 0）する。
 
 ### 3.4 必須入力
 
@@ -434,26 +434,26 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 17 番号付き項目および補助行 4b について、ユーザー回答（6610524673、6638034289、6639046111、6640223907）に基づき、(1) 1.0.0 方針決定済み、(2) 1.0.0 測定・資料照合事項、(3) 1.1 へ移行（L3 関連）に分類して整理した。
 
-### 7.1 1.0.0 方針決定・回答済み（8 件）
+### 7.1 1.0.0 方針決定・回答済み（9 件）
 
 | # | 項目 | 決定内容・方針 | 根拠・出典 | 境界・未決との区別 |
 |---:|---|---|---|---|
 | 1 | L2 wire のリリース間互換範囲 | 機能ビットとバージョンで受付を区別し、レイアウト変更を明示的に分離する | ユーザー回答 6610524673（『それ以外は推奨で』） | 個別の wire 変更内容やバージョン値自体は別の具体設計事項 |
-| 6 | `--models` / `--list-json` の優先度 | `--models` の他引数併用は引数エラー 2。`--list-json` は単独要求として優先し通常の不正引数より先に処理 | ユーザー回答 6610524673 | `--models` と `--list-json` で併用拒否の扱いを区別 |
+| 6 | `--models` / `--list-json` の優先度 | `--models` の他引数併用は引数エラー 2（`--help`/`--version` 優先・終了コード 0 を維持）。`--list-json` は単独要求として優先し通常の不正引数より先に処理（`--help`/`--version` 優先を維持） | ユーザー回答 6610524673 | `--models` と `--list-json` で併用拒否の扱いを区別し、help/version 優先の例外を明記 |
 | 7 | `--verbose` / `-v` の共通必須化 | 全製品必須にはせず、既存実装の範囲を維持する | ユーザー回答 6610524673 | 新規の共通必須化は行わない |
 | 8 | `--pid` / `-p` の共通化 | 必要製品のみ提供する | ユーザー回答 6610524673 | ハードウェア能力差を保持 |
 | 9 | OS 非対応引数の共通応答 | 既存の未知引数/2（`INVALID_ARGUMENT`）を維持する | ユーザー回答 6610524673 | 能力非対応 3（`UNSUPPORTED`）や Windows EOF 決定と混同しない |
 | 11 | `--packet-count` の共通提供 | 全製品で無理なく実装できる場合にのみ共通提供する | ユーザー回答 6610524673 | 無条件の全製品必須仕様とはしない |
 | 13 | runtime 省略時の共通解決 | Core resolver による共通解決方式を採用する | ユーザー決定記録（別 PR 実装・各 OS 検証事項） | 仕様決定は完了。実装・OS 別検証の状態と分離 |
 | 14 | torne の models / ネイティブ device / Windows EOF / 外部ファームウェア | 採用済みターゲットとして維持する | 既決ターゲット（付録 E 参照） | 実装・検証の未完とは区別して確定対象として扱う |
+| 15 | JSON `userland.status` スキーマ名リテラル | スキーマ名リテラル `name: "userland.status"`, `major: 1`, `minor: 0` を明記する | 個別仕様書 `json-status.md`、`src/json.cpp` | 個別仕様書 `docs/json-status.md` へ補足反映済み（実装 `src/json.cpp` およびチェッカーと整合） |
 
-### 7.2 1.0.0 測定・資料照合事項（4 件）
+### 7.2 1.0.0 測定・資料照合事項（3 件）
 
 | # | 項目 | 採用方針・検証候補 | 根拠・出典 | 残る確認作業 |
 |---:|---|---|---|---|
 | 10 | `--tune-timeout-ms` の範囲・既定値 | 範囲 100..120000ms、既定 30000ms を検証候補とする | ユーザー回答 6610524673 | 実機妥当性は未測定（`adoption-status.md`）。実機確認後に最終凍結する未実測候補値 |
 | 12 | 全体クローズ期限（L1/L2） | 15 秒を検証初期候補とし、期限結果と最終資源回収を分離する | ユーザー回答 6610524673 | 実機妥当性は未証明（`adoption-status.md`）。実機測定により最終秒数を決定する未実測候補値 |
-| 15 | JSON `userland.status` スキーマ名リテラル | スキーマ名リテラル `name: "userland.status"`, `major: 1`, `minor: 0` を明記 | 個別仕様書 `json-status.md`、`src/json.cpp` | 個別仕様書 `json-status.md` へ補足を反映し、umbrella 本書と整合 |
 | 16 | 終了コード Error→code 細部対応 | 分類 0, 2..10, 70 および primary error 保持を採用済み | 本書 §3.7、`include/dtv/userland/error.h` | 固定 Core Error enum との不一致（INVALID_STATE/ACCESS_DENIED の非存在）を整理。個別 Error マッピングの網羅的確定は未完了の決定事項 |
 
 ### 7.3 1.1 へ移行（L3 関連、6 件）
@@ -493,9 +493,9 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 ### 8.2 製品付録（能力差・製品固有オプション）
 
-製品ごとの能力差、製品固有オプション、およびハードウェア制約は、共通規則を規定する本書から分離し、付録案として管理する。
+製品ごとの能力差、製品固有オプション、およびハードウェア制約は、共通規則を規定する本書から分離し、付録案として管理する（private な agent-workspace の作業記録への参照であり、main ブランチには配置されていない）。
 
-- 製品付録案（agent-workspace）: [`design/external-contract-product-appendices-20261103.md`](https://github.com/Khronos31/agent-workspace/blob/main/design/external-contract-product-appendices-20261103.md)
+- 製品付録案（agent-workspace 固定コミット）: [`design/external-contract-product-appendices-20261103.md`](https://github.com/Khronos31/agent-workspace/blob/d8e75bc9eb149203921a2f908843b46767e88243/design/external-contract-product-appendices-20261103.md)
 - 各製品リポジトリの固定 main コミット（SPEC および release-validation 候補。各固定コミット上の実在確認は未了であり、候補資料としてのみ扱う）:
   - PX4: `Khronos31/px4-userland` commit [`773b6687`](https://github.com/Khronos31/px4-userland/tree/773b66875b47c2b4342ff983288776256d99cac9)
   - ASICEN: `Khronos31/asicen-userland` commit [`5b1bf1d4`](https://github.com/Khronos31/asicen-userland/tree/5b1bf1d41b6869626297e894b906466527b64bd4)
@@ -505,12 +505,12 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 ### 8.3 品質基準（5 分 TS 受信品質）
 
-リリース判定における 5 分 TS の品質基準（TEI/CC 閾値、元値保持、人間判断の基準）は以下の文書を参照する。
+リリース判定における 5 分 TS の品質基準（TEI/CC 閾値、元値保持、人間判断の基準）は以下の文書を参照する（private な agent-workspace の作業記録への参照）。
 
-- TS 品質契約（agent-workspace）: [`design/release-ts-quality-contract-20261029.md`](https://github.com/Khronos31/agent-workspace/blob/main/design/release-ts-quality-contract-20261029.md)
+- TS 品質契約（agent-workspace 固定コミット）: [`design/release-ts-quality-contract-20261029.md`](https://github.com/Khronos31/agent-workspace/blob/d8e75bc9eb149203921a2f908843b46767e88243/design/release-ts-quality-contract-20261029.md)
 
 ### 8.4 RC ポリシー（検証段階分離とリリース手順）
 
-RC ビルドの作成、対象別回帰・soak 試験、実施/未実施記録、Core タグ固定後のリリース検証の区分は以下の文書を参照する。本書の整備と RC 実行は厳格に分離する。
+RC ビルドの作成、対象別回帰・soak 試験、実施/未実施記録、Core タグ固定後のリリース検証の区分は以下の文書を参照する（private な agent-workspace の作業記録への参照）。本書の整備と RC 実行は厳格に分離する。
 
-- ユーザーランド RC ポリシー（agent-workspace）: [`USERLAND-RC-POLICY-20261019.md`](https://github.com/Khronos31/agent-workspace/blob/main/USERLAND-RC-POLICY-20261019.md)
+- ユーザーランド RC ポリシー（agent-workspace 固定コミット）: [`USERLAND-RC-POLICY-20261019.md`](https://github.com/Khronos31/agent-workspace/blob/d8e75bc9eb149203921a2f908843b46767e88243/USERLAND-RC-POLICY-20261019.md)
