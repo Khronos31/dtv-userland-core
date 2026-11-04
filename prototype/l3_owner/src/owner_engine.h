@@ -227,12 +227,14 @@ private:
         bool eof_pending = false;
         bool eof_observed = false;
         bool physical_stopped = false;
+        bool stop_residual = false;
         bool retire_requested = false;
         dtv_l3_stream_release_mode retire_mode =
             DTV_L3_STREAM_RELEASE_DRAINED;
         bool stopping = false;
         bool attaching = false;
         bool user_counted = false;
+        bool token_exposed = false;
         bool close_retire = false;
         std::shared_ptr<StreamSink> sink;
     };
@@ -272,6 +274,7 @@ private:
                        const std::uint8_t *data,
                        std::size_t size);
     void finalize_retire_locked(std::uint64_t generation);
+    void refresh_lease_locked(std::uint32_t lease_id);
     void retire_stream_for_close(std::uint64_t generation);
     void queue_cancel_locked(const std::shared_ptr<Operation> &operation);
     void run_cancel(const std::shared_ptr<Operation> &operation,

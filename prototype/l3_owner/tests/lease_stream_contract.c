@@ -23,7 +23,12 @@ struct fixture {
     unsigned int attach_calls;
     unsigned int stream_stop_calls;
     unsigned int tune_calls;
+    unsigned int release_claim_calls;
     uint64_t last_tune_hz;
+    dtv_l3_context *owner;
+    int close_on_attach;
+    int fail_stream_stop;
+    dtv_l3_result inner_close;
     dtv_l3_ts_deliver_fn deliver[MAX_STREAMS];
     void *deliver_context[MAX_STREAMS];
 };
@@ -41,9 +46,10 @@ static dtv_l3_release_result provider_release_claim(
     void *context,
     dtv_l3_provider_binding *binding,
     uint32_t claim_index) {
-    (void)context;
+    struct fixture *fixture = context;
     (void)binding;
     (void)claim_index;
+    ++fixture->release_claim_calls;
     return (dtv_l3_release_result){DTV_L3_RELEASE_QUIESCED, DTV_L3_CLAIM_NONE,
                                    DTV_L3_RESTORE_SUCCEEDED, DTV_L3_OK};
 }
@@ -126,6 +132,9 @@ static dtv_l3_result provider_stream_attach(void *context,
     }
     fixture->deliver[stream_id] = deliver;
     fixture->deliver_context[stream_id] = callback_context;
+    if (fixture->close_on_attach && fixture->owner != NULL) {
+        fixture->inner_close = dtv_l3_close(fixture->owner, 0);
+    }
     return fixture->attach_result;
 }
 
@@ -135,6 +144,9 @@ static dtv_l3_result provider_stream_stop(void *context,
     struct fixture *fixture = context;
     (void)binding;
     ++fixture->stream_stop_calls;
+    if (fixture->fail_stream_stop) {
+        return DTV_L3_FAILED;
+    }
     if (fixture->stream_stop_result == DTV_L3_OK &&
         stream_id < MAX_STREAMS && fixture->deliver[stream_id] != NULL) {
         fixture->deliver[stream_id](fixture->deliver_context[stream_id], NULL,
@@ -847,6 +859,67 @@ static int test_close_retires_active_stream(void) {
     return 0;
 }
 
+static int test_attach_abort_retains_failed_stop(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider;
+    dtv_l3_context *owner;
+    dtv_l3_lease *lease = NULL;
+    dtv_l3_stream *stream = NULL;
+    dtv_l3_lease_status lease_status;
+    dtv_l3_close_status close_status;
+    uint64_t programmed = 0;
+    uint64_t revision = 0;
+    unsigned int attempt;
+    dtv_l3_result release_result = DTV_L3_BUSY;
+
+    add_scope(&fixture, 0, 7, DTV_L3_LEASE_SHAREABLE);
+    provider = provider_for(&fixture);
+    owner = open_ready(&provider);
+    if (owner == NULL) {
+        return 1;
+    }
+    fixture.owner = owner;
+    fixture.close_on_attach = 1;
+    fixture.fail_stream_stop = 1;
+    if (dtv_l3_lease_acquire(owner, 0, &lease) != DTV_L3_OK ||
+        dtv_l3_lease_tune(lease, 500000000, &programmed, &revision) !=
+            DTV_L3_OK ||
+        dtv_l3_lease_start(lease) != DTV_L3_OK ||
+        dtv_l3_lease_attach(lease, &stream) != DTV_L3_BUSY ||
+        stream != NULL || fixture.inner_close != DTV_L3_TIMEOUT ||
+        fixture.release_claim_calls != 0 ||
+        dtv_l3_lease_status_get(lease, &lease_status) != DTV_L3_OK ||
+        lease_status.state != DTV_L3_LEASE_RETAINED ||
+        lease_status.stop_residual == 0 ||
+        dtv_l3_close_status_get(owner, &close_status) != DTV_L3_OK ||
+        close_status.cleanup_complete) {
+        return 2;
+    }
+    fixture.fail_stream_stop = 0;
+    if (dtv_l3_lease_release(lease) != DTV_L3_OK) {
+        return 3;
+    }
+    for (attempt = 0; attempt < 1000000; ++attempt) {
+        if (dtv_l3_close_status_get(owner, &close_status) != DTV_L3_OK) {
+            return 4;
+        }
+        if (close_status.cleanup_complete && close_status.all_ops_recovered) {
+            break;
+        }
+        sched_yield();
+    }
+    if (attempt == 1000000 || fixture.release_claim_calls != 1 ||
+        fixture.stream_stop_calls != 2) {
+        return 5;
+    }
+    for (attempt = 0; attempt < 1000000 && release_result == DTV_L3_BUSY;
+         ++attempt) {
+        release_result = dtv_l3_context_release(owner);
+        sched_yield();
+    }
+    return release_result == DTV_L3_OK ? 0 : 6;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         return 64;
@@ -877,6 +950,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "close") == 0) {
         return test_close_retires_active_stream();
+    }
+    if (strcmp(argv[1], "attach-abort") == 0) {
+        return test_attach_abort_retains_failed_stop();
     }
     return 64;
 }
