@@ -142,11 +142,14 @@ public:
             if (require_registered_cancel && found == transfers.end()) {
                 return DTV_L3_INVALID;
             }
-            if (cancel_completes_transfer && found != transfers.end()) {
+        if (cancel_completes_transfer && found != transfers.end()) {
                 pending = found->second;
                 transfers.erase(found);
                 complete_now = true;
             }
+        }
+        if (on_cancel) {
+            on_cancel();
         }
         if (complete_now) {
             const dtv_l3_transfer_completion completion{
@@ -353,6 +356,7 @@ public:
     std::shared_ptr<TestBarrier> stream_stop_barrier;
     std::shared_ptr<TestBarrier> tune_barrier;
     std::function<void()> on_stream_attach;
+    std::function<void()> on_cancel;
     std::map<std::uint32_t, dtv_l3_scope_info> scopes;
     std::map<std::uint32_t, std::size_t> bridge_start_calls;
     std::map<std::uint32_t, std::size_t> bridge_stop_calls;
@@ -1740,6 +1744,126 @@ void test_bridge_stop_pending_rejects_attach_then_restarts() {
     CHECK(owner.release() == DTV_L3_OK);
 }
 
+bool wait_for_snapshot(OwnerEngine &owner,
+                       const std::function<bool(const OwnerEngine::Snapshot &)> &test) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    OwnerEngine::Snapshot snapshot{};
+    do {
+        if (owner.close_status(&snapshot) != DTV_L3_OK) {
+            return false;
+        }
+        if (test(snapshot)) {
+            return true;
+        }
+        std::this_thread::yield();
+    } while (std::chrono::steady_clock::now() < deadline);
+    return false;
+}
+
+void test_wait_deadline_is_not_terminal_timeout() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 71);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload{1, 2, 3};
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    CHECK(owner.start(request_for(payload), &operation) == DTV_L3_ACCEPTED);
+    CHECK(owner.wait_operation(operation, 20) == DTV_L3_WAIT_TIMEOUT);
+    CHECK(operation->state == DTV_L3_OP_OPENING);
+    const auto binding = owner.binding();
+    CHECK(provider.fire(binding.get(), operation->id, DTV_L3_TIMEOUT));
+    CHECK(owner.wait_operation(operation, 2000) == DTV_L3_OK);
+    dtv_l3_op_state op_state = DTV_L3_OP_OPENING;
+    dtv_l3_result op_result = DTV_L3_ACCEPTED;
+    CHECK(owner.poll_result(operation, &op_state, &op_result, nullptr, nullptr) ==
+          DTV_L3_INVALID);
+    CHECK(operation->state == DTV_L3_OP_FAILED);
+    CHECK(operation->result == DTV_L3_TIMEOUT);
+    CHECK(op_state == DTV_L3_OP_OPENING);
+    CHECK(op_result == DTV_L3_ACCEPTED);
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_control_lane_self_exits_after_close_once() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 72);
+    owner.initialize_claims(0);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.control_lane == DTV_L3_LANE_EXITED &&
+               snapshot.live_lanes == 0;
+    }));
+    OwnerEngine::Snapshot snapshot{};
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(snapshot.physical_quiesced);
+    CHECK(snapshot.cleanup_complete);
+    CHECK(snapshot.all_ops_recovered);
+    CHECK(snapshot.releasable);
+    CHECK(snapshot.control_lane == DTV_L3_LANE_EXITED);
+    CHECK(owner.release() == DTV_L3_OK);
+    CHECK(owner.cleanup_count() == 1);
+}
+
+void test_blocking_claim_keeps_lanes_and_release_busy() {
+    ProviderMock provider;
+    auto barrier = std::make_shared<TestBarrier>();
+    provider.claim_barrier = barrier;
+    OwnerEngine owner(provider, 73);
+    owner.mark_open_lane_running();
+    std::thread opener([&] { owner.initialize_claims(1); });
+    barrier->wait_until_arrived();
+
+    CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+    OwnerEngine::Snapshot snapshot{};
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(snapshot.open_lane == DTV_L3_LANE_RUNNING);
+    CHECK(snapshot.control_lane == DTV_L3_LANE_RUNNING);
+    CHECK(snapshot.live_lanes == 2);
+    CHECK(!snapshot.releasable);
+    CHECK(owner.release() == DTV_L3_BUSY);
+
+    barrier->release();
+    opener.join();
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.physical_quiesced && snapshot.cleanup_complete &&
+               snapshot.control_lane == DTV_L3_LANE_EXITED;
+    }));
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(snapshot.releasable);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_callback_frame_close_does_not_wait() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 74);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload{1};
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    CHECK(owner.start(request_for(payload), &operation) == DTV_L3_ACCEPTED);
+    provider.cancel_completes_transfer = true;
+    dtv_l3_result inner_close = DTV_L3_FAILED;
+    dtv_l3_result inner_wait = DTV_L3_FAILED;
+    dtv_l3_result inner_release = DTV_L3_FAILED;
+    provider.on_cancel = [&] {
+        inner_close = owner.close(1000);
+        inner_wait = owner.wait_operation(operation, 1000);
+        inner_release = owner.release();
+    };
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(inner_close == DTV_L3_ACCEPTED);
+    CHECK(inner_wait == DTV_L3_CLOSING);
+    CHECK(inner_release == DTV_L3_BUSY);
+    CHECK(operation->state == DTV_L3_OP_FAILED);
+    CHECK(operation->result == DTV_L3_CANCELLED);
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.physical_quiesced && snapshot.cleanup_complete;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -1768,5 +1892,9 @@ int main() {
     test_failed_stream_stop_after_bridge_success_retains_sink();
     test_close_waits_for_tune();
     test_bridge_stop_pending_rejects_attach_then_restarts();
+    test_wait_deadline_is_not_terminal_timeout();
+    test_control_lane_self_exits_after_close_once();
+    test_blocking_claim_keeps_lanes_and_release_busy();
+    test_callback_frame_close_does_not_wait();
     return failures == 0 ? 0 : 1;
 }

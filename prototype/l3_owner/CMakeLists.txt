@@ -50,19 +50,29 @@ set_target_properties(l3_lease_stream_c PROPERTIES
     C_EXTENSIONS NO
 )
 
+add_executable(l3_waits_lanes_c tests/waits_lanes_contract.c)
+target_include_directories(l3_waits_lanes_c PRIVATE include)
+target_link_libraries(l3_waits_lanes_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_waits_lanes_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_waits_lanes_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
 add_executable(l3_header_cpp tests/header_cpp.cpp)
 target_include_directories(l3_header_cpp PRIVATE include)
 target_compile_features(l3_header_cpp PRIVATE cxx_std_17)
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 
 if(L3_OWNER_ENABLE_ASAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c)
         target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=address)
     endforeach()
@@ -90,4 +100,12 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_lease_stop_residual COMMAND l3_lease_stream_c residual)
     add_test(NAME l3_c_lease_close COMMAND l3_lease_stream_c close)
     add_test(NAME l3_c_lease_attach_abort COMMAND l3_lease_stream_c attach-abort)
+    add_test(NAME l3_c_wait_blocking_claim COMMAND l3_waits_lanes_c open-wait-close)
+    add_test(NAME l3_c_wait_close_once COMMAND l3_waits_lanes_c close-once)
+    add_test(NAME l3_c_wait_release_gate COMMAND l3_waits_lanes_c release-gate)
+    add_test(NAME l3_c_wait_close_poll COMMAND l3_waits_lanes_c close-poll)
+    add_test(NAME l3_c_wait_read_wait COMMAND l3_waits_lanes_c read-wait)
+    add_test(NAME l3_c_wait_startup_fail COMMAND l3_waits_lanes_c startup-fail)
+    add_test(NAME l3_c_wait_cancel_reentry COMMAND l3_waits_lanes_c cancel-reentry)
+    add_test(NAME l3_c_wait_cleanup_reentry COMMAND l3_waits_lanes_c cleanup-reentry)
 endif()

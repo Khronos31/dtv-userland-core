@@ -11,6 +11,8 @@
 
 namespace {
 
+constexpr int kTestOpenLaneBit = 1;
+
 class CProvider final : public l3_owner_prototype::Provider {
 public:
     explicit CProvider(const dtv_l3_provider &provider) : provider_(provider) {}
@@ -207,7 +209,12 @@ dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
         provider->cancel == nullptr) {
         return {DTV_L3_INVALID, nullptr, nullptr};
     }
-    auto *owner = new (std::nothrow) dtv_l3_context(*provider);
+    dtv_l3_context *owner = nullptr;
+    try {
+        owner = new (std::nothrow) dtv_l3_context(*provider);
+    } catch (...) {
+        owner = nullptr;
+    }
     if (owner == nullptr) {
         return {DTV_L3_FAILED, nullptr, nullptr};
     }
@@ -219,9 +226,16 @@ dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,
     op->owner = owner;
     op->kind = DTV_L3_OP_KIND_OPEN;
     owner->outstanding_ops.store(1);
+    if (l3_owner_prototype::test_lane_start_fails(kTestOpenLaneBit)) {
+        delete op;
+        delete owner;
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
     try {
+        owner->engine->mark_open_lane_running();
         owner->open_thread = std::thread([owner, claim_count] {
             owner->engine->initialize_claims(claim_count);
+            owner->engine->mark_open_lane_exited();
             owner->open_thread_done.store(true, std::memory_order_release);
         });
     } catch (...) {
@@ -290,7 +304,11 @@ dtv_l3_result dtv_l3_close_status_get(dtv_l3_context *owner,
     status->physical_quiesced = snapshot.physical_quiesced ? 1 : 0;
     status->all_ops_recovered = snapshot.all_ops_recovered ? 1 : 0;
     status->cleanup_complete = snapshot.cleanup_complete ? 1 : 0;
-    status->reserved = 0;
+    status->releasable =
+        snapshot.releasable && owner->outstanding_ops.load() == 0 ? 1 : 0;
+    status->open_lane = snapshot.open_lane;
+    status->control_lane = snapshot.control_lane;
+    status->live_lanes = snapshot.live_lanes;
     return DTV_L3_OK;
 }
 
@@ -301,6 +319,9 @@ dtv_l3_result dtv_l3_cleanup_retry(dtv_l3_context *owner) {
 dtv_l3_result dtv_l3_context_release(dtv_l3_context *owner) {
     if (owner == nullptr) {
         return DTV_L3_INVALID;
+    }
+    if (l3_owner_prototype::in_callback_frame()) {
+        return DTV_L3_BUSY;
     }
     if (owner->outstanding_ops.load() != 0) {
         return DTV_L3_BUSY;
@@ -390,6 +411,28 @@ dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_result *result) {
     return op->owner->engine->poll_result(op->operation, &result->state,
                                           &result->result, &result->data,
                                           &result->data_size);
+}
+
+dtv_l3_result dtv_l3_op_wait(dtv_l3_op *op, uint32_t timeout_ms) {
+    if (op == nullptr || op->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    if (op->kind == DTV_L3_OP_KIND_OPEN) {
+        dtv_l3_op_result result{};
+        const auto call_result = poll_open_op(op->owner, &result);
+        if (call_result != DTV_L3_OK) {
+            return call_result;
+        }
+        if (result.state != DTV_L3_OP_RUNNING) {
+            return DTV_L3_OK;
+        }
+        const auto wait_result = op->owner->engine->wait_open(timeout_ms);
+        if (wait_result == DTV_L3_OK) {
+            (void)poll_open_op(op->owner, &result);
+        }
+        return wait_result;
+    }
+    return op->owner->engine->wait_operation(op->operation, timeout_ms);
 }
 
 dtv_l3_result dtv_l3_op_release(dtv_l3_op *op) {
@@ -508,6 +551,20 @@ dtv_l3_result dtv_l3_stream_read_ts(dtv_l3_stream *stream,
                                               capacity_bytes, bytes_read, state);
 }
 
+dtv_l3_result dtv_l3_stream_read_ts_wait(dtv_l3_stream *stream,
+                                         uint8_t *buffer,
+                                         size_t capacity_bytes,
+                                         size_t *bytes_read,
+                                         dtv_l3_read_state *state,
+                                         uint32_t timeout_ms) {
+    if (stream == nullptr || stream->owner == nullptr) {
+        return DTV_L3_INVALID;
+    }
+    return stream->owner->engine->wait_read_stream(
+        stream->generation, buffer, capacity_bytes, bytes_read, state,
+        timeout_ms);
+}
+
 dtv_l3_result dtv_l3_stream_status_get(dtv_l3_stream *stream,
                                        dtv_l3_stream_status *status) {
     if (stream == nullptr || stream->owner == nullptr) {
@@ -554,6 +611,11 @@ dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
     (void)receiver_id;
     (void)mode;
     return owner == nullptr ? DTV_L3_INVALID : DTV_L3_UNSUPPORTED;
+}
+
+/* Prototype test seam; not part of the C contract. */
+void l3_test_set_lane_start_failure_mask(int mask) {
+    l3_owner_prototype::set_test_lane_start_failure_mask(mask);
 }
 
 }  // extern "C"

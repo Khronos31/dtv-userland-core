@@ -101,6 +101,10 @@ public:
         dtv_l3_result cleanup_result;
         dtv_l3_result last_cleanup_error;
         bool restoration_failed;
+        dtv_l3_lane_state open_lane;
+        dtv_l3_lane_state control_lane;
+        bool releasable;
+        std::uint32_t live_lanes;
     };
 
     enum class ClaimState { NotAttempted, InFlight, Ready, Retained, Unknown, Released };
@@ -165,11 +169,24 @@ public:
                               dtv_l3_result *result,
                               const std::uint8_t **data,
                               std::size_t *data_size);
+    dtv_l3_result wait_operation(const std::shared_ptr<Operation> &operation,
+                                 std::uint32_t timeout_ms);
+    dtv_l3_result wait_open(std::uint32_t timeout_ms);
+    dtv_l3_result wait_read_stream(
+        std::uint64_t generation,
+        std::uint8_t *buffer,
+        std::size_t capacity_bytes,
+        std::size_t *bytes_read,
+        dtv_l3_read_state *state,
+        std::uint32_t timeout_ms);
     dtv_l3_result release_operation(const std::shared_ptr<Operation> &operation);
     dtv_l3_result close(std::uint32_t timeout_ms);
     dtv_l3_result close_status(Snapshot *snapshot);
     dtv_l3_result read_ts(const std::function<void()> &after_borrow = {});
     dtv_l3_result release(const std::function<void()> &after_retire_gate = {});
+
+    void mark_open_lane_running();
+    void mark_open_lane_exited();
 
     std::shared_ptr<Binding> binding() const;
     std::size_t cleanup_count() const;
@@ -281,6 +298,9 @@ private:
                     bool before_submit);
     void run_cleanup();
     bool cleanup_claims_locked() const;
+    bool control_lane_may_exit_locked() const;
+    void maybe_commit_control_exit_locked();
+    bool lanes_exit_committed_locked() const;
     void worker_loop();
     void enqueue_locked(std::function<void()> work);
     bool all_ops_recovered_locked() const;
@@ -291,6 +311,9 @@ private:
     bool released_ = false;
     std::size_t active_borrows_ = 0;
     OpenState open_state_ = OpenState::Opening;
+    dtv_l3_lane_state open_lane_ = DTV_L3_LANE_NOT_SPAWNED;
+    dtv_l3_lane_state control_lane_ = DTV_L3_LANE_NOT_SPAWNED;
+    bool open_lane_spawned_ = false;
     InitializationPhase initialization_phase_ = InitializationPhase::NotStarted;
     bool close_requested_ = false;
     bool physical_quiesced_ = false;
@@ -337,6 +360,21 @@ private:
     bool arrived_ = false;
     bool released_ = false;
 };
+
+/* Marks a library-called provider/host callback frame on the current thread. */
+bool in_callback_frame();
+
+class CallbackFrame {
+public:
+    CallbackFrame();
+    ~CallbackFrame();
+    CallbackFrame(const CallbackFrame &) = delete;
+    CallbackFrame &operator=(const CallbackFrame &) = delete;
+};
+
+/* Prototype test seam; not part of the C contract. Lane 1 is open, 2 control. */
+void set_test_lane_start_failure_mask(int mask);
+bool test_lane_start_fails(int lane_mask_bit);
 
 }  // namespace l3_owner_prototype
 

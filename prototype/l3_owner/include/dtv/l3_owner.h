@@ -26,8 +26,13 @@ typedef enum dtv_l3_result {
     DTV_L3_UNSUPPORTED = 5,
     DTV_L3_INVALID = 6,
     DTV_L3_FAILED = 7,
-    DTV_L3_STALE = 8
+    DTV_L3_STALE = 8,
+    DTV_L3_WAIT_TIMEOUT = 9,
+    DTV_L3_CLOSING = 10
 } dtv_l3_result;
+
+/* A wait deadline of zero observes immediately; this value waits indefinitely. */
+#define DTV_L3_WAIT_FOREVER 0xffffffffu
 
 typedef enum dtv_l3_op_state {
     DTV_L3_OP_OPENING = 0,
@@ -71,6 +76,14 @@ typedef enum dtv_l3_open_state {
     DTV_L3_OPEN_CLOSING = 3,
     DTV_L3_OPEN_CLOSED = 4
 } dtv_l3_open_state;
+
+/* EXITED means the lane function returned; join still happens in context_release. */
+typedef enum dtv_l3_lane_state {
+    DTV_L3_LANE_NOT_SPAWNED = 0,
+    DTV_L3_LANE_RUNNING = 1,
+    DTV_L3_LANE_EXIT_COMMITTED = 2,
+    DTV_L3_LANE_EXITED = 3
+} dtv_l3_lane_state;
 
 typedef struct dtv_l3_transfer_request {
     uint32_t kind;
@@ -252,7 +265,10 @@ typedef struct dtv_l3_close_status {
     uint8_t physical_quiesced;
     uint8_t all_ops_recovered;
     uint8_t cleanup_complete;
-    uint8_t reserved;
+    uint8_t releasable;
+    dtv_l3_lane_state open_lane;
+    dtv_l3_lane_state control_lane;
+    uint32_t live_lanes;
 } dtv_l3_close_status;
 
 typedef struct dtv_l3_op_result {
@@ -299,7 +315,9 @@ dtv_l3_result dtv_l3_open_status_get(
     dtv_l3_context *owner,
     dtv_l3_open_status *status);
 
-/* A timeout is an observation; it does not release owner or transfer storage. */
+/* A timeout is an observation; it does not release owner or transfer storage.
+ * Close never joins a lane. Inside a provider/host callback frame it does not
+ * wait and returns OK when already settled or ACCEPTED otherwise. */
 dtv_l3_result dtv_l3_close(dtv_l3_context *owner, uint32_t timeout_ms);
 dtv_l3_result dtv_l3_close_status_get(
     dtv_l3_context *owner,
@@ -321,6 +339,14 @@ dtv_l3_result dtv_l3_transfer_start(
 dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op);
 /* Transfer result data remains valid until this operation handle is released. */
 dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_result *result);
+/*
+ * Waits only for the operation state; it never runs provider work. OK means the
+ * operation reached a terminal state, which op_poll reports. DTV_L3_WAIT_TIMEOUT
+ * is only the wait deadline and is not the operation's terminal TIMEOUT.
+ * DTV_L3_CLOSING means the owner is closing. BUSY is returned inside a callback
+ * frame, where the call observes without waiting.
+ */
+dtv_l3_result dtv_l3_op_wait(dtv_l3_op *op, uint32_t timeout_ms);
 dtv_l3_result dtv_l3_op_release(dtv_l3_op *op);
 
 /*
@@ -350,6 +376,17 @@ dtv_l3_result dtv_l3_stream_read_ts(dtv_l3_stream *stream,
                                     size_t capacity_bytes,
                                     size_t *bytes_read,
                                     dtv_l3_read_state *state);
+/*
+ * Waits for data, EOF, or a terminal stream state without running provider
+ * work. DTV_L3_WAIT_TIMEOUT leaves the stream active with state WAIT.
+ * DTV_L3_CLOSING is a close observation and does not consume unread data.
+ */
+dtv_l3_result dtv_l3_stream_read_ts_wait(dtv_l3_stream *stream,
+                                         uint8_t *buffer,
+                                         size_t capacity_bytes,
+                                         size_t *bytes_read,
+                                         dtv_l3_read_state *state,
+                                         uint32_t timeout_ms);
 dtv_l3_result dtv_l3_stream_status_get(dtv_l3_stream *stream,
                                        dtv_l3_stream_status *status);
 /* DRAINED is BUSY until EOF is observed; DISCARD_UNREAD retires explicitly. */

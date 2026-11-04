@@ -2,6 +2,7 @@
 #include "owner_engine.h"
 
 #include <algorithm>
+#include <atomic>
 #include <chrono>
 #include <cstring>
 
@@ -10,11 +11,35 @@ namespace l3_owner_prototype {
 namespace {
 // Prototype candidate; queue capacity is not a frozen product value.
 constexpr std::size_t kQueueCapacityPackets = 4;
+constexpr int kOpenLaneMask = 1;
+constexpr int kControlLaneMask = 2;
+
+thread_local int callback_frame_depth = 0;
+std::atomic<int> lane_start_failure_mask{0};
+
+std::chrono::milliseconds wait_duration(std::uint32_t timeout_ms) {
+    return std::chrono::milliseconds(timeout_ms);
+}
+
+struct LaneStartFailure {};
 }  // namespace
 
 OwnerEngine::OwnerEngine(Provider &provider, std::uint64_t binding_value)
-    : provider_(provider), binding_(std::make_shared<Binding>(binding_value)),
-      worker_([this] { worker_loop(); }) {}
+    : provider_(provider), binding_(std::make_shared<Binding>(binding_value)) {
+    if (test_lane_start_fails(kControlLaneMask)) {
+        throw LaneStartFailure{};
+    }
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        control_lane_ = DTV_L3_LANE_RUNNING;
+    }
+    worker_ = std::thread([this] {
+        worker_loop();
+        std::lock_guard<std::mutex> lock(mutex_);
+        control_lane_ = DTV_L3_LANE_EXITED;
+        state_condition_.notify_all();
+    });
+}
 
 OwnerEngine::~OwnerEngine() {
     {
@@ -74,6 +99,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             binding = binding_;
         }
 
+        CallbackFrame frame;
         const auto claim = provider_.claim(binding.get(), index);
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -135,8 +161,23 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         initialization_phase_ = InitializationPhase::Returned;
+        open_lane_ = DTV_L3_LANE_EXIT_COMMITTED;
+        maybe_commit_control_exit_locked();
         state_condition_.notify_all();
+        work_condition_.notify_all();
     }
+}
+
+void OwnerEngine::mark_open_lane_running() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_lane_spawned_ = true;
+    open_lane_ = DTV_L3_LANE_RUNNING;
+}
+
+void OwnerEngine::mark_open_lane_exited() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    open_lane_ = DTV_L3_LANE_EXITED;
+    state_condition_.notify_all();
 }
 
 dtv_l3_result OwnerEngine::start(
@@ -1108,6 +1149,7 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
         return;
     }
 
+    CallbackFrame frame;
     const auto stop_result = provider_.stream_stop(generation);
     bool need_bridge_stop = false;
     {
@@ -1145,6 +1187,7 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
     }
 
     if (need_bridge_stop) {
+        CallbackFrame frame;
         const auto bridge_result = provider_.bridge_stop(bridge_id);
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
@@ -1287,6 +1330,190 @@ dtv_l3_result OwnerEngine::poll_result(
     return DTV_L3_OK;
 }
 
+dtv_l3_result OwnerEngine::wait_operation(
+    const std::shared_ptr<Operation> &operation,
+    std::uint32_t timeout_ms) {
+    if (!operation) {
+        return DTV_L3_INVALID;
+    }
+    const bool nonblocking = in_callback_frame();
+    Borrow borrow(*this);
+    if (!borrow) {
+        return DTV_L3_BUSY;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto found = operations_.find(operation->id);
+    if (found == operations_.end() || found->second != operation) {
+        return DTV_L3_INVALID;
+    }
+    const auto terminal = [&operation] {
+        return operation->state == DTV_L3_OP_DONE ||
+               operation->state == DTV_L3_OP_FAILED;
+    };
+    const auto ready = [this, &terminal] {
+        return terminal() || close_requested_;
+    };
+    if (nonblocking) {
+        if (terminal()) {
+            return DTV_L3_OK;
+        }
+        return close_requested_ ? DTV_L3_CLOSING : DTV_L3_BUSY;
+    }
+    if (!ready()) {
+        if (timeout_ms == DTV_L3_WAIT_FOREVER) {
+            state_condition_.wait(lock, ready);
+        } else {
+            state_condition_.wait_for(lock, wait_duration(timeout_ms), ready);
+        }
+    }
+    if (terminal()) {
+        return DTV_L3_OK;
+    }
+    return close_requested_ ? DTV_L3_CLOSING : DTV_L3_WAIT_TIMEOUT;
+}
+
+dtv_l3_result OwnerEngine::wait_open(std::uint32_t timeout_ms) {
+    const bool nonblocking = in_callback_frame();
+    Borrow borrow(*this);
+    if (!borrow) {
+        return DTV_L3_BUSY;
+    }
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto terminal = [this] {
+        return open_state_ == OpenState::Ready ||
+               open_state_ == OpenState::Failed ||
+               open_state_ == OpenState::Closed;
+    };
+    const auto ready = [this, &terminal] {
+        return terminal() || close_requested_;
+    };
+    if (nonblocking) {
+        if (terminal()) {
+            return DTV_L3_OK;
+        }
+        return close_requested_ ? DTV_L3_CLOSING : DTV_L3_BUSY;
+    }
+    if (!ready()) {
+        if (timeout_ms == DTV_L3_WAIT_FOREVER) {
+            state_condition_.wait(lock, ready);
+        } else {
+            state_condition_.wait_for(lock, wait_duration(timeout_ms), ready);
+        }
+    }
+    if (terminal()) {
+        return DTV_L3_OK;
+    }
+    return close_requested_ ? DTV_L3_CLOSING : DTV_L3_WAIT_TIMEOUT;
+}
+
+dtv_l3_result OwnerEngine::wait_read_stream(
+    std::uint64_t generation,
+    std::uint8_t *buffer,
+    std::size_t capacity_bytes,
+    std::size_t *bytes_read,
+    dtv_l3_read_state *state,
+    std::uint32_t timeout_ms) {
+    if (bytes_read == nullptr || state == nullptr ||
+        (capacity_bytes != 0 && buffer == nullptr) ||
+        capacity_bytes % 188 != 0) {
+        return DTV_L3_INVALID;
+    }
+    if (in_callback_frame()) {
+        return DTV_L3_BUSY;
+    }
+    Borrow borrow(*this);
+    if (!borrow) {
+        return DTV_L3_BUSY;
+    }
+
+    std::shared_ptr<StreamRecord> stream;
+    std::unique_lock<std::mutex> lock(mutex_);
+    const auto found = streams_.find(generation);
+    if (found == streams_.end() ||
+        found->second->phase == DTV_L3_STREAM_RETIRED) {
+        return DTV_L3_STALE;
+    }
+    stream = found->second;
+    if (close_requested_) {
+        return DTV_L3_CLOSING;
+    }
+    if (stream->phase != DTV_L3_STREAM_ACTIVE &&
+        stream->phase != DTV_L3_STREAM_DRAINING) {
+        return DTV_L3_STALE;
+    }
+    const auto readable = [this, &stream] {
+        return !stream->queue.empty() || stream->eof_pending ||
+               stream->retire_requested || close_requested_ ||
+               stream->phase == DTV_L3_STREAM_RETIRING ||
+               stream->phase == DTV_L3_STREAM_RETIRED;
+    };
+    const bool data_ready = !stream->queue.empty();
+    const bool eof_ready = stream->eof_pending && stream->queue.empty();
+    if (!data_ready && !eof_ready) {
+        ++stream->read_borrows;
+        if (timeout_ms == DTV_L3_WAIT_FOREVER) {
+            state_condition_.wait(lock, readable);
+        } else {
+            state_condition_.wait_for(lock, wait_duration(timeout_ms),
+                                      readable);
+        }
+        if (stream->read_borrows > 0) {
+            --stream->read_borrows;
+        }
+    }
+
+    const bool finalized = [this, &stream, generation] {
+        if (stream->retire_requested && stream->read_borrows == 0) {
+            finalize_retire_locked(generation);
+            return true;
+        }
+        return false;
+    }();
+
+    if (close_requested_) {
+        *bytes_read = 0;
+        *state = DTV_L3_READ_WAIT;
+        lock.unlock();
+        if (finalized) {
+            finish_close();
+        }
+        return DTV_L3_CLOSING;
+    }
+    if (stream->phase == DTV_L3_STREAM_RETIRING ||
+        stream->phase == DTV_L3_STREAM_RETIRED) {
+        *bytes_read = 0;
+        *state = DTV_L3_READ_WAIT;
+        lock.unlock();
+        if (finalized) {
+            finish_close();
+        }
+        return DTV_L3_STALE;
+    }
+
+    std::size_t packets = 0;
+    const std::size_t limit = capacity_bytes / 188;
+    while (packets < limit && !stream->queue.empty()) {
+        std::memcpy(buffer + packets * 188, stream->queue.front().data(), 188);
+        stream->queue.pop_front();
+        ++packets;
+    }
+    *bytes_read = packets * 188;
+    if (packets != 0) {
+        *state = DTV_L3_READ_DATA;
+    } else if (stream->eof_pending) {
+        stream->eof_observed = true;
+        *state = DTV_L3_READ_EOF;
+    } else {
+        *state = DTV_L3_READ_WAIT;
+    }
+    state_condition_.notify_all();
+    lock.unlock();
+    if (finalized) {
+        finish_close();
+    }
+    return *state == DTV_L3_READ_WAIT ? DTV_L3_WAIT_TIMEOUT : DTV_L3_OK;
+}
+
 dtv_l3_result OwnerEngine::release_operation(
     const std::shared_ptr<Operation> &operation) {
     if (!operation) {
@@ -1319,6 +1546,7 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
     if (!borrow) {
         return DTV_L3_BUSY;
     }
+    const bool nonblocking = in_callback_frame();
 
     std::vector<std::shared_ptr<Operation>> pending;
     std::vector<std::uint64_t> stop_streams;
@@ -1372,17 +1600,29 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
                 retire_stream_for_close(generation);
             });
         }
+        state_condition_.notify_all();
+        work_condition_.notify_all();
     }
 
     finish_close();
 
     std::unique_lock<std::mutex> lock(mutex_);
-    if (timeout_ms != 0 &&
+    if (nonblocking) {
+        return physical_quiesced_ && physical_settled_locked()
+                   ? DTV_L3_OK
+                   : DTV_L3_ACCEPTED;
+    }
+    if (timeout_ms != DTV_L3_WAIT_FOREVER && timeout_ms != 0 &&
         !(physical_quiesced_ && physical_settled_locked())) {
         state_condition_.wait_for(
-            lock, std::chrono::milliseconds(timeout_ms), [this] {
+            lock, wait_duration(timeout_ms), [this] {
                 return physical_quiesced_ && physical_settled_locked();
             });
+    } else if (timeout_ms == DTV_L3_WAIT_FOREVER &&
+               !(physical_quiesced_ && physical_settled_locked())) {
+        state_condition_.wait(lock, [this] {
+            return physical_quiesced_ && physical_settled_locked();
+        });
     }
     return physical_quiesced_ && physical_settled_locked() ? DTV_L3_OK
                                                            : DTV_L3_TIMEOUT;
@@ -1418,14 +1658,29 @@ dtv_l3_result OwnerEngine::close_status(Snapshot *snapshot) {
     snapshot->open_result = open_result_;
     snapshot->cleanup_result = last_cleanup_error_;
     snapshot->restoration_failed = restoration_failed_;
+    snapshot->open_lane = open_lane_;
+    snapshot->control_lane = control_lane_;
+    const auto open_lane_live =
+        open_lane_spawned_ &&
+        (open_lane_ == DTV_L3_LANE_RUNNING ||
+         open_lane_ == DTV_L3_LANE_EXIT_COMMITTED);
+    snapshot->live_lanes =
+        (open_lane_live ? 1u : 0u) +
+        (control_lane_ == DTV_L3_LANE_RUNNING ||
+         control_lane_ == DTV_L3_LANE_EXIT_COMMITTED ? 1u : 0u);
+    snapshot->releasable =
+        physical_quiesced_ && cleanup_complete_ && all_ops_recovered_locked() &&
+        lanes_exit_committed_locked() && provider_calls_in_flight_ == 0 &&
+        work_queue_.empty();
     return DTV_L3_OK;
 }
 
 dtv_l3_result OwnerEngine::retry_cleanup() {
     std::unique_lock<std::mutex> lock(mutex_);
-    if (!close_requested_ || cleanup_started_ || !cleanup_attempted_ ||
-        provider_calls_in_flight_ != 0 || claim_in_flight_ ||
-        !operations_.empty() || !physical_settled_locked()) {
+    if (retired_gate_ || released_ || !close_requested_ || cleanup_started_ ||
+        !cleanup_attempted_ || provider_calls_in_flight_ != 0 ||
+        claim_in_flight_ || !operations_.empty() ||
+        !physical_settled_locked()) {
         return DTV_L3_BUSY;
     }
     if (std::find(claims_.begin(), claims_.end(), ClaimState::Unknown) !=
@@ -1466,15 +1721,19 @@ dtv_l3_result OwnerEngine::read_ts(const std::function<void()> &after_borrow) {
 
 dtv_l3_result OwnerEngine::release(
     const std::function<void()> &after_retire_gate) {
+    std::uint64_t epoch = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (released_) {
             return DTV_L3_INVALID;
         }
+        maybe_commit_control_exit_locked();
         if (!physical_quiesced_ || !all_ops_recovered_locked() ||
-            !cleanup_complete_ || !streams_.empty() || !leases_.empty()) {
+            !cleanup_complete_ || !streams_.empty() || !leases_.empty() ||
+            !lanes_exit_committed_locked()) {
             return DTV_L3_BUSY;
         }
+        epoch = cleanup_epoch_;
         retired_gate_ = true;
     }
 
@@ -1483,7 +1742,10 @@ dtv_l3_result OwnerEngine::release(
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
-    if (active_borrows_ != 0) {
+    if (active_borrows_ != 0 || cleanup_epoch_ != epoch ||
+        !physical_quiesced_ || !cleanup_complete_ ||
+        !all_ops_recovered_locked() || !streams_.empty() ||
+        !leases_.empty() || !lanes_exit_committed_locked()) {
         return DTV_L3_BUSY;
     }
     released_ = true;
@@ -1537,6 +1799,7 @@ void OwnerEngine::completion_thunk(
         return;
     }
     auto *operation = static_cast<Operation *>(callback_context);
+    CallbackFrame frame;
     operation->owner->on_completion(binding, id, *completion, operation);
 }
 
@@ -1614,6 +1877,7 @@ void OwnerEngine::queue_cancel_locked(
 
 void OwnerEngine::run_cancel(const std::shared_ptr<Operation> &operation,
                              bool before_submit) {
+    CallbackFrame frame;
     const auto result = provider_.cancel(operation->binding.get(), operation->id);
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1645,6 +1909,7 @@ void OwnerEngine::run_cleanup() {
 
     for (auto index = release_indices.rbegin(); index != release_indices.rend();
          ++index) {
+        CallbackFrame frame;
         const auto result = provider_.release_claim(binding.get(), *index);
         std::lock_guard<std::mutex> lock(mutex_);
         claim_quiesced_[*index] =
@@ -1686,7 +1951,9 @@ void OwnerEngine::run_cleanup() {
             open_state_ = OpenState::Closed;
         }
         cleanup_started_ = false;
+        maybe_commit_control_exit_locked();
         state_condition_.notify_all();
+        work_condition_.notify_all();
     }
 }
 
@@ -1703,10 +1970,18 @@ void OwnerEngine::worker_loop() {
         {
             std::unique_lock<std::mutex> lock(mutex_);
             work_condition_.wait(lock, [this] {
-                return worker_stopping_ || !work_queue_.empty();
+                return worker_stopping_ || !work_queue_.empty() ||
+                       control_lane_may_exit_locked();
             });
-            if (work_queue_.empty() && worker_stopping_) {
-                return;
+            if (work_queue_.empty()) {
+                if (worker_stopping_) {
+                    return;
+                }
+                if (control_lane_may_exit_locked()) {
+                    control_lane_ = DTV_L3_LANE_EXIT_COMMITTED;
+                    state_condition_.notify_all();
+                    return;
+                }
             }
             work = std::move(work_queue_.front());
             work_queue_.pop_front();
@@ -1718,6 +1993,42 @@ void OwnerEngine::worker_loop() {
 void OwnerEngine::enqueue_locked(std::function<void()> work) {
     work_queue_.push_back(std::move(work));
     work_condition_.notify_one();
+}
+
+bool OwnerEngine::control_lane_may_exit_locked() const {
+    if (!close_requested_ || !cleanup_complete_ || !physical_quiesced_ ||
+        provider_calls_in_flight_ != 0 || !work_queue_.empty() ||
+        initialization_phase_ != InitializationPhase::Returned) {
+        return false;
+    }
+    return std::none_of(operations_.begin(), operations_.end(),
+                        [](const auto &entry) {
+                            return entry.second->state == DTV_L3_OP_OPENING ||
+                                   entry.second->state == DTV_L3_OP_RUNNING;
+                        });
+}
+
+void OwnerEngine::maybe_commit_control_exit_locked() {
+    if (control_lane_ == DTV_L3_LANE_NOT_SPAWNED ||
+        control_lane_ == DTV_L3_LANE_EXITED) {
+        return;
+    }
+    if (control_lane_may_exit_locked()) {
+        control_lane_ = DTV_L3_LANE_EXIT_COMMITTED;
+        work_condition_.notify_all();
+    }
+}
+
+bool OwnerEngine::lanes_exit_committed_locked() const {
+    const auto open_lane_ok =
+        open_lane_ == DTV_L3_LANE_NOT_SPAWNED ||
+        open_lane_ == DTV_L3_LANE_EXIT_COMMITTED ||
+        open_lane_ == DTV_L3_LANE_EXITED;
+    const auto control_lane_ok =
+        control_lane_ == DTV_L3_LANE_NOT_SPAWNED ||
+        control_lane_ == DTV_L3_LANE_EXIT_COMMITTED ||
+        control_lane_ == DTV_L3_LANE_EXITED;
+    return open_lane_ok && control_lane_ok;
 }
 
 bool OwnerEngine::all_ops_recovered_locked() const {
@@ -1761,6 +2072,27 @@ void TestBarrier::release() {
     std::lock_guard<std::mutex> lock(mutex_);
     released_ = true;
     condition_.notify_all();
+}
+
+bool in_callback_frame() {
+    return callback_frame_depth > 0;
+}
+
+CallbackFrame::CallbackFrame() {
+    ++callback_frame_depth;
+}
+
+CallbackFrame::~CallbackFrame() {
+    --callback_frame_depth;
+}
+
+void set_test_lane_start_failure_mask(int mask) {
+    lane_start_failure_mask.store(mask, std::memory_order_release);
+}
+
+bool test_lane_start_fails(int lane_mask_bit) {
+    return (lane_start_failure_mask.load(std::memory_order_acquire) &
+            lane_mask_bit) != 0;
 }
 
 }  // namespace l3_owner_prototype
