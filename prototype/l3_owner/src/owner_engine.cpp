@@ -1612,17 +1612,12 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
                    ? DTV_L3_OK
                    : DTV_L3_ACCEPTED;
     }
-    if (timeout_ms != DTV_L3_WAIT_FOREVER && timeout_ms != 0 &&
+    if (timeout_ms != 0 &&
         !(physical_quiesced_ && physical_settled_locked())) {
         state_condition_.wait_for(
             lock, wait_duration(timeout_ms), [this] {
                 return physical_quiesced_ && physical_settled_locked();
             });
-    } else if (timeout_ms == DTV_L3_WAIT_FOREVER &&
-               !(physical_quiesced_ && physical_settled_locked())) {
-        state_condition_.wait(lock, [this] {
-            return physical_quiesced_ && physical_settled_locked();
-        });
     }
     return physical_quiesced_ && physical_settled_locked() ? DTV_L3_OK
                                                            : DTV_L3_TIMEOUT;
