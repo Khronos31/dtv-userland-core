@@ -192,7 +192,9 @@ private:
     struct BridgeRecord {
         std::size_t users = 0;
         bool running = false;
+        std::size_t pending_attaches = 0;
         bool start_pending = false;
+        bool stop_pending = false;
         bool stop_residual = false;
         std::uint64_t start_count = 0;
         std::uint64_t stop_count = 0;
@@ -229,6 +231,8 @@ private:
         dtv_l3_stream_release_mode retire_mode =
             DTV_L3_STREAM_RELEASE_DRAINED;
         bool stopping = false;
+        bool attaching = false;
+        bool user_counted = false;
         bool close_retire = false;
         std::shared_ptr<StreamSink> sink;
     };
@@ -262,6 +266,7 @@ private:
                        const dtv_l3_transfer_completion &completion,
                        Operation *operation);
     bool active_streams_locked() const;
+    bool physical_settled_locked() const;
     void finish_close();
     void on_ts_deliver(std::uint64_t generation,
                        const std::uint8_t *data,

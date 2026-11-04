@@ -240,8 +240,9 @@ dtv_l3_result OwnerEngine::acquire_lease(std::uint32_t receiver_id,
         if (entry.second.receiver_id == receiver_id) {
             return DTV_L3_BUSY;
         }
-        if (scope.compatibility == DTV_L3_LEASE_EXCLUSIVE &&
-            entry.second.bridge_id == scope.bridge_id) {
+        if (entry.second.bridge_id == scope.bridge_id &&
+            (scope.compatibility == DTV_L3_LEASE_EXCLUSIVE ||
+             entry.second.compatibility == DTV_L3_LEASE_EXCLUSIVE)) {
             return DTV_L3_BUSY;
         }
     }
@@ -284,30 +285,41 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
             return DTV_L3_BUSY;
         }
         receiver_id = found->second.receiver_id;
+        ++provider_calls_in_flight_;
     }
 
     std::uint64_t programmed = requested_hz;
     const auto tune_result =
         provider_.tune(receiver_id, requested_hz, &programmed);
-    if (tune_result != DTV_L3_OK) {
-        return tune_result;
-    }
 
-    std::lock_guard<std::mutex> lock(mutex_);
-    const auto found = leases_.find(lease_id);
-    if (found == leases_.end()) {
-        return DTV_L3_STALE;
+    dtv_l3_result result = DTV_L3_OK;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        state_condition_.notify_all();
+        if (close_requested_) {
+            result = DTV_L3_BUSY;
+        } else if (tune_result != DTV_L3_OK) {
+            result = tune_result;
+        } else {
+            const auto found = leases_.find(lease_id);
+            if (found == leases_.end()) {
+                result = DTV_L3_STALE;
+            } else if (found->second.active_stream != 0 ||
+                       found->second.stop_residual) {
+                result = DTV_L3_BUSY;
+            } else {
+                ++found->second.tune_revision;
+                found->second.state = DTV_L3_LEASE_TUNED;
+                found->second.requested_hz = requested_hz;
+                found->second.programmed_hz = programmed;
+                *programmed_hz = programmed;
+                *tune_revision = found->second.tune_revision;
+            }
+        }
     }
-    if (found->second.active_stream != 0 || found->second.stop_residual) {
-        return DTV_L3_BUSY;
-    }
-    ++found->second.tune_revision;
-    found->second.state = DTV_L3_LEASE_TUNED;
-    found->second.requested_hz = requested_hz;
-    found->second.programmed_hz = programmed;
-    *programmed_hz = programmed;
-    *tune_revision = found->second.tune_revision;
-    return DTV_L3_OK;
+    finish_close();
+    return result;
 }
 
 dtv_l3_result OwnerEngine::start_lease(std::uint32_t lease_id) {
@@ -346,6 +358,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
     std::uint32_t receiver_id = 0;
     std::uint64_t generation = 0;
     bool need_start = false;
+    bool start_aborted = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = leases_.find(lease_id);
@@ -361,13 +374,14 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             return DTV_L3_BUSY;
         }
         auto &bridge = bridges_[found->second.bridge_id];
-        if (bridge.start_pending) {
+        if (bridge.start_pending || bridge.stop_pending) {
             return DTV_L3_BUSY;
         }
-        if (!bridge.running && bridge.users == 0) {
+        if (!bridge.running) {
             bridge.start_pending = true;
             need_start = true;
         }
+        ++bridge.pending_attaches;
         bridge_id = found->second.bridge_id;
         receiver_id = found->second.receiver_id;
         generation = next_stream_generation_++;
@@ -378,6 +392,7 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         stream->bridge_id = bridge_id;
         stream->tune_revision = found->second.tune_revision;
         stream->phase = DTV_L3_STREAM_ACTIVE;
+        stream->attaching = true;
         stream->sink = std::make_shared<StreamSink>();
         stream->sink->owner = this;
         stream->sink->generation = generation;
@@ -388,73 +403,142 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
     }
 
     if (need_start) {
-        const auto start_result = provider_.bridge_start(bridge_id, receiver_id);
         {
             std::lock_guard<std::mutex> lock(mutex_);
+            ++provider_calls_in_flight_;
+        }
+        const auto start_result = provider_.bridge_start(bridge_id, receiver_id);
+        bool start_ok = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
             auto &bridge = bridges_[bridge_id];
             bridge.start_pending = false;
-            if (start_result == DTV_L3_OK) {
+            start_ok = start_result == DTV_L3_OK;
+            if (start_ok) {
                 bridge.running = true;
                 ++bridge.start_count;
+                start_aborted = close_requested_;
             } else {
-                bridge.stop_residual = true;
-            }
-        }
-        if (start_result != DTV_L3_OK) {
-            std::lock_guard<std::mutex> lock(mutex_);
-            streams_.erase(generation);
-            const auto found = leases_.find(lease_id);
-            if (found != leases_.end()) {
-                found->second.active_stream = 0;
-                found->second.stop_residual = true;
-                found->second.state = DTV_L3_LEASE_RETAINED;
+                --bridge.pending_attaches;
+                streams_.erase(generation);
+                const auto found = leases_.find(lease_id);
+                if (found != leases_.end()) {
+                    found->second.active_stream = 0;
+                    found->second.stop_residual = true;
+                    found->second.state = DTV_L3_LEASE_RETAINED;
+                }
             }
             state_condition_.notify_all();
+        }
+        if (!start_ok) {
+            finish_close();
             return start_result;
         }
     }
 
-    const auto attach_result = provider_.stream_attach(
-        generation, &StreamSink::deliver, stream->sink.get());
-    if (attach_result != DTV_L3_OK) {
-        bool stop_ok = true;
-        bool stop_bridge = false;
-        if (need_start) {
+    dtv_l3_result attach_result = DTV_L3_BUSY;
+    bool abort = false;
+    if (start_aborted) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        stream->attaching = false;
+        abort = true;
+        state_condition_.notify_all();
+    } else {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++provider_calls_in_flight_;
+        }
+        attach_result = provider_.stream_attach(
+            generation, &StreamSink::deliver, stream->sink.get());
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        stream->attaching = false;
+        abort = attach_result != DTV_L3_OK || close_requested_;
+        state_condition_.notify_all();
+    }
+    if (abort) {
+        const bool attached = attach_result == DTV_L3_OK;
+        if (attached) {
             {
                 std::lock_guard<std::mutex> lock(mutex_);
-                stop_bridge = bridges_[bridge_id].users == 0;
+                ++provider_calls_in_flight_;
             }
-            if (stop_bridge) {
-                const auto stop_result = provider_.bridge_stop(bridge_id);
-                stop_ok = stop_result == DTV_L3_OK;
+            (void)provider_.stream_stop(generation);
+            {
                 std::lock_guard<std::mutex> lock(mutex_);
-                auto &bridge = bridges_[bridge_id];
-                if (stop_ok) {
-                    bridge.running = false;
-                    ++bridge.stop_count;
+                --provider_calls_in_flight_;
+                state_condition_.notify_all();
+            }
+        }
+
+        bool stop_bridge = false;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &bridge = bridges_[bridge_id];
+            if (bridge.users == 0 && bridge.pending_attaches <= 1 &&
+                bridge.running && !bridge.stop_pending) {
+                bridge.stop_pending = true;
+                stop_bridge = true;
+                ++provider_calls_in_flight_;
+            }
+        }
+        dtv_l3_result bridge_result = DTV_L3_OK;
+        if (stop_bridge) {
+            bridge_result = provider_.bridge_stop(bridge_id);
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            auto &bridge = bridges_[bridge_id];
+            bridge.stop_pending = false;
+            if (bridge_result == DTV_L3_OK) {
+                bridge.running = false;
+                bridge.stop_residual = false;
+                ++bridge.stop_count;
+            } else {
+                bridge.running = true;
+                bridge.stop_residual = true;
+            }
+            state_condition_.notify_all();
+        }
+
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            auto &bridge = bridges_[bridge_id];
+            if (bridge.pending_attaches > 0) {
+                --bridge.pending_attaches;
+            }
+            streams_.erase(generation);
+            const auto found = leases_.find(lease_id);
+            if (found != leases_.end() &&
+                found->second.active_stream == generation) {
+                found->second.active_stream = 0;
+                if (bridge_result != DTV_L3_OK) {
+                    found->second.stop_residual = true;
+                    found->second.state = DTV_L3_LEASE_RETAINED;
+                } else if (need_start && bridge.stop_residual) {
+                    found->second.stop_residual = true;
+                    found->second.state = DTV_L3_LEASE_RETAINED;
                 } else {
-                    bridge.running = true;
-                    bridge.stop_residual = true;
+                    found->second.state = DTV_L3_LEASE_FREE;
                 }
             }
+            state_condition_.notify_all();
         }
-        std::lock_guard<std::mutex> lock(mutex_);
-        streams_.erase(generation);
-        const auto found = leases_.find(lease_id);
-        if (found != leases_.end() &&
-            found->second.active_stream == generation) {
-            found->second.active_stream = 0;
-            found->second.stop_residual = !stop_ok;
-            found->second.state = stop_ok ? DTV_L3_LEASE_FREE
-                                          : DTV_L3_LEASE_RETAINED;
+        finish_close();
+        if (attach_result != DTV_L3_OK) {
+            return attach_result;
         }
-        state_condition_.notify_all();
-        return attach_result;
+        return DTV_L3_BUSY;
     }
 
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        ++bridges_[bridge_id].users;
+        auto &bridge = bridges_[bridge_id];
+        if (bridge.pending_attaches > 0) {
+            --bridge.pending_attaches;
+        }
+        ++bridge.users;
+        stream->user_counted = true;
         state_condition_.notify_all();
     }
     *stream_generation = generation;
@@ -478,6 +562,9 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
             return DTV_L3_STALE;
         }
         stream = found->second;
+        if (stream->attaching) {
+            return DTV_L3_BUSY;
+        }
         if (stream->phase != DTV_L3_STREAM_ACTIVE) {
             return DTV_L3_OK;
         }
@@ -486,6 +573,7 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
         }
         stream->stopping = true;
         bridge_id = stream->bridge_id;
+        ++provider_calls_in_flight_;
     }
 
     const auto stop_result = provider_.stream_stop(generation);
@@ -493,23 +581,40 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
     dtv_l3_result bridge_result = DTV_L3_OK;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
         stream->stopping = false;
-        stream->phase = DTV_L3_STREAM_DRAINING;
-        if (stop_result != DTV_L3_OK) {
+        if (stream->user_counted) {
+            stream->user_counted = false;
+            auto &bridge = bridges_[bridge_id];
+            if (bridge.users > 0) {
+                --bridge.users;
+            }
+        }
+        if (stop_result == DTV_L3_OK) {
+            stream->physical_stopped = true;
+        } else {
             auto found = leases_.find(stream->lease_id);
             if (found != leases_.end()) {
                 found->second.stop_residual = true;
                 found->second.state = DTV_L3_LEASE_RETAINED;
             }
-        } else if (!stream->physical_stopped) {
-            stream->physical_stopped = true;
-            auto &bridge = bridges_[bridge_id];
-            if (bridge.users > 0) {
-                --bridge.users;
+        }
+        if (close_requested_) {
+            stream->retire_requested = true;
+            stream->retire_mode = DTV_L3_STREAM_RELEASE_DISCARD_UNREAD;
+            stream->phase = DTV_L3_STREAM_RETIRING;
+            if (stream->read_borrows == 0) {
+                finalize_retire_locked(generation);
             }
-            if (bridge.users == 0 && bridge.running) {
-                need_bridge_stop = true;
-            }
+        } else {
+            stream->phase = DTV_L3_STREAM_DRAINING;
+        }
+        auto &bridge = bridges_[bridge_id];
+        if (bridge.users == 0 && bridge.pending_attaches == 0 &&
+            bridge.running && !bridge.stop_pending) {
+            bridge.stop_pending = true;
+            need_bridge_stop = true;
+            ++provider_calls_in_flight_;
         }
         state_condition_.notify_all();
     }
@@ -517,9 +622,12 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
     if (need_bridge_stop) {
         bridge_result = provider_.bridge_stop(bridge_id);
         std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
         auto &bridge = bridges_[bridge_id];
+        bridge.stop_pending = false;
         if (bridge_result == DTV_L3_OK) {
             bridge.running = false;
+            bridge.stop_residual = false;
             ++bridge.stop_count;
         } else {
             bridge.running = true;
@@ -530,6 +638,7 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
                 found->second.state = DTV_L3_LEASE_RETAINED;
             }
         }
+        state_condition_.notify_all();
     }
 
     finish_close();
@@ -764,46 +873,65 @@ dtv_l3_result OwnerEngine::release_lease(std::uint32_t lease_id) {
 
     std::uint32_t bridge_id = 0;
     bool retry_stop = false;
+    dtv_l3_result result = DTV_L3_BUSY;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const auto found = leases_.find(lease_id);
         if (found == leases_.end()) {
-            return DTV_L3_STALE;
-        }
-        if (found->second.active_stream != 0) {
-            return DTV_L3_BUSY;
-        }
-        if (!found->second.stop_residual) {
+            result = DTV_L3_STALE;
+        } else if (found->second.active_stream != 0) {
+            result = DTV_L3_BUSY;
+        } else if (!found->second.stop_residual) {
             leases_.erase(found);
-            state_condition_.notify_all();
-            return DTV_L3_OK;
+            result = DTV_L3_OK;
+        } else {
+            bridge_id = found->second.bridge_id;
+            const auto bridge = bridges_.find(bridge_id);
+            if (bridge == bridges_.end() || !bridge->second.running) {
+                leases_.erase(found);
+                result = DTV_L3_OK;
+            } else if (bridge->second.users != 0 ||
+                       bridge->second.pending_attaches != 0 ||
+                       bridge->second.stop_pending) {
+                result = DTV_L3_BUSY;
+            } else {
+                bridge->second.stop_pending = true;
+                retry_stop = true;
+                ++provider_calls_in_flight_;
+            }
         }
-        bridge_id = found->second.bridge_id;
-        retry_stop = true;
+        state_condition_.notify_all();
     }
 
-    if (retry_stop) {
-        const auto stop_result = provider_.bridge_stop(bridge_id);
+    if (!retry_stop) {
+        finish_close();
+        return result;
+    }
+    const auto stop_result = provider_.bridge_stop(bridge_id);
+    result = DTV_L3_BUSY;
+    {
         std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        auto &bridge = bridges_[bridge_id];
+        bridge.stop_pending = false;
         const auto found = leases_.find(lease_id);
         if (found == leases_.end()) {
-            return DTV_L3_STALE;
-        }
-        if (stop_result != DTV_L3_OK) {
+            result = DTV_L3_STALE;
+        } else if (stop_result != DTV_L3_OK) {
+            bridge.stop_residual = true;
             found->second.stop_residual = true;
             found->second.state = DTV_L3_LEASE_RETAINED;
-            state_condition_.notify_all();
-            return DTV_L3_BUSY;
+        } else {
+            bridge.running = false;
+            bridge.stop_residual = false;
+            ++bridge.stop_count;
+            leases_.erase(found);
+            result = DTV_L3_OK;
         }
-        auto &bridge = bridges_[bridge_id];
-        bridge.running = false;
-        bridge.stop_residual = false;
-        ++bridge.stop_count;
-        leases_.erase(found);
         state_condition_.notify_all();
-        return DTV_L3_OK;
     }
-    return DTV_L3_BUSY;
+    finish_close();
+    return result;
 }
 
 void OwnerEngine::StreamSink::deliver(void *callback_context,
@@ -906,21 +1034,28 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
         stream->phase = DTV_L3_STREAM_RETIRING;
         stream->retire_requested = true;
         stream->retire_mode = DTV_L3_STREAM_RELEASE_DISCARD_UNREAD;
-        if (stop_result != DTV_L3_OK) {
+        if (stream->user_counted) {
+            stream->user_counted = false;
+            auto &bridge = bridges_[bridge_id];
+            if (bridge.users > 0) {
+                --bridge.users;
+            }
+        }
+        if (stop_result == DTV_L3_OK) {
+            stream->physical_stopped = true;
+        } else {
             auto lease = leases_.find(stream->lease_id);
             if (lease != leases_.end()) {
                 lease->second.stop_residual = true;
                 lease->second.state = DTV_L3_LEASE_RETAINED;
             }
-        } else if (!stream->physical_stopped) {
-            stream->physical_stopped = true;
-            auto &bridge = bridges_[bridge_id];
-            if (bridge.users > 0) {
-                --bridge.users;
-            }
-            if (bridge.users == 0 && bridge.running) {
-                need_bridge_stop = true;
-            }
+        }
+        auto &bridge = bridges_[bridge_id];
+        if (bridge.users == 0 && bridge.pending_attaches == 0 &&
+            bridge.running && !bridge.stop_pending) {
+            bridge.stop_pending = true;
+            need_bridge_stop = true;
+            ++provider_calls_in_flight_;
         }
         state_condition_.notify_all();
     }
@@ -928,9 +1063,12 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
     if (need_bridge_stop) {
         const auto bridge_result = provider_.bridge_stop(bridge_id);
         std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
         auto &bridge = bridges_[bridge_id];
+        bridge.stop_pending = false;
         if (bridge_result == DTV_L3_OK) {
             bridge.running = false;
+            bridge.stop_residual = false;
             ++bridge.stop_count;
         } else {
             bridge.running = true;
@@ -941,6 +1079,7 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
                 lease->second.state = DTV_L3_LEASE_RETAINED;
             }
         }
+        state_condition_.notify_all();
     }
 
     {
@@ -1088,6 +1227,7 @@ dtv_l3_result OwnerEngine::release_operation(
     return DTV_L3_OK;
 }
 
+
 dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
     Borrow borrow(*this);
     if (!borrow) {
@@ -1122,7 +1262,10 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
             }
             stream.retire_requested = true;
             stream.retire_mode = DTV_L3_STREAM_RELEASE_DISCARD_UNREAD;
-            if (stream.phase == DTV_L3_STREAM_ACTIVE && !stream.stopping) {
+            if (stream.attaching || stream.stopping) {
+                stream.phase = DTV_L3_STREAM_RETIRING;
+                stream.close_retire = true;
+            } else if (stream.phase == DTV_L3_STREAM_ACTIVE) {
                 stream.phase = DTV_L3_STREAM_RETIRING;
                 stream.stopping = true;
                 stream.close_retire = true;
@@ -1148,13 +1291,15 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
     finish_close();
 
     std::unique_lock<std::mutex> lock(mutex_);
-    if (timeout_ms != 0 && !(physical_quiesced_ && !active_streams_locked())) {
+    if (timeout_ms != 0 &&
+        !(physical_quiesced_ && physical_settled_locked())) {
         state_condition_.wait_for(
-            lock, std::chrono::milliseconds(timeout_ms),
-            [this] { return physical_quiesced_ && !active_streams_locked(); });
+            lock, std::chrono::milliseconds(timeout_ms), [this] {
+                return physical_quiesced_ && physical_settled_locked();
+            });
     }
-    return physical_quiesced_ && !active_streams_locked() ? DTV_L3_OK
-                                                          : DTV_L3_TIMEOUT;
+    return physical_quiesced_ && physical_settled_locked() ? DTV_L3_OK
+                                                           : DTV_L3_TIMEOUT;
 }
 
 dtv_l3_result OwnerEngine::close_status(Snapshot *snapshot) {
@@ -1194,7 +1339,7 @@ dtv_l3_result OwnerEngine::retry_cleanup() {
     std::unique_lock<std::mutex> lock(mutex_);
     if (!close_requested_ || cleanup_started_ || !cleanup_attempted_ ||
         provider_calls_in_flight_ != 0 || claim_in_flight_ ||
-        !operations_.empty()) {
+        !operations_.empty() || !physical_settled_locked()) {
         return DTV_L3_BUSY;
     }
     if (std::find(claims_.begin(), claims_.end(), ClaimState::Unknown) !=
@@ -1358,7 +1503,7 @@ void OwnerEngine::finish_close() {
             return;
         }
     }
-    if (active_streams_locked()) {
+    if (!physical_settled_locked()) {
         return;
     }
     cleanup_started_ = true;
@@ -1439,9 +1584,10 @@ void OwnerEngine::run_cleanup() {
         std::lock_guard<std::mutex> lock(mutex_);
         claimed_count_ = std::count(claims_.begin(), claims_.end(), ClaimState::Ready);
         ++cleanup_count_;
-        physical_quiesced_ = std::all_of(
-            claim_quiesced_.begin(), claim_quiesced_.end(),
-            [](bool quiesced) { return quiesced; });
+        physical_quiesced_ =
+            std::all_of(claim_quiesced_.begin(), claim_quiesced_.end(),
+                        [](bool quiesced) { return quiesced; }) &&
+            physical_settled_locked();
         last_cleanup_error_ = DTV_L3_OK;
         for (auto error = claim_cleanup_errors_.rbegin();
              error != claim_cleanup_errors_.rend(); ++error) {
@@ -1489,7 +1635,7 @@ void OwnerEngine::enqueue_locked(std::function<void()> work) {
 }
 
 bool OwnerEngine::all_ops_recovered_locked() const {
-    return operations_.empty() && !active_streams_locked();
+    return operations_.empty() && physical_settled_locked();
 }
 
 bool OwnerEngine::active_streams_locked() const {
@@ -1497,6 +1643,20 @@ bool OwnerEngine::active_streams_locked() const {
                        [](const auto &entry) {
                            return entry.second->phase != DTV_L3_STREAM_RETIRED;
                        });
+}
+
+bool OwnerEngine::physical_settled_locked() const {
+    if (active_streams_locked()) {
+        return false;
+    }
+    return std::none_of(bridges_.begin(), bridges_.end(),
+                        [](const auto &entry) {
+                            const auto &bridge = entry.second;
+                            return bridge.running || bridge.users != 0 ||
+                                   bridge.pending_attaches != 0 ||
+                                   bridge.start_pending || bridge.stop_pending ||
+                                   bridge.stop_residual;
+                        });
 }
 
 void TestBarrier::arrive_and_wait() {

@@ -10,6 +10,7 @@
 #include <memory>
 #include <mutex>
 #include <optional>
+#include <set>
 #include <utility>
 #include <thread>
 #include <vector>
@@ -181,6 +182,9 @@ public:
     }
 
     dtv_l3_result bridge_stop(std::uint32_t bridge_id) override {
+        if (bridge_stop_barrier) {
+            bridge_stop_barrier->arrive_and_wait();
+        }
         std::lock_guard<std::mutex> lock(mutex);
         ++bridge_stop_calls[bridge_id];
         return bridge_stop_fail ? DTV_L3_FAILED : DTV_L3_OK;
@@ -189,13 +193,20 @@ public:
     dtv_l3_result stream_attach(std::uint64_t stream_id,
                                 dtv_l3_ts_deliver_fn deliver,
                                 void *callback_context) override {
-        std::lock_guard<std::mutex> lock(mutex);
-        ++stream_attach_calls;
-        if (stream_attach_result != DTV_L3_OK) {
-            return stream_attach_result;
+        std::function<void()> hook;
+        {
+            std::lock_guard<std::mutex> lock(mutex);
+            ++stream_attach_calls;
+            if (stream_attach_result != DTV_L3_OK) {
+                return stream_attach_result;
+            }
+            stream_delivers[stream_id] = deliver;
+            stream_contexts[stream_id] = callback_context;
+            hook = on_stream_attach;
         }
-        stream_delivers[stream_id] = deliver;
-        stream_contexts[stream_id] = callback_context;
+        if (hook) {
+            hook();
+        }
         return DTV_L3_OK;
     }
 
@@ -205,26 +216,34 @@ public:
         }
         dtv_l3_ts_deliver_fn deliver = nullptr;
         void *callback_context = nullptr;
+        dtv_l3_result result = DTV_L3_OK;
         {
             std::lock_guard<std::mutex> lock(mutex);
             ++stream_stop_calls;
-            const auto found = stream_delivers.find(stream_id);
-            if (found != stream_delivers.end()) {
-                deliver = found->second;
-                callback_context = stream_contexts[stream_id];
+            result = stream_stop_failures.count(stream_id) != 0
+                         ? DTV_L3_FAILED
+                         : DTV_L3_OK;
+            if (result == DTV_L3_OK) {
+                const auto found = stream_delivers.find(stream_id);
+                if (found != stream_delivers.end()) {
+                    deliver = found->second;
+                    callback_context = stream_contexts[stream_id];
+                }
             }
         }
         if (deliver != nullptr) {
             deliver(callback_context, nullptr, 0);
         }
-        return DTV_L3_OK;
+        return result;
     }
 
     dtv_l3_result tune(std::uint32_t receiver_id,
                        std::uint64_t requested_hz,
                        std::uint64_t *programmed_hz) override {
         (void)receiver_id;
-        (void)requested_hz;
+        if (tune_barrier) {
+            tune_barrier->arrive_and_wait();
+        }
         std::lock_guard<std::mutex> lock(mutex);
         ++tune_calls;
         *programmed_hz = requested_hz + 1;
@@ -328,11 +347,15 @@ public:
     std::shared_ptr<TestBarrier> cancel_barrier;
     std::shared_ptr<TestBarrier> release_claim_barrier;
     std::shared_ptr<TestBarrier> bridge_start_barrier;
+    std::shared_ptr<TestBarrier> bridge_stop_barrier;
     std::shared_ptr<TestBarrier> stream_stop_barrier;
+    std::shared_ptr<TestBarrier> tune_barrier;
+    std::function<void()> on_stream_attach;
     std::map<std::uint32_t, dtv_l3_scope_info> scopes;
     std::map<std::uint32_t, std::size_t> bridge_start_calls;
     std::map<std::uint32_t, std::size_t> bridge_stop_calls;
     std::map<std::uint64_t, dtv_l3_ts_deliver_fn> stream_delivers;
+    std::set<std::uint64_t> stream_stop_failures;
     std::map<std::uint64_t, void *> stream_contexts;
     std::uint32_t claim_barrier_index = 0;
     std::optional<dtv_l3_result> immediate_result;
@@ -1279,6 +1302,312 @@ void test_stream_close_progresses_while_stop_blocked() {
     CHECK(owner.release() == DTV_L3_OK);
 }
 
+bool wait_until(const std::function<bool()> &predicate) {
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (std::chrono::steady_clock::now() < deadline) {
+        if (predicate()) {
+            return true;
+        }
+        std::this_thread::yield();
+    }
+    return predicate();
+}
+
+void test_close_failed_stream_stop_keeps_claim_and_timeout() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 51);
+    owner.initialize_claims(1);
+    std::uint32_t lease = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    std::uint64_t generation = 0;
+    CHECK(owner.acquire_lease(0, &lease) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease, &generation) == DTV_L3_OK);
+    provider.stream_stop_failures.insert(generation);
+    provider.bridge_stop_fail = true;
+
+    CHECK(owner.close(100) == DTV_L3_TIMEOUT);
+    CHECK(wait_until([&] {
+        return provider.stream_stop_calls >= 1 &&
+               provider.bridge_stop_count(0) >= 1;
+    }));
+    CHECK(provider.released_claim_count() == 0);
+    OwnerEngine::Snapshot snapshot{};
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(!snapshot.physical_quiesced);
+    CHECK(!snapshot.all_ops_recovered);
+    CHECK(!snapshot.cleanup_complete);
+    CHECK(owner.release() == DTV_L3_BUSY);
+
+    provider.bridge_stop_fail = false;
+    CHECK(owner.release_lease(lease) == DTV_L3_OK);
+    CHECK(owner.destroy_stream(generation) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(provider.released_claim_count() == 1);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_shared_bridge_stop_failure_accounting() {
+    ProviderMock provider;
+    provider.scopes[0] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    provider.scopes[1] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    OwnerEngine owner(provider, 52);
+    owner.initialize_claims(0);
+    std::uint32_t lease0 = 0;
+    std::uint32_t lease1 = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    std::uint64_t stream0 = 0;
+    std::uint64_t stream1 = 0;
+    CHECK(owner.acquire_lease(0, &lease0) == DTV_L3_OK);
+    CHECK(owner.acquire_lease(1, &lease1) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease0, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease0) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease0, &stream0) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease1, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease1, &stream1) == DTV_L3_OK);
+    CHECK(provider.bridge_start_count(7) == 1);
+
+    provider.stream_stop_failures.insert(stream0);
+    CHECK(owner.stop_stream(stream0, 0) == DTV_L3_FAILED);
+    CHECK(provider.bridge_stop_count(7) == 0);
+    CHECK(owner.release_stream(stream0,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream0) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease0) == DTV_L3_BUSY);
+    CHECK(provider.bridge_stop_count(7) == 0);
+
+    CHECK(owner.stop_stream(stream1, 0) == DTV_L3_OK);
+    CHECK(provider.bridge_stop_count(7) == 1);
+    CHECK(owner.release_stream(stream1,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream1) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease0) == DTV_L3_OK);
+    CHECK(provider.bridge_stop_count(7) == 1);
+
+    std::uint32_t lease2 = 0;
+    std::uint64_t stream2 = 0;
+    CHECK(owner.acquire_lease(0, &lease2) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease2, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease2) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease2, &stream2) == DTV_L3_OK);
+    CHECK(provider.bridge_start_count(7) == 2);
+    dtv_l3_lease_status status{};
+    CHECK(owner.lease_status(lease2, &status) == DTV_L3_OK);
+    CHECK(status.bridge_running == 1);
+    CHECK(status.bridge_active_users == 1);
+    CHECK(owner.stop_stream(stream2, 0) == DTV_L3_OK);
+    CHECK(provider.bridge_stop_count(7) == 2);
+    CHECK(owner.release_stream(stream2,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream2) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease2) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_failed_start_release_does_not_stop_later_bridge() {
+    ProviderMock provider;
+    provider.scopes[0] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    provider.scopes[1] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    provider.bridge_start_fail = true;
+    OwnerEngine owner(provider, 53);
+    owner.initialize_claims(0);
+    std::uint32_t lease0 = 0;
+    std::uint32_t lease1 = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    std::uint64_t stream0 = 0;
+    std::uint64_t stream1 = 0;
+    CHECK(owner.acquire_lease(0, &lease0) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease0, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease0) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease0, &stream0) == DTV_L3_FAILED);
+    CHECK(stream0 == 0);
+
+    provider.bridge_start_fail = false;
+    CHECK(owner.acquire_lease(1, &lease1) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease1, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease1, &stream1) == DTV_L3_OK);
+    CHECK(provider.bridge_start_count(7) == 2);
+
+    CHECK(owner.release_lease(lease0) == DTV_L3_BUSY);
+    CHECK(provider.bridge_stop_count(7) == 0);
+    CHECK(owner.stop_stream(stream1, 0) == DTV_L3_OK);
+    CHECK(owner.release_stream(stream1,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream1) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease0) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_close_waits_for_inflight_stop_and_does_not_rollback_phase() {
+    ProviderMock provider;
+    provider.stream_stop_barrier = std::make_shared<TestBarrier>();
+    OwnerEngine owner(provider, 54);
+    owner.initialize_claims(1);
+    std::uint32_t lease = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    std::uint64_t generation = 0;
+    CHECK(owner.acquire_lease(0, &lease) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease, &generation) == DTV_L3_OK);
+
+    dtv_l3_result stop_result = DTV_L3_FAILED;
+    std::thread stopper(
+        [&] { stop_result = owner.stop_stream(generation, 0); });
+    provider.stream_stop_barrier->wait_until_arrived();
+    CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+    CHECK(provider.released_claim_count() == 0);
+    OwnerEngine::Snapshot snapshot{};
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(!snapshot.all_ops_recovered);
+    dtv_l3_stream_status stream_status{};
+    CHECK(owner.stream_status(generation, &stream_status) == DTV_L3_OK);
+    CHECK(stream_status.phase != DTV_L3_STREAM_DRAINING);
+
+    provider.stream_stop_barrier->release();
+    stopper.join();
+    CHECK(stop_result == DTV_L3_OK);
+    CHECK(wait_for_physical_quiescence(owner));
+    CHECK(owner.stream_status(generation, &stream_status) == DTV_L3_OK);
+    CHECK(stream_status.phase == DTV_L3_STREAM_RETIRED);
+    CHECK(provider.released_claim_count() == 1);
+    CHECK(owner.destroy_stream(generation) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_close_during_attach_aborts_without_user() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 55);
+    owner.initialize_claims(1);
+    std::uint32_t lease = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    dtv_l3_result inner_close = DTV_L3_OK;
+    CHECK(owner.acquire_lease(0, &lease) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease) == DTV_L3_OK);
+    provider.on_stream_attach = [&] { inner_close = owner.close(1000); };
+
+    std::uint64_t generation = 0;
+    CHECK(owner.attach_lease(lease, &generation) == DTV_L3_BUSY);
+    CHECK(generation == 0);
+    CHECK(inner_close == DTV_L3_TIMEOUT);
+    CHECK(owner.live_stream_count() == 0);
+    CHECK(provider.bridge_stop_count(0) == 1);
+    dtv_l3_lease_status status{};
+    CHECK(owner.lease_status(lease, &status) == DTV_L3_OK);
+    CHECK(status.bridge_active_users == 0);
+    CHECK(status.bridge_running == 0);
+    CHECK(owner.release_lease(lease) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(provider.released_claim_count() == 1);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_close_waits_for_tune() {
+    ProviderMock provider;
+    provider.tune_barrier = std::make_shared<TestBarrier>();
+    OwnerEngine owner(provider, 56);
+    owner.initialize_claims(1);
+    std::uint32_t lease = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    CHECK(owner.acquire_lease(0, &lease) == DTV_L3_OK);
+    dtv_l3_result tune_result = DTV_L3_OK;
+    std::thread tuner([&] {
+        tune_result = owner.tune_lease(lease, 500000000, &programmed,
+                                       &revision);
+    });
+    provider.tune_barrier->wait_until_arrived();
+    CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+    CHECK(provider.released_claim_count() == 0);
+    provider.tune_barrier->release();
+    tuner.join();
+    CHECK(tune_result == DTV_L3_BUSY);
+    CHECK(owner.release_lease(lease) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(provider.released_claim_count() == 1);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_bridge_stop_pending_rejects_attach_then_restarts() {
+    ProviderMock provider;
+    provider.scopes[0] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    provider.scopes[1] = dtv_l3_scope_info{7, DTV_L3_LEASE_SHAREABLE};
+    provider.bridge_stop_barrier = std::make_shared<TestBarrier>();
+    OwnerEngine owner(provider, 57);
+    owner.initialize_claims(0);
+    std::uint32_t lease0 = 0;
+    std::uint32_t lease1 = 0;
+    std::uint64_t programmed = 0;
+    std::uint64_t revision = 0;
+    std::uint64_t stream0 = 0;
+    std::uint64_t stream1 = 0;
+    CHECK(owner.acquire_lease(0, &lease0) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease0, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease0) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease0, &stream0) == DTV_L3_OK);
+
+    dtv_l3_result stop_result = DTV_L3_FAILED;
+    std::thread stopper(
+        [&] { stop_result = owner.stop_stream(stream0, 0); });
+    provider.bridge_stop_barrier->wait_until_arrived();
+    CHECK(owner.acquire_lease(1, &lease1) == DTV_L3_OK);
+    CHECK(owner.tune_lease(lease1, 500000000, &programmed, &revision) ==
+          DTV_L3_OK);
+    CHECK(owner.start_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.attach_lease(lease1, &stream1) == DTV_L3_BUSY);
+
+    provider.bridge_stop_barrier->release();
+    stopper.join();
+    CHECK(stop_result == DTV_L3_OK);
+    CHECK(provider.bridge_stop_count(7) == 1);
+    CHECK(owner.attach_lease(lease1, &stream1) == DTV_L3_OK);
+    CHECK(provider.bridge_start_count(7) == 2);
+    provider.bridge_stop_barrier.reset();
+    CHECK(owner.stop_stream(stream1, 0) == DTV_L3_OK);
+    CHECK(provider.bridge_stop_count(7) == 2);
+    CHECK(owner.release_stream(stream0,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.release_stream(stream1,
+                               DTV_L3_STREAM_RELEASE_DISCARD_UNREAD) ==
+          DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream0) == DTV_L3_OK);
+    CHECK(owner.destroy_stream(stream1) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease0) == DTV_L3_OK);
+    CHECK(owner.release_lease(lease1) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -1297,5 +1626,12 @@ int main() {
     test_lease_borrow_gate_and_stale_generation();
     test_lease_close_waits_for_read_borrow();
     test_stream_close_progresses_while_stop_blocked();
+    test_close_failed_stream_stop_keeps_claim_and_timeout();
+    test_shared_bridge_stop_failure_accounting();
+    test_failed_start_release_does_not_stop_later_bridge();
+    test_close_waits_for_inflight_stop_and_does_not_rollback_phase();
+    test_close_during_attach_aborts_without_user();
+    test_close_waits_for_tune();
+    test_bridge_stop_pending_rejects_attach_then_restarts();
     return failures == 0 ? 0 : 1;
 }

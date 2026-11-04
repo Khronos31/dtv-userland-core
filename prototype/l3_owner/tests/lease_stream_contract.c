@@ -349,6 +349,8 @@ static int test_shareable_and_exclusive(void) {
     dtv_l3_lease *lease1 = NULL;
     dtv_l3_lease *lease2 = NULL;
     dtv_l3_lease *lease3 = NULL;
+    dtv_l3_lease *lease4 = NULL;
+    dtv_l3_lease *lease5 = NULL;
     dtv_l3_stream *stream0 = NULL;
     dtv_l3_stream *stream1 = NULL;
     dtv_l3_lease_status status;
@@ -361,6 +363,8 @@ static int test_shareable_and_exclusive(void) {
     add_scope(&fixture, 1, 7, DTV_L3_LEASE_SHAREABLE);
     add_scope(&fixture, 2, 8, DTV_L3_LEASE_EXCLUSIVE);
     add_scope(&fixture, 3, 8, DTV_L3_LEASE_EXCLUSIVE);
+    add_scope(&fixture, 4, 9, DTV_L3_LEASE_EXCLUSIVE);
+    add_scope(&fixture, 5, 9, DTV_L3_LEASE_SHAREABLE);
     provider = provider_for(&fixture);
     owner = open_ready(&provider);
     if (owner == NULL) {
@@ -380,7 +384,12 @@ static int test_shareable_and_exclusive(void) {
         dtv_l3_lease_acquire(owner, 3, &lease3) != DTV_L3_BUSY) {
         failed = 4;
     }
-    if (dtv_l3_lease_release(lease2) != DTV_L3_OK) {
+    if (dtv_l3_lease_acquire(owner, 4, &lease4) != DTV_L3_OK ||
+        dtv_l3_lease_acquire(owner, 5, &lease5) != DTV_L3_BUSY) {
+        failed = 5;
+    }
+    if (dtv_l3_lease_release(lease2) != DTV_L3_OK ||
+        dtv_l3_lease_release(lease4) != DTV_L3_OK) {
         failed = 5;
     }
     feed_one(&fixture, stream_generation(stream1));
