@@ -2,6 +2,7 @@
 #include <dtv/l3_owner.h>
 
 #include "owner_engine.h"
+#include "native_product.h"
 
 #include <atomic>
 #include <chrono>
@@ -10,6 +11,7 @@
 #include <mutex>
 #include <new>
 #include <thread>
+#include <utility>
 
 namespace {
 
@@ -362,9 +364,13 @@ struct dtv_l3_context {
         if (open_thread.joinable()) {
             open_thread.join();
         }
+        engine.reset();
         if (adapter_release != nullptr) {
             adapter_release(adapter_owner);
         }
+        product_adapter.reset();
+        usb_provider.reset();
+        native_owner.reset();
         for (auto *reader : retired_readers) {
             delete reader;
         }
@@ -385,6 +391,7 @@ struct dtv_l3_context {
     const dtv_l3_capability_catalog *catalog = nullptr;
     dtv_l3_adapter_release_fn adapter_release = nullptr;
     void *adapter_owner = nullptr;
+    std::shared_ptr<void> native_owner;
     dtv_l3_logger logger;
     std::unique_ptr<l3_owner_prototype::OwnerEngine> engine;
     std::thread open_thread;
@@ -392,6 +399,22 @@ struct dtv_l3_context {
     std::atomic<bool> open_thread_done{false};
     std::atomic<std::size_t> outstanding_ops{0};
 };
+
+namespace l3_owner_prototype {
+
+void attach_native_owner(dtv_l3_context *owner,
+                         std::shared_ptr<void> native_owner,
+                         dtv_l3_adapter_release_fn release,
+                         void *adapter_owner,
+                         uint32_t power_permission) {
+    if (owner == nullptr) return;
+    owner->native_owner = std::move(native_owner);
+    owner->adapter_release = release;
+    owner->adapter_owner = adapter_owner;
+    owner->power_permission = power_permission != 0U ? 1U : 0U;
+}
+
+}  // namespace l3_owner_prototype
 
 static void install_shutdown_hook(dtv_l3_context *owner) {
     std::lock_guard<std::mutex> lock(owner->reader_mutex);

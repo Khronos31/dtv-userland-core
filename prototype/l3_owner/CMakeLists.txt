@@ -4,14 +4,17 @@ project(l3_owner_prototype LANGUAGES C CXX)
 
 include(CTest)
 find_package(Threads REQUIRED)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(LIBUSB REQUIRED IMPORTED_TARGET libusb-1.0)
 
 option(L3_OWNER_ENABLE_TSAN "Compile the isolated owner tests with ThreadSanitizer" OFF)
 option(L3_OWNER_ENABLE_ASAN "Compile the isolated owner tests with AddressSanitizer" OFF)
 
-add_library(l3_owner_model STATIC src/owner_engine.cpp src/c_api.cpp)
+add_library(l3_owner_model STATIC src/owner_engine.cpp src/c_api.cpp
+    src/native_usb.cpp src/native_open.cpp)
 target_include_directories(l3_owner_model PUBLIC include PRIVATE src)
 target_compile_features(l3_owner_model PUBLIC cxx_std_17)
-target_link_libraries(l3_owner_model PUBLIC Threads::Threads)
+target_link_libraries(l3_owner_model PUBLIC Threads::Threads PkgConfig::LIBUSB)
 set_target_properties(l3_owner_model PROPERTIES CXX_EXTENSIONS OFF)
 
 add_executable(l3_owner_tests tests/owner_engine_tests.cpp)
@@ -24,6 +27,16 @@ add_executable(l3_header_c tests/header_c.c)
 target_include_directories(l3_header_c PRIVATE include)
 target_link_libraries(l3_header_c PRIVATE l3_owner_model Threads::Threads)
 set_target_properties(l3_header_c PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+
+add_executable(l3_public_c_consumer tests/public_c_consumer.c)
+target_include_directories(l3_public_c_consumer PRIVATE include)
+target_link_libraries(l3_public_c_consumer PRIVATE l3_owner_model)
+target_compile_options(l3_public_c_consumer PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_public_c_consumer PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
 
 add_executable(l3_public_contract_c tests/c_contract_regressions.c
     tests/initialize_claims_wrap.cpp)
@@ -111,14 +124,14 @@ set_target_properties(l3_provider_semantics_c PROPERTIES
 )
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_c_consumer l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 
 if(L3_OWNER_ENABLE_ASAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_c_consumer l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
         target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=address)
     endforeach()
@@ -127,6 +140,7 @@ endif()
 if(BUILD_TESTING)
     add_test(NAME l3_owner_tests COMMAND l3_owner_tests)
     add_test(NAME l3_header_c COMMAND l3_header_c)
+    add_test(NAME l3_public_c_consumer COMMAND l3_public_c_consumer)
     add_test(NAME l3_header_cpp COMMAND l3_header_cpp)
     add_test(NAME l3_c_reject_recovery COMMAND l3_public_contract_c reject)
     add_test(NAME l3_c_open_cancel_local COMMAND l3_public_contract_c cancel)
