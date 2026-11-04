@@ -76,6 +76,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
         claims_.assign(count, ClaimState::NotAttempted);
         claim_quiesced_.assign(count, true);
         claim_cleanup_errors_.assign(count, DTV_L3_OK);
+        claim_cancel_requested_.assign(count, false);
         if (close_requested_) {
             open_state_ = OpenState::Closing;
         } else {
@@ -95,6 +96,8 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             claims_[index] = ClaimState::InFlight;
             claim_quiesced_[index] = false;
             claim_in_flight_ = true;
+            in_flight_claim_valid_ = true;
+            in_flight_claim_index_ = index;
             ++provider_calls_in_flight_;
             binding = binding_;
         }
@@ -105,6 +108,7 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
             std::lock_guard<std::mutex> lock(mutex_);
             --provider_calls_in_flight_;
             claim_in_flight_ = false;
+            in_flight_claim_valid_ = false;
             if (claim.result == DTV_L3_OK &&
                 claim.residual_state == DTV_L3_CLAIM_RETAINED) {
                 claims_[index] = ClaimState::Ready;
@@ -1065,15 +1069,20 @@ void OwnerEngine::on_ts_deliver(std::uint64_t generation,
         return;
     }
     stream.staging.insert(stream.staging.end(), data, data + size);
+    bool queued = false;
     while (stream.staging.size() >= 188) {
         if (stream.queue.size() >= kQueueCapacityPackets) {
             ++stream.dropped_overflow_packets;
         } else {
             stream.queue.emplace_back(stream.staging.begin(),
                                       stream.staging.begin() + 188);
+            queued = true;
         }
         stream.staging.erase(stream.staging.begin(),
                              stream.staging.begin() + 188);
+    }
+    if (queued) {
+        state_condition_.notify_all();
     }
 }
 
@@ -1279,6 +1288,7 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
         if (initialization_phase_ != InitializationPhase::NotStarted) {
             open_state_ = OpenState::Closing;
         }
+        request_claim_cancel_locked();
         state_condition_.notify_all();
     }
     finish_close();
@@ -1558,6 +1568,7 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
             open_state_ != OpenState::Closed) {
             open_state_ = OpenState::Closing;
         }
+        request_claim_cancel_locked();
         for (const auto &entry : operations_) {
             const auto &op = entry.second;
             if (op->state == DTV_L3_OP_OPENING ||
@@ -1826,6 +1837,7 @@ void OwnerEngine::on_completion(
                                ? DTV_L3_OP_DONE
                                : DTV_L3_OP_FAILED;
         should_finish_close = close_requested_;
+        state_condition_.notify_all();
     }
     if (should_finish_close) {
         finish_close();
@@ -1957,6 +1969,41 @@ bool OwnerEngine::cleanup_claims_locked() const {
         return state == ClaimState::InFlight || state == ClaimState::Ready ||
                state == ClaimState::Retained || state == ClaimState::Unknown;
     });
+}
+
+void OwnerEngine::request_claim_cancel_locked() {
+    if (!claim_in_flight_ || !in_flight_claim_valid_ ||
+        in_flight_claim_index_ >= claim_cancel_requested_.size() ||
+        claim_cancel_requested_[in_flight_claim_index_]) {
+        return;
+    }
+    const auto index = in_flight_claim_index_;
+    claim_cancel_requested_[index] = true;
+    ++provider_calls_in_flight_;
+    enqueue_locked([this, index] { run_claim_cancel(index); });
+}
+
+void OwnerEngine::run_claim_cancel(std::uint32_t index) {
+    std::shared_ptr<Binding> binding;
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!claim_in_flight_ || !in_flight_claim_valid_ ||
+            in_flight_claim_index_ != index) {
+            --provider_calls_in_flight_;
+            state_condition_.notify_all();
+        } else {
+            binding = binding_;
+        }
+    }
+    if (binding) {
+        CallbackFrame frame;
+        const auto result = provider_.claim_cancel(binding.get(), index);
+        std::lock_guard<std::mutex> lock(mutex_);
+        --provider_calls_in_flight_;
+        claim_cancel_result_ = result;
+        state_condition_.notify_all();
+    }
+    finish_close();
 }
 
 void OwnerEngine::worker_loop() {

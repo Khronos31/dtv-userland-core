@@ -228,6 +228,17 @@ typedef dtv_l3_result (*dtv_l3_tune_fn)(void *provider_context,
                                         uint64_t requested_hz,
                                         uint64_t *programmed_hz);
 
+/*
+ * Optional in-flight claim cancellation candidate. It must return without
+ * waiting. ACCEPTED means the request was taken and the claim will still return
+ * on its own; it does not make the claim terminal or release its ownership.
+ * UNSUPPORTED means the provider cannot cancel and the owner is retained.
+ */
+typedef dtv_l3_result (*dtv_l3_claim_cancel_fn)(
+    void *provider_context,
+    dtv_l3_provider_binding *binding,
+    uint32_t claim_index);
+
 typedef struct dtv_l3_provider {
     void *provider_context;
     dtv_l3_claim_fn claim;
@@ -240,6 +251,7 @@ typedef struct dtv_l3_provider {
     dtv_l3_stream_attach_fn stream_attach;
     dtv_l3_stream_stop_fn stream_stop;
     dtv_l3_tune_fn tune;
+    dtv_l3_claim_cancel_fn claim_cancel;
 } dtv_l3_provider;
 
 typedef struct dtv_l3_open_result {

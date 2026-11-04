@@ -255,6 +255,13 @@ public:
         return DTV_L3_OK;
     }
 
+    dtv_l3_result claim_cancel(Binding *, std::uint32_t index) override {
+        std::lock_guard<std::mutex> lock(mutex);
+        ++claim_cancel_calls;
+        claim_cancel_index = index;
+        return claim_cancel_result;
+    }
+
     bool feed(std::uint64_t stream_id,
               const std::vector<std::uint8_t> &data) {
         dtv_l3_ts_deliver_fn deliver = nullptr;
@@ -382,6 +389,9 @@ public:
     std::size_t stream_attach_calls = 0;
     std::size_t stream_stop_calls = 0;
     std::size_t tune_calls = 0;
+    std::size_t claim_cancel_calls = 0;
+    std::uint32_t claim_cancel_index = 0;
+    dtv_l3_result claim_cancel_result = DTV_L3_UNSUPPORTED;
 };
 
 dtv_l3_transfer_request request_for(const std::vector<std::uint8_t> &payload) {
@@ -1864,6 +1874,53 @@ void test_callback_frame_close_does_not_wait() {
     CHECK(owner.release() == DTV_L3_OK);
 }
 
+void test_claim_cancel_before_initialize_is_not_sent() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 80);
+    CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+    owner.initialize_claims(1);
+    CHECK(provider.claim_calls.empty());
+    CHECK(provider.claim_cancel_calls == 0);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.physical_quiesced && snapshot.cleanup_complete &&
+               snapshot.control_lane == DTV_L3_LANE_EXITED;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
+void test_claim_cancel_accepted_does_not_settle_claim() {
+    ProviderMock provider;
+    auto barrier = std::make_shared<TestBarrier>();
+    provider.claim_barrier = barrier;
+    provider.claim_cancel_result = DTV_L3_ACCEPTED;
+    OwnerEngine owner(provider, 81);
+    owner.mark_open_lane_running();
+    std::thread opener([&] { owner.initialize_claims(1); });
+    barrier->wait_until_arrived();
+    CHECK(owner.close(0) == DTV_L3_TIMEOUT);
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (provider.claim_cancel_calls == 0 &&
+           std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::yield();
+    }
+    CHECK(provider.claim_cancel_calls == 1);
+    CHECK(provider.claim_cancel_index == 0);
+    CHECK(provider.released_claim_count() == 0);
+    CHECK(owner.live_stream_count() == 0);
+    OwnerEngine::Snapshot snapshot{};
+    CHECK(owner.close_status(&snapshot) == DTV_L3_OK);
+    CHECK(snapshot.control_lane == DTV_L3_LANE_RUNNING);
+    CHECK(owner.release() == DTV_L3_BUSY);
+    barrier->release();
+    opener.join();
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.physical_quiesced && snapshot.cleanup_complete &&
+               snapshot.control_lane == DTV_L3_LANE_EXITED;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -1896,5 +1953,7 @@ int main() {
     test_control_lane_self_exits_after_close_once();
     test_blocking_claim_keeps_lanes_and_release_busy();
     test_callback_frame_close_does_not_wait();
+    test_claim_cancel_before_initialize_is_not_sent();
+    test_claim_cancel_accepted_does_not_settle_claim();
     return failures == 0 ? 0 : 1;
 }

@@ -33,7 +33,15 @@ struct fixture {
     atomic_int claim_entered;
     atomic_int allow_claim;
     atomic_int hold_cancel;
+    atomic_int claim_cancel_called;
     unsigned int claim_calls;
+    unsigned int claim_cancel_calls;
+    uint32_t claim_cancel_index;
+    uint32_t claim_index;
+    dtv_l3_provider_binding *claim_cancel_binding;
+    dtv_l3_provider_binding *claim_binding;
+    int claim_cancel_unblocks;
+    int null_claim_cancel;
     unsigned int release_claim_calls;
     unsigned int cancel_calls;
     unsigned int start_calls;
@@ -96,12 +104,14 @@ static dtv_l3_claim_result provider_claim(void *context,
                                           dtv_l3_provider_binding *binding,
                                           uint32_t claim_index) {
     struct fixture *fixture = context;
-    (void)binding;
-    (void)claim_index;
     ++fixture->claim_calls;
+    fixture->claim_binding = binding;
+    fixture->claim_index = claim_index;
     if (atomic_load(&fixture->hold_claim)) {
         atomic_store(&fixture->claim_entered, 1);
-        while (!atomic_load(&fixture->allow_claim)) {
+        while (!atomic_load(&fixture->allow_claim) &&
+               !(fixture->claim_cancel_unblocks &&
+                 atomic_load(&fixture->claim_cancel_called))) {
             sched_yield();
         }
     }
@@ -111,6 +121,17 @@ static dtv_l3_claim_result provider_claim(void *context,
         fixture->inner_release = dtv_l3_context_release(fixture->owner);
     }
     return (dtv_l3_claim_result){DTV_L3_OK, DTV_L3_CLAIM_RETAINED};
+}
+
+static dtv_l3_result provider_claim_cancel(void *context,
+                                          dtv_l3_provider_binding *binding,
+                                          uint32_t claim_index) {
+    struct fixture *fixture = context;
+    ++fixture->claim_cancel_calls;
+    fixture->claim_cancel_index = claim_index;
+    fixture->claim_cancel_binding = binding;
+    atomic_store(&fixture->claim_cancel_called, 1);
+    return DTV_L3_ACCEPTED;
 }
 
 static dtv_l3_release_result provider_release_claim(
@@ -250,6 +271,7 @@ static struct fixture fixture_new(void) {
     atomic_init(&fixture.claim_entered, 0);
     atomic_init(&fixture.allow_claim, 0);
     atomic_init(&fixture.hold_cancel, 0);
+    atomic_init(&fixture.claim_cancel_called, 0);
     return fixture;
 }
 
@@ -264,7 +286,10 @@ static dtv_l3_provider provider_for(struct fixture *fixture) {
                              .bridge_stop = provider_bridge_stop,
                              .stream_attach = provider_stream_attach,
                              .stream_stop = provider_stream_stop,
-                             .tune = provider_tune};
+                             .tune = provider_tune,
+                             .claim_cancel = fixture->null_claim_cancel
+                                                 ? NULL
+                                                 : provider_claim_cancel};
 }
 
 static int wait_value(atomic_int *value, int expected, unsigned int attempts) {
@@ -348,6 +373,25 @@ static dtv_l3_context *open_ready(dtv_l3_provider *provider,
     return opened.owner;
 }
 
+static long long now_ms(void) {
+    struct timespec value;
+    clock_gettime(CLOCK_MONOTONIC, &value);
+    return (long long)value.tv_sec * 1000LL + value.tv_nsec / 1000000LL;
+}
+
+static int provider_fire(struct fixture *fixture,
+                         dtv_l3_result result,
+                         const uint8_t *data,
+                         size_t size) {
+    if (fixture->complete == NULL) {
+        return 0;
+    }
+    const dtv_l3_transfer_completion completion = {result, data, size};
+    fixture->complete(fixture->complete_binding, fixture->complete_id,
+                      &completion, fixture->complete_context);
+    return 1;
+}
+
 static dtv_l3_context *open_ready_poll(dtv_l3_provider *provider) {
     dtv_l3_open_result opened = dtv_l3_open(provider, 1);
     dtv_l3_op_result result;
@@ -429,6 +473,11 @@ static int test_blocking_claim_wait_close(void) {
     if (dtv_l3_close(opened.owner, 200) != DTV_L3_TIMEOUT) {
         return 4;
     }
+    if (fixture.claim_cancel_calls != 1 || fixture.claim_cancel_index != 0 ||
+        fixture.claim_cancel_binding != fixture.claim_binding ||
+        fixture.release_claim_calls != 0) {
+        return 4;
+    }
     if (!wait_value(&call.done, 1, 2000) || call.result != DTV_L3_CLOSING) {
         return 5;
     }
@@ -461,7 +510,9 @@ static int test_blocking_claim_wait_close(void) {
     if (dtv_l3_context_release(opened.owner) != DTV_L3_OK) {
         return 12;
     }
-    return fixture.release_claim_calls == 1 ? 0 : 13;
+    return fixture.release_claim_calls == 1 && fixture.claim_cancel_calls == 1
+               ? 0
+               : 13;
 }
 
 static int test_close_once_sequence(void) {
@@ -764,6 +815,261 @@ static int test_release_claim_reentry_frame(void) {
     return dtv_l3_context_release(owner) == DTV_L3_OK ? 0 : 5;
 }
 
+static int test_wait_completion_wakes(void) {
+    struct fixture fixture = fixture_new();
+    struct wait_call call;
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_context *owner;
+    dtv_l3_op *op = NULL;
+    dtv_l3_op_result result;
+    dtv_l3_transfer_request request;
+    uint8_t payload[2] = {3, 4};
+    uint8_t response[1] = {0x9a};
+    long long started;
+    pthread_t waiter;
+
+    owner = open_ready(&provider, NULL);
+    if (owner == NULL) {
+        return 1;
+    }
+    memset(&request, 0, sizeof(request));
+    request.kind = DTV_L3_TRANSFER_BULK;
+    request.endpoint = 0x81;
+    request.claim_index = 0;
+    request.out_data = payload;
+    request.out_size = sizeof(payload);
+    if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_ACCEPTED ||
+        op == NULL) {
+        return 2;
+    }
+    memset(&call, 0, sizeof(call));
+    atomic_init(&call.done, 0);
+    call.op = op;
+    call.timeout_ms = 1200;
+    if (pthread_create(&waiter, NULL, run_op_wait, &call) != 0) {
+        return 3;
+    }
+    sleep_ms(50);
+    started = now_ms();
+    if (!provider_fire(&fixture, DTV_L3_TIMEOUT, response,
+                       sizeof(response))) {
+        return 4;
+    }
+    if (!wait_value(&call.done, 1, 1500) || call.result != DTV_L3_OK ||
+        now_ms() - started > 1000) {
+        return 5;
+    }
+    pthread_join(waiter, NULL);
+    if (!wait_op_terminal(op, &result) || result.state != DTV_L3_OP_FAILED ||
+        result.result != DTV_L3_TIMEOUT || result.data_size != sizeof(response) ||
+        result.data == NULL || result.data[0] != response[0] ||
+        dtv_l3_op_release(op) != DTV_L3_OK) {
+        return 6;
+    }
+
+    op = NULL;
+    if (dtv_l3_transfer_start(owner, &request, &op) != DTV_L3_ACCEPTED ||
+        op == NULL) {
+        return 7;
+    }
+    memset(&call, 0, sizeof(call));
+    atomic_init(&call.done, 0);
+    call.op = op;
+    call.timeout_ms = DTV_L3_WAIT_FOREVER;
+    if (pthread_create(&waiter, NULL, run_op_wait, &call) != 0) {
+        return 8;
+    }
+    sleep_ms(50);
+    started = now_ms();
+    if (!provider_fire(&fixture, DTV_L3_OK, response, sizeof(response)) ||
+        !wait_value(&call.done, 1, 1500) || call.result != DTV_L3_OK ||
+        now_ms() - started > 1000) {
+        return 9;
+    }
+    pthread_join(waiter, NULL);
+    if (!wait_op_terminal(op, &result) || result.state != DTV_L3_OP_DONE ||
+        result.result != DTV_L3_OK || dtv_l3_op_release(op) != DTV_L3_OK) {
+        return 10;
+    }
+
+    if (dtv_l3_close(owner, 2000) != DTV_L3_OK ||
+        dtv_l3_context_release(owner) != DTV_L3_OK) {
+        return 11;
+    }
+    return 0;
+}
+
+static int test_wait_packet_wakes(void) {
+    struct fixture fixture = fixture_new();
+    struct wait_call call;
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_context *owner;
+    dtv_l3_lease *lease = NULL;
+    dtv_l3_stream *stream = NULL;
+    dtv_l3_stream_status stream_status;
+    uint64_t programmed = 0;
+    uint64_t revision = 0;
+    uint64_t generation = 0;
+    uint8_t packet[188];
+    uint8_t buffer[188];
+    size_t bytes = 0;
+    dtv_l3_read_state state = DTV_L3_READ_WAIT;
+    long long started;
+    pthread_t waiter;
+    unsigned int index;
+
+    owner = open_ready(&provider, NULL);
+    if (owner == NULL ||
+        dtv_l3_lease_acquire(owner, 0, &lease) != DTV_L3_OK ||
+        dtv_l3_lease_tune(lease, 500000000, &programmed, &revision) !=
+            DTV_L3_OK ||
+        dtv_l3_lease_start(lease) != DTV_L3_OK ||
+        dtv_l3_lease_attach(lease, &stream) != DTV_L3_OK) {
+        return 1;
+    }
+    for (index = 0; index < sizeof(packet); ++index) {
+        packet[index] = (uint8_t)index;
+    }
+    stream_status = (dtv_l3_stream_status){0};
+    if (dtv_l3_stream_status_get(stream, &stream_status) != DTV_L3_OK) {
+        return 2;
+    }
+    generation = stream_status.stream_generation;
+    if (generation >= MAX_STREAMS || fixture.deliver[generation] == NULL) {
+        return 3;
+    }
+    memset(&call, 0, sizeof(call));
+    atomic_init(&call.done, 0);
+    call.stream = stream;
+    call.buffer = buffer;
+    call.capacity = sizeof(buffer);
+    call.timeout_ms = 1200;
+    if (pthread_create(&waiter, NULL, run_read_wait, &call) != 0) {
+        return 4;
+    }
+    sleep_ms(50);
+    started = now_ms();
+    fixture.deliver[generation](fixture.deliver_context[generation], packet,
+                                sizeof(packet));
+    if (!wait_value(&call.done, 1, 1500) || call.result != DTV_L3_OK ||
+        call.state != DTV_L3_READ_DATA || call.bytes_read != sizeof(packet) ||
+        now_ms() - started > 1000) {
+        return 5;
+    }
+    pthread_join(waiter, NULL);
+    if (dtv_l3_stream_read_ts_wait(stream, buffer, 188, &bytes, &state, 20) !=
+        DTV_L3_WAIT_TIMEOUT) {
+        return 6;
+    }
+    (void)dtv_l3_close(owner, 0);
+    if (!wait_close_flags(owner, &(dtv_l3_close_status){0}, 0)) {
+        return 7;
+    }
+    if (dtv_l3_stream_destroy(stream) != DTV_L3_OK ||
+        dtv_l3_lease_release(lease) != DTV_L3_OK) {
+        return 8;
+    }
+    {
+        dtv_l3_close_status close_status;
+        if (!wait_close_flags(owner, &close_status, 1)) {
+            return 9;
+        }
+    }
+    return dtv_l3_context_release(owner) == DTV_L3_OK ? 0 : 10;
+}
+
+static int test_claim_cancel_return(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_close_status status;
+    dtv_l3_op_result result;
+    long long started;
+
+    atomic_store(&fixture.hold_claim, 1);
+    fixture.claim_cancel_unblocks = 1;
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL || !wait_value(&fixture.claim_entered, 1, 2000)) {
+        return 1;
+    }
+    started = now_ms();
+    if (dtv_l3_close(opened.owner, 2000) != DTV_L3_OK ||
+        now_ms() - started > 1500) {
+        return 2;
+    }
+    if (fixture.claim_cancel_calls != 1 || fixture.claim_cancel_index != 0 ||
+        fixture.claim_cancel_binding != fixture.claim_binding ||
+        fixture.claim_binding == NULL) {
+        return 3;
+    }
+    if (!wait_op_terminal(opened.op, &result) ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 4;
+    }
+    if (!wait_close_flags(opened.owner, &status, 1)) {
+        return 5;
+    }
+    if (fixture.release_claim_calls != 1) {
+        return 6;
+    }
+    return dtv_l3_context_release(opened.owner) == DTV_L3_OK ? 0 : 7;
+}
+
+static int test_claim_cancel_unsupported(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_open_result opened;
+    dtv_l3_close_status status;
+    dtv_l3_op_result result;
+
+    atomic_store(&fixture.hold_claim, 1);
+    fixture.null_claim_cancel = 1;
+    provider = provider_for(&fixture);
+    opened = dtv_l3_open(&provider, 1);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL || !wait_value(&fixture.claim_entered, 1, 2000)) {
+        return 1;
+    }
+    if (dtv_l3_close(opened.owner, 200) != DTV_L3_TIMEOUT) {
+        return 2;
+    }
+    if (fixture.claim_cancel_calls != 0 ||
+        dtv_l3_context_release(opened.owner) != DTV_L3_BUSY) {
+        return 3;
+    }
+    if (dtv_l3_close_status_get(opened.owner, &status) != DTV_L3_OK ||
+        status.open_lane != DTV_L3_LANE_RUNNING ||
+        status.control_lane != DTV_L3_LANE_RUNNING) {
+        return 4;
+    }
+    atomic_store(&fixture.allow_claim, 1);
+    if (!wait_op_terminal(opened.op, &result) ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK ||
+        !wait_close_flags(opened.owner, &status, 1)) {
+        return 5;
+    }
+    return dtv_l3_context_release(opened.owner) == DTV_L3_OK ? 0 : 6;
+}
+
+static int test_claim_cancel_after_ready(void) {
+    struct fixture fixture = fixture_new();
+    dtv_l3_provider provider = provider_for(&fixture);
+    dtv_l3_context *owner;
+
+    owner = open_ready(&provider, NULL);
+    if (owner == NULL) {
+        return 1;
+    }
+    if (dtv_l3_close(owner, 2000) != DTV_L3_OK) {
+        return 2;
+    }
+    if (fixture.claim_cancel_calls != 0) {
+        return 3;
+    }
+    return dtv_l3_context_release(owner) == DTV_L3_OK ? 0 : 4;
+}
+
 int main(int argc, char **argv) {
     if (argc != 2) {
         return 64;
@@ -791,6 +1097,21 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "cleanup-reentry") == 0) {
         return test_release_claim_reentry_frame();
+    }
+    if (strcmp(argv[1], "wait-completion") == 0) {
+        return test_wait_completion_wakes();
+    }
+    if (strcmp(argv[1], "wait-packet") == 0) {
+        return test_wait_packet_wakes();
+    }
+    if (strcmp(argv[1], "claim-cancel-return") == 0) {
+        return test_claim_cancel_return();
+    }
+    if (strcmp(argv[1], "claim-cancel-unsupported") == 0) {
+        return test_claim_cancel_unsupported();
+    }
+    if (strcmp(argv[1], "claim-cancel-after-ready") == 0) {
+        return test_claim_cancel_after_ready();
     }
     return 65;
 }

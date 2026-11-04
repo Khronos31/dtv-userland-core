@@ -98,6 +98,15 @@ public:
                               receiver_id, requested_hz, programmed_hz);
     }
 
+    dtv_l3_result claim_cancel(l3_owner_prototype::Binding *binding,
+                               std::uint32_t index) override {
+        if (provider_.claim_cancel == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return provider_.claim_cancel(provider_.provider_context, binding,
+                                      index);
+    }
+
     void set_binding(std::shared_ptr<l3_owner_prototype::Binding> binding) {
         binding_ = std::move(binding);
     }

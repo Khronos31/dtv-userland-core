@@ -81,6 +81,12 @@ public:
         (void)programmed_hz;
         return DTV_L3_UNSUPPORTED;
     }
+    virtual dtv_l3_result claim_cancel(Binding *binding,
+                                       std::uint32_t index) {
+        (void)binding;
+        (void)index;
+        return DTV_L3_UNSUPPORTED;
+    }
 };
 
 class OwnerEngine {
@@ -298,6 +304,8 @@ private:
                     bool before_submit);
     void run_cleanup();
     bool cleanup_claims_locked() const;
+    void request_claim_cancel_locked();
+    void run_claim_cancel(std::uint32_t index);
     bool control_lane_may_exit_locked() const;
     void maybe_commit_control_exit_locked();
     bool lanes_exit_committed_locked() const;
@@ -330,6 +338,10 @@ private:
     std::vector<bool> claim_quiesced_;
     std::vector<dtv_l3_result> claim_cleanup_errors_;
     bool claim_in_flight_ = false;
+    bool in_flight_claim_valid_ = false;
+    std::uint32_t in_flight_claim_index_ = 0;
+    std::vector<bool> claim_cancel_requested_;
+    dtv_l3_result claim_cancel_result_ = DTV_L3_UNSUPPORTED;
     dtv_l3_result last_cleanup_error_ = DTV_L3_OK;
     dtv_l3_result open_result_ = DTV_L3_ACCEPTED;
     bool restoration_failed_ = false;
