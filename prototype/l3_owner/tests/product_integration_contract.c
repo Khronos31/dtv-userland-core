@@ -45,6 +45,18 @@ struct fixture {
     dtv_l3_result sync_result;
     int init_transfer_started;
     int init_transfer_done;
+    dtv_l3_context *owner;
+    unsigned int reader_open_calls;
+    unsigned int reader_transmit_calls;
+    unsigned int reader_reset_calls;
+    unsigned int reader_close_calls;
+    unsigned int lnb_restore_calls;
+    int transmit_unknown;
+    int lnb_inconsistent;
+    int shutdown_transfer;
+    int shutdown_started;
+    dtv_l3_op *shutdown_op;
+    atomic_ullong last_submit_id;
     uint32_t lnb_mode;
     dtv_l3_open_config seen_config;
     const uint8_t *seen_firmware;
@@ -124,6 +136,7 @@ static dtv_l3_result usb_submit(void *context,
     struct pending *slot;
     (void)request;
     ++fixture->submit_calls;
+    atomic_store(&fixture->last_submit_id, transfer_id);
     if (fixture->sync_complete) {
         uint8_t response[2] = {0x5a, 0x5b};
         const dtv_l3_transfer_completion completion = {
@@ -160,7 +173,7 @@ static dtv_l3_result usb_cancel(void *context,
 
 static dtv_l3_result product_bind(void *context, dtv_l3_context *owner) {
     struct fixture *fixture = context;
-    (void)owner;
+    fixture->owner = owner;
     ++fixture->bind_calls;
     return DTV_L3_OK;
 }
@@ -202,6 +215,161 @@ static dtv_l3_result product_initialize(void *context,
             return DTV_L3_FAILED;
         }
     }
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_reader_status(
+    void *context,
+    uint32_t reader_id,
+    dtv_l3_reader_observation *out) {
+    (void)context;
+    (void)reader_id;
+    out->presence = DTV_L3_CARD_PRESENCE_PRESENT;
+    out->presence_generation = 1;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_reader_open(void *context,
+                                         uint32_t reader_id,
+                                         uint64_t deadline_ns,
+                                         void **session_out,
+                                         uint8_t *atr,
+                                         size_t atr_capacity,
+                                         size_t *atr_length) {
+    struct fixture *fixture = context;
+    (void)reader_id;
+    (void)deadline_ns;
+    ++fixture->reader_open_calls;
+    *session_out = fixture;
+    if (atr != NULL && atr_capacity >= 2) {
+        atr[0] = 0x3b;
+        atr[1] = 0x00;
+        *atr_length = 2;
+    } else {
+        *atr_length = 0;
+    }
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_reader_transmit(
+    void *context,
+    void *session,
+    const uint8_t *apdu,
+    size_t apdu_length,
+    uint8_t *response,
+    size_t response_capacity,
+    size_t *response_length,
+    uint64_t deadline_ns) {
+    struct fixture *fixture = context;
+    (void)session;
+    (void)apdu;
+    (void)apdu_length;
+    (void)deadline_ns;
+    ++fixture->reader_transmit_calls;
+    if (fixture->transmit_unknown) {
+        fixture->transmit_unknown = 0;
+        return DTV_L3_OUTCOME_UNKNOWN;
+    }
+    if (response != NULL && response_capacity >= 2) {
+        response[0] = 0x90;
+        response[1] = 0x00;
+        *response_length = 2;
+    } else {
+        *response_length = 0;
+    }
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_reader_reset(void *context,
+                                          void *session,
+                                          uint64_t deadline_ns,
+                                          uint8_t *atr,
+                                          size_t atr_capacity,
+                                          size_t *atr_length) {
+    struct fixture *fixture = context;
+    (void)session;
+    (void)deadline_ns;
+    ++fixture->reader_reset_calls;
+    if (atr != NULL && atr_capacity >= 1) {
+        atr[0] = 0x3b;
+        *atr_length = 1;
+    }
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_reader_close(void *context,
+                                          void *session,
+                                          uint32_t disposition,
+                                          uint64_t deadline_ns) {
+    struct fixture *fixture = context;
+    (void)session;
+    (void)disposition;
+    (void)deadline_ns;
+    ++fixture->reader_close_calls;
+    if (fixture->shutdown_transfer && !fixture->shutdown_started &&
+        fixture->owner != NULL) {
+        fixture->shutdown_started = 1;
+        dtv_l3_transfer_request request;
+        dtv_l3_op_result result;
+        memset(&request, 0, sizeof(request));
+        request.kind = DTV_L3_TRANSFER_BULK;
+        request.endpoint = 0x81;
+        request.timeout_ms = 0;
+        request.in_capacity = 64;
+        request.claim_index = 0;
+        if (dtv_l3_transfer_start(fixture->owner, &request,
+                                  &fixture->shutdown_op) != DTV_L3_ACCEPTED) {
+            return DTV_L3_FAILED;
+        }
+        /* Intentionally time out and keep the accepted op in flight. */
+        (void)dtv_l3_op_wait(fixture->shutdown_op, 20);
+        (void)dtv_l3_op_poll(fixture->shutdown_op, &result);
+    }
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_lnb_status(void *context,
+                                        uint32_t scope_id,
+                                        dtv_l3_lnb_state *out) {
+    struct fixture *fixture = context;
+    (void)scope_id;
+    out->controlled = fixture->lnb_inconsistent ? DTV_L3_LNB_ON_15V
+                                                : DTV_L3_LNB_OFF;
+    out->consistency = fixture->lnb_inconsistent
+                           ? DTV_L3_LNB_CONSISTENCY_INCONSISTENT
+                           : DTV_L3_LNB_CONSISTENCY_CONSISTENT;
+    out->readback = DTV_L3_SUPPORT_SUPPORTED;
+    out->scope_generation = 1;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_lnb_set(void *context,
+                                     uint32_t scope_id,
+                                     dtv_l3_lnb_command command,
+                                     uint64_t deadline_ns,
+                                     dtv_l3_lnb_state *out) {
+    struct fixture *fixture = context;
+    (void)scope_id;
+    (void)deadline_ns;
+    if (fixture->lnb_inconsistent) {
+        out->controlled = DTV_L3_LNB_ON_15V;
+        out->consistency = DTV_L3_LNB_CONSISTENCY_INCONSISTENT;
+    } else {
+        out->controlled = command;
+        out->consistency = DTV_L3_LNB_CONSISTENCY_CONSISTENT;
+    }
+    out->readback = DTV_L3_SUPPORT_SUPPORTED;
+    out->scope_generation = 1;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_result product_lnb_restore(void *context,
+                                         uint32_t scope_id,
+                                         dtv_l3_restore_result *out) {
+    struct fixture *fixture = context;
+    (void)scope_id;
+    ++fixture->lnb_restore_calls;
+    *out = DTV_L3_RESTORE_SUCCEEDED;
     return DTV_L3_OK;
 }
 
@@ -351,7 +519,15 @@ static dtv_l3_product_adapter adapter_for(struct fixture *fixture,
         .stream_attach = product_attach,
         .stream_attach_ex = product_attach_ex,
         .stream_stop = product_stream_stop,
-        .stream_stop_ex = product_stop_ex};
+        .stream_stop_ex = product_stop_ex,
+        .reader_status = product_reader_status,
+        .reader_open = product_reader_open,
+        .reader_transmit = product_reader_transmit,
+        .reader_reset = product_reader_reset,
+        .reader_close = product_reader_close,
+        .lnb_status = product_lnb_status,
+        .lnb_set = product_lnb_set,
+        .lnb_restore = product_lnb_restore};
 }
 
 static int wait_op_terminal(dtv_l3_op *op, dtv_l3_op_result *result) {
@@ -515,7 +691,8 @@ static int exercise_product(dtv_l3_context *owner, struct fixture *fixture) {
         return 15;
     }
     if (dtv_l3_reader_acquire(owner, 0, &reader) != DTV_L3_UNSUPPORTED ||
-        dtv_l3_lnb_set(owner, 0, 1) != DTV_L3_UNSUPPORTED) {
+        dtv_l3_lnb_set(owner, 0, DTV_L3_LNB_ON_15V, 0, NULL) !=
+            DTV_L3_REJECTED) {
         return 16;
     }
     if (fixture->tune_ex_calls != 1 || fixture->bridge_start_calls != 1 ||
@@ -906,6 +1083,8 @@ static int test_initialize_transfer_failure(void) {
     fixture.sync_result = DTV_L3_OK;
     usb = usb_provider_for(&fixture);
     adapter = adapter_for(&fixture, NULL);
+    adapter.reader_close = NULL;
+    adapter.lnb_restore = NULL;
     opened = dtv_l3_open_ex(&usb, &adapter, 1);
     if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
         opened.op == NULL) {
@@ -1078,6 +1257,125 @@ static int test_queue_capacity(void) {
     return close_and_release(owner) ? 0 : 10;
 }
 
+static int test_g8_reader_lnb_shutdown(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_factory factory;
+    dtv_l3_open_args args;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result op_result;
+    dtv_l3_card_info card;
+    dtv_l3_reader *reader = NULL;
+    dtv_l3_reader *second = NULL;
+    dtv_l3_lnb_state lnb;
+    uint8_t atr[8];
+    size_t atr_length = 0;
+    const uint8_t apdu[4] = {0x00, 0xa4, 0x00, 0x00};
+    uint8_t response[8];
+    size_t response_length = 0;
+    unsigned int attempt;
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture_catalog_init(&fixture, NULL);
+    usb = usb_provider_for(&fixture);
+    factory = factory_v1_for(&fixture);
+    memset(&args, 0, sizeof(args));
+    args.struct_size = sizeof(args);
+    args.usb_provider = &usb;
+    args.factory = &factory;
+    args.power_permission = 1;
+    opened = dtv_l3_open_with_args(&args);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (dtv_l3_op_wait(opened.op, 2000) != DTV_L3_OK ||
+        dtv_l3_op_poll(opened.op, &op_result) != DTV_L3_OK ||
+        op_result.result != DTV_L3_OK || dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 2;
+    }
+    if (dtv_l3_card_status(opened.owner, 0, &card) != DTV_L3_OK ||
+        card.presence != DTV_L3_CARD_PRESENCE_PRESENT) {
+        return 3;
+    }
+    if (dtv_l3_reader_open(opened.owner, 0, 0, &reader, atr, sizeof(atr),
+                           &atr_length) != DTV_L3_OK ||
+        reader == NULL || atr_length != 2) {
+        return 4;
+    }
+    if (dtv_l3_reader_open(opened.owner, 0, 0, &second, atr, sizeof(atr),
+                           &atr_length) != DTV_L3_BUSY ||
+        second != NULL) {
+        return 5;
+    }
+    if (dtv_l3_reader_transmit(reader, 1, apdu, sizeof(apdu), response,
+                               sizeof(response), &response_length, 0) !=
+            DTV_L3_OK ||
+        response_length != 2 ||
+        dtv_l3_reader_transmit(reader, 1, apdu, sizeof(apdu), response,
+                               sizeof(response), &response_length, 0) !=
+            DTV_L3_INVALID) {
+        return 6;
+    }
+    fixture.transmit_unknown = 1;
+    if (dtv_l3_reader_transmit(reader, 2, apdu, sizeof(apdu), response,
+                               sizeof(response), &response_length, 0) !=
+        DTV_L3_OUTCOME_UNKNOWN) {
+        return 7;
+    }
+    if (dtv_l3_reader_transmit(reader, 3, apdu, sizeof(apdu), response,
+                               sizeof(response), &response_length, 0) !=
+            DTV_L3_BUSY ||
+        dtv_l3_reader_reset(reader, 0, atr, sizeof(atr), &atr_length) !=
+            DTV_L3_OK) {
+        return 8;
+    }
+    if (dtv_l3_lnb_set(opened.owner, 0, DTV_L3_LNB_ON_15V, 0, &lnb) !=
+            DTV_L3_OK ||
+        lnb.controlled != DTV_L3_LNB_ON_15V) {
+        return 9;
+    }
+    fixture.lnb_inconsistent = 1;
+    if (dtv_l3_lnb_set(opened.owner, 0, DTV_L3_LNB_OFF, 0, &lnb) != DTV_L3_OK ||
+        lnb.consistency != DTV_L3_LNB_CONSISTENCY_INCONSISTENT ||
+        dtv_l3_lnb_status(opened.owner, 0, &lnb) != DTV_L3_OK ||
+        lnb.consistency != DTV_L3_LNB_CONSISTENCY_INCONSISTENT) {
+        return 10;
+    }
+    fixture.shutdown_transfer = 1;
+    if (dtv_l3_close(opened.owner, 0) != DTV_L3_TIMEOUT) {
+        return 11;
+    }
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        if (fixture.reader_close_calls != 0 &&
+            fixture.lnb_restore_calls != 0) {
+            break;
+        }
+        sleep_ms(1);
+    }
+    if (fixture.reader_close_calls == 0 || fixture.lnb_restore_calls != 1 ||
+        fixture.release_claim_calls != 0 || fixture.shutdown_op == NULL) {
+        return 12;
+    }
+    fire_pending(&fixture, atomic_load(&fixture->last_submit_id));
+    if (dtv_l3_op_release(fixture.shutdown_op) != DTV_L3_OK) {
+        return 13;
+    }
+    fixture.shutdown_op = NULL;
+    if (dtv_l3_reader_release(reader, DTV_L3_CARD_DISPOSITION_LEAVE, 0) !=
+            DTV_L3_OK ||
+        fixture.reader_close_calls < 2) {
+        return 14;
+    }
+    if (!wait_releasable(opened.owner)) {
+        return 15;
+    }
+    if (!release_owner(opened.owner)) {
+        return 16;
+    }
+    return 0;
+}
+
 static int test_missing_product_callbacks(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
@@ -1139,6 +1437,9 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "capacity") == 0) {
         return test_queue_capacity();
+    }
+    if (strcmp(argv[1], "g8") == 0) {
+        return test_g8_reader_lnb_shutdown();
     }
     return 65;
 }

@@ -19,6 +19,7 @@ constexpr int kControlLaneMask = 2;
 thread_local int callback_frame_depth = 0;
 thread_local bool control_lane_thread = false;
 thread_local bool initialization_lane_thread = false;
+thread_local bool shutdown_frame_thread = false;
 std::atomic<int> lane_start_failure_mask{0};
 
 bool in_control_lane() {
@@ -27,6 +28,10 @@ bool in_control_lane() {
 
 bool in_initialization_lane() {
     return initialization_lane_thread;
+}
+
+bool in_shutdown_frame() {
+    return shutdown_frame_thread;
 }
 
 struct ControlLaneGuard {
@@ -195,6 +200,11 @@ dtv_l3_result OwnerEngine::progress_recovery() {
         }
     }
     return DTV_L3_OK;
+}
+
+void OwnerEngine::set_shutdown_hook(std::function<void()> hook) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    shutdown_hook_ = std::move(hook);
 }
 
 void OwnerEngine::set_initialize_hook(std::function<dtv_l3_result()> hook) {
@@ -433,12 +443,14 @@ dtv_l3_result OwnerEngine::start(
             return DTV_L3_DISCONNECTED;
         }
         const bool initialization_call = in_initialization_lane();
+        const bool shutdown_call = in_shutdown_frame();
         const bool open_allows_start =
             initialization_call
                 ? (open_state_ == OpenState::Opening ||
                    open_state_ == OpenState::Ready)
-                : open_state_ == OpenState::Ready;
-        if (!open_allows_start || close_requested_ ||
+                : (shutdown_call ? close_requested_
+                                 : open_state_ == OpenState::Ready);
+        if (!open_allows_start || (!shutdown_call && close_requested_) ||
             claims_[request.claim_index] != ClaimState::Ready) {
             return DTV_L3_BUSY;
         }
@@ -1821,7 +1833,8 @@ dtv_l3_result OwnerEngine::wait_operation(
     if (!operation) {
         return DTV_L3_INVALID;
     }
-    const bool nonblocking = in_callback_frame();
+    const bool shutdown = in_shutdown_frame();
+    const bool nonblocking = in_callback_frame() && !shutdown;
     Borrow borrow(*this);
     if (!borrow) {
         return DTV_L3_BUSY;
@@ -1835,8 +1848,8 @@ dtv_l3_result OwnerEngine::wait_operation(
         return operation->state == DTV_L3_OP_DONE ||
                operation->state == DTV_L3_OP_FAILED;
     };
-    const auto ready = [this, &terminal] {
-        return terminal() || close_requested_;
+    const auto ready = [this, &terminal, shutdown] {
+        return terminal() || (close_requested_ && !shutdown);
     };
     if (nonblocking) {
         if (terminal()) {
@@ -2038,6 +2051,7 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
     std::vector<std::shared_ptr<Operation>> pending;
     std::vector<std::uint64_t> stop_streams;
     std::vector<std::uint64_t> finish_streams;
+    bool shutdown_pending = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         close_requested_ = true;
@@ -2054,6 +2068,25 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
                     run_cancel(operation, before_submit);
                 });
             }
+        }
+        if (shutdown_hook_ && !shutdown_queued_) {
+            shutdown_queued_ = true;
+            shutdown_in_flight_hold_ = true;
+            shutdown_pending = true;
+            enqueue_locked([this] {
+                shutdown_frame_thread = true;
+                const std::function<void()> hook = shutdown_hook_;
+                if (hook) {
+                    try {
+                        hook();
+                    } catch (...) {
+                        log(DTV_L3_LOG_ERROR, "shutdown_frame",
+                            "contained C++ exception");
+                    }
+                }
+                shutdown_frame_thread = false;
+                finish_close();
+            });
         }
         if (open_state_ != OpenState::Opening && open_state_ != OpenState::Failed &&
             open_state_ != OpenState::Closed) {
@@ -2106,7 +2139,9 @@ dtv_l3_result OwnerEngine::close(std::uint32_t timeout_ms) {
         work_condition_.notify_all();
     }
 
-    finish_close();
+    if (!shutdown_pending) {
+        finish_close();
+    }
 
     std::unique_lock<std::mutex> lock(mutex_);
     if (nonblocking) {
@@ -2586,7 +2621,8 @@ void OwnerEngine::finish_close() {
                 return;
             }
         }
-        if (!physical_settled_locked()) {
+        if ((shutdown_in_flight_hold_ && !in_flight_.empty()) ||
+            !physical_settled_locked()) {
             return;
         }
         cleanup_started_ = true;

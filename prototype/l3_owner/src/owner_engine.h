@@ -186,6 +186,7 @@ public:
     void set_call_flags(std::uint32_t flags);
     void set_stream_queue_packets(std::uint32_t packets);
     void set_initialize_hook(std::function<dtv_l3_result()> hook);
+    void set_shutdown_hook(std::function<void()> hook);
     dtv_l3_result progress_recovery();
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
@@ -393,6 +394,9 @@ private:
     std::uint32_t call_flags_ =
         DTV_L3_CALL_FLAG_CANCEL_IN_FRAME | DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME;
     std::function<dtv_l3_result()> initialize_hook_;
+    std::function<void()> shutdown_hook_;
+    bool shutdown_queued_ = false;
+    bool shutdown_in_flight_hold_ = false;
     struct RecoveryWork {
         bool submit = false;
         std::shared_ptr<Operation> operation;

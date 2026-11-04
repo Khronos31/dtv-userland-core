@@ -4,6 +4,8 @@
 #include "owner_engine.h"
 
 #include <atomic>
+#include <chrono>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <new>
@@ -314,6 +316,17 @@ struct dtv_l3_open_op_state {
     std::uint64_t cleanup_epoch = 0;
 };
 
+struct dtv_l3_reader {
+    dtv_l3_context *owner = nullptr;
+    std::uint32_t reader_id = 0;
+    std::uint64_t generation = 0;
+    void *session = nullptr;
+    bool fence_required = false;
+    bool retired = false;
+    bool has_request = false;
+    std::uint64_t last_request_id = 0;
+};
+
 struct dtv_l3_context {
     explicit dtv_l3_context(const dtv_l3_provider &provider)
         : legacy(std::make_unique<CProvider>(provider)),
@@ -344,6 +357,31 @@ struct dtv_l3_context {
                                                 this);
             });
         }
+        if (adapter.reader_close != nullptr || adapter.lnb_restore != nullptr) {
+            engine->set_shutdown_hook([this] {
+                std::lock_guard<std::mutex> lock(reader_mutex);
+                if (product_view->reader_close != nullptr) {
+                    for (auto &entry : readers) {
+                        if (!entry.second->retired && entry.second->session != nullptr) {
+                            (void)product_view->reader_close(
+                                product_view->product_context,
+                                entry.second->session,
+                                DTV_L3_CARD_DISPOSITION_LEAVE, 0);
+                        }
+                    }
+                }
+                if (product_view->lnb_restore != nullptr) {
+                    for (auto &entry : lnb_states) {
+                        dtv_l3_restore_result restoration =
+                            DTV_L3_RESTORE_UNKNOWN;
+                        (void)product_view->lnb_restore(
+                            product_view->product_context, entry.first,
+                            &restoration);
+                        entry.second.restoration = restoration;
+                    }
+                }
+            });
+        }
     }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
@@ -352,6 +390,9 @@ struct dtv_l3_context {
         if (adapter_release != nullptr) {
             adapter_release(adapter_owner);
         }
+        for (auto *reader : retired_readers) {
+            delete reader;
+        }
     }
 
     std::unique_ptr<CProvider> legacy;
@@ -359,6 +400,12 @@ struct dtv_l3_context {
     std::unique_ptr<CProductAdapter> product_adapter;
     const dtv_l3_product_adapter *product_view = nullptr;
     dtv_l3_capabilities capabilities{};
+    std::mutex reader_mutex;
+    std::map<std::uint32_t, dtv_l3_reader *> readers;
+    std::vector<dtv_l3_reader *> retired_readers;
+    std::map<std::uint32_t, dtv_l3_lnb_state> lnb_states;
+    std::uint64_t next_reader_generation = 1;
+    std::uint8_t power_permission = 0;
     const dtv_l3_capability_catalog *catalog = nullptr;
     dtv_l3_adapter_release_fn adapter_release = nullptr;
     void *adapter_owner = nullptr;
@@ -682,6 +729,7 @@ dtv_l3_open_result dtv_l3_open_with_args(const dtv_l3_open_args *args) {
     }
     opened.owner->adapter_release = args->factory->release;
     opened.owner->adapter_owner = adapter_owner;
+    opened.owner->power_permission = args->power_permission != 0 ? 1 : 0;
     return opened;
 }
 
@@ -1212,6 +1260,16 @@ dtv_l3_result dtv_l3_stream_destroy(dtv_l3_stream *stream) {
     }
 }
 
+static bool deadline_expired(std::uint64_t deadline_ns) {
+    if (deadline_ns == DTV_L3_DEADLINE_NONE) {
+        return false;
+    }
+    const auto now = std::chrono::steady_clock::now().time_since_epoch();
+    return static_cast<std::uint64_t>(
+               std::chrono::duration_cast<std::chrono::nanoseconds>(now)
+                   .count()) >= deadline_ns;
+}
+
 dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
                                     uint32_t reader_id,
                                     dtv_l3_reader **reader_out) {
@@ -1228,14 +1286,271 @@ dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
     }
 }
 
-dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
-                             uint32_t receiver_id,
-                             uint32_t mode) {
+dtv_l3_result dtv_l3_card_status(dtv_l3_context *owner,
+                                 uint32_t reader_id,
+                                 dtv_l3_card_info *status) {
     try {
         l3_owner_prototype::maybe_throw_test_entry_exception();
-        (void)receiver_id;
-        (void)mode;
-        return owner == nullptr ? DTV_L3_INVALID : DTV_L3_UNSUPPORTED;
+        if (owner == nullptr || status == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        *status = {};
+        dtv_l3_reader *handle = nullptr;
+        {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            const auto found = owner->readers.find(reader_id);
+            if (found != owner->readers.end()) {
+                handle = found->second;
+            }
+        }
+        if (handle != nullptr) {
+            status->handle_present = 1;
+            status->reader_generation = handle->generation;
+            status->fence_required = handle->fence_required ? 1 : 0;
+            status->retired = handle->retired ? 1 : 0;
+        }
+        if (owner->product_view != nullptr &&
+            owner->product_view->reader_status != nullptr) {
+            dtv_l3_reader_observation observation{};
+            const dtv_l3_result result = owner->product_view->reader_status(
+                owner->product_view->product_context, reader_id, &observation);
+            if (result != DTV_L3_OK) {
+                return result;
+            }
+            status->presence = observation.presence;
+        } else {
+            status->presence = DTV_L3_CARD_PRESENCE_UNKNOWN;
+        }
+        return DTV_L3_OK;
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_card_status");
+    }
+}
+
+dtv_l3_result dtv_l3_reader_open(dtv_l3_context *owner,
+                                 uint32_t reader_id,
+                                 uint64_t deadline_ns,
+                                 dtv_l3_reader **reader,
+                                 uint8_t *atr,
+                                 size_t atr_capacity,
+                                 size_t *atr_length) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr || reader == nullptr ||
+            owner->product_view == nullptr ||
+            owner->product_view->reader_open == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        *reader = nullptr;
+        if (deadline_expired(deadline_ns)) {
+            return DTV_L3_TIMEOUT;
+        }
+        {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            if (owner->readers.find(reader_id) != owner->readers.end()) {
+                return DTV_L3_BUSY;
+            }
+        }
+        void *session = nullptr;
+        size_t length = 0;
+        const dtv_l3_result result = owner->product_view->reader_open(
+            owner->product_view->product_context, reader_id, deadline_ns,
+            &session, atr, atr_capacity, &length);
+        if (result != DTV_L3_OK) {
+            return result;
+        }
+        auto handle = std::make_unique<dtv_l3_reader>();
+        handle->owner = owner;
+        handle->reader_id = reader_id;
+        handle->session = session;
+        {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            if (owner->readers.find(reader_id) != owner->readers.end()) {
+                (void)owner->product_view->reader_close(
+                    owner->product_view->product_context, session,
+                    DTV_L3_CARD_DISPOSITION_LEAVE, 0);
+                return DTV_L3_BUSY;
+            }
+            handle->generation = owner->next_reader_generation++;
+            *reader = handle.get();
+            owner->readers.emplace(reader_id, handle.release());
+        }
+        if (atr_length != nullptr) {
+            *atr_length = length;
+        }
+        return DTV_L3_OK;
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_reader_open");
+    }
+}
+
+dtv_l3_result dtv_l3_reader_transmit(dtv_l3_reader *reader,
+                                     uint64_t request_id,
+                                     const uint8_t *apdu,
+                                     size_t apdu_length,
+                                     uint8_t *response,
+                                     size_t response_capacity,
+                                     size_t *response_length,
+                                     uint64_t deadline_ns) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (reader == nullptr || reader->owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        dtv_l3_context *owner = reader->owner;
+        {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            if (reader->retired) {
+                return DTV_L3_STALE;
+            }
+            if (reader->fence_required) {
+                return DTV_L3_BUSY;
+            }
+            if (reader->has_request && reader->last_request_id == request_id) {
+                return DTV_L3_INVALID;
+            }
+            if (deadline_expired(deadline_ns)) {
+                return DTV_L3_TIMEOUT;
+            }
+            reader->has_request = true;
+            reader->last_request_id = request_id;
+        }
+        if (owner->product_view == nullptr ||
+            owner->product_view->reader_transmit == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        const dtv_l3_result result = owner->product_view->reader_transmit(
+            owner->product_view->product_context, reader->session, apdu,
+            apdu_length, response, response_capacity, response_length,
+            deadline_ns);
+        if (result == DTV_L3_OUTCOME_UNKNOWN) {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            reader->fence_required = true;
+        }
+        return result;
+    } catch (...) {
+        return entry_failure(reader != nullptr ? reader->owner : nullptr,
+                             "dtv_l3_reader_transmit");
+    }
+}
+
+dtv_l3_result dtv_l3_reader_reset(dtv_l3_reader *reader,
+                                  uint64_t deadline_ns,
+                                  uint8_t *atr,
+                                  size_t atr_capacity,
+                                  size_t *atr_length) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (reader == nullptr || reader->owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        dtv_l3_context *owner = reader->owner;
+        if (reader->retired) {
+            return DTV_L3_STALE;
+        }
+        if (owner->product_view == nullptr ||
+            owner->product_view->reader_reset == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        const dtv_l3_result result = owner->product_view->reader_reset(
+            owner->product_view->product_context, reader->session, deadline_ns,
+            atr, atr_capacity, atr_length);
+        std::lock_guard<std::mutex> lock(owner->reader_mutex);
+        if (result == DTV_L3_OK) {
+            reader->fence_required = false;
+            reader->generation = owner->next_reader_generation++;
+        } else if (result != DTV_L3_CLOSING) {
+            reader->fence_required = true;
+        }
+        return result;
+    } catch (...) {
+        return entry_failure(reader != nullptr ? reader->owner : nullptr,
+                             "dtv_l3_reader_reset");
+    }
+}
+
+dtv_l3_result dtv_l3_reader_release(dtv_l3_reader *reader,
+                                    uint32_t disposition,
+                                    uint64_t deadline_ns) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (reader == nullptr || reader->owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        dtv_l3_context *owner = reader->owner;
+        if (reader->retired) {
+            return DTV_L3_STALE;
+        }
+        if (owner->product_view == nullptr ||
+            owner->product_view->reader_close == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        const dtv_l3_result result = owner->product_view->reader_close(
+            owner->product_view->product_context, reader->session, disposition,
+            deadline_ns);
+        if (result != DTV_L3_OK) {
+            return result;
+        }
+        std::lock_guard<std::mutex> lock(owner->reader_mutex);
+        reader->retired = true;
+        const auto found = owner->readers.find(reader->reader_id);
+        if (found != owner->readers.end() && found->second == reader) {
+            owner->readers.erase(found);
+            owner->retired_readers.push_back(reader);
+        }
+        return DTV_L3_OK;
+    } catch (...) {
+        return entry_failure(reader != nullptr ? reader->owner : nullptr,
+                             "dtv_l3_reader_release");
+    }
+}
+
+dtv_l3_result dtv_l3_lnb_status(dtv_l3_context *owner,
+                                uint32_t scope_id,
+                                dtv_l3_lnb_state *status) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr || status == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        if (owner->product_view == nullptr ||
+            owner->product_view->lnb_status == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        return owner->product_view->lnb_status(
+            owner->product_view->product_context, scope_id, status);
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_lnb_status");
+    }
+}
+
+dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
+                             uint32_t scope_id,
+                             dtv_l3_lnb_command command,
+                             uint64_t deadline_ns,
+                             dtv_l3_lnb_state *status) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        if (owner->product_view == nullptr ||
+            owner->product_view->lnb_set == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        if (!owner->power_permission) {
+            return DTV_L3_REJECTED;
+        }
+        dtv_l3_lnb_state local{};
+        dtv_l3_lnb_state *out = status != nullptr ? status : &local;
+        const dtv_l3_result result = owner->product_view->lnb_set(
+            owner->product_view->product_context, scope_id, command,
+            deadline_ns, out);
+        if (result == DTV_L3_OK || result == DTV_L3_OUTCOME_UNKNOWN) {
+            std::lock_guard<std::mutex> lock(owner->reader_mutex);
+            owner->lnb_states[scope_id] = *out;
+        }
+        return result;
     } catch (...) {
         return entry_failure(owner, "dtv_l3_lnb_set");
     }

@@ -30,7 +30,8 @@ typedef enum dtv_l3_result {
     DTV_L3_WAIT_TIMEOUT = 9,
     DTV_L3_CLOSING = 10,
     DTV_L3_DISCONNECTED = 11,
-    DTV_L3_OUTCOME_UNKNOWN = 12
+    DTV_L3_OUTCOME_UNKNOWN = 12,
+    DTV_L3_REJECTED = 13
 } dtv_l3_result;
 
 /* A wait deadline of zero observes immediately; this value waits indefinitely. */
@@ -436,16 +437,71 @@ typedef struct dtv_l3_receiver_capability {
     dtv_l3_support support;
 } dtv_l3_receiver_capability;
 
+#define DTV_L3_CARD_PROTOCOL_T1 0x0001u
+#define DTV_L3_CARD_DISPOSITION_LEAVE 0x0001u
+#define DTV_L3_CARD_DISPOSITION_RESET 0x0002u
+
+typedef enum dtv_l3_card_presence {
+    DTV_L3_CARD_PRESENCE_UNKNOWN = 0,
+    DTV_L3_CARD_PRESENCE_PRESENT = 1,
+    DTV_L3_CARD_PRESENCE_ABSENT = 2
+} dtv_l3_card_presence;
+
 typedef struct dtv_l3_reader_capability {
     uint32_t id;
     dtv_l3_support external_apdu;
     dtv_l3_support support;
+    dtv_l3_support presence_observation;
+    uint32_t protocols;
+    uint32_t max_apdu_bytes;
+    uint32_t dispositions;
+    dtv_l3_support card_ts_concurrency;
 } dtv_l3_reader_capability;
+
+typedef struct dtv_l3_reader_observation {
+    dtv_l3_card_presence presence;
+    uint64_t presence_generation;
+    uint64_t observed_at_ns;
+} dtv_l3_reader_observation;
+
+typedef struct dtv_l3_card_info {
+    dtv_l3_card_presence presence;
+    uint64_t reader_generation;
+    uint8_t external_apdu;
+    uint8_t fence_required;
+    uint8_t handle_present;
+    uint8_t retired;
+} dtv_l3_card_info;
+
+#define DTV_L3_LNB_COMMAND_OFF 0x0001u
+#define DTV_L3_LNB_COMMAND_ON_15V 0x0002u
+
+typedef enum dtv_l3_lnb_command {
+    DTV_L3_LNB_OFF = 1,
+    DTV_L3_LNB_ON_15V = 2
+} dtv_l3_lnb_command;
+
+typedef enum dtv_l3_lnb_consistency {
+    DTV_L3_LNB_CONSISTENCY_UNKNOWN = 0,
+    DTV_L3_LNB_CONSISTENCY_CONSISTENT = 1,
+    DTV_L3_LNB_CONSISTENCY_INCONSISTENT = 2
+} dtv_l3_lnb_consistency;
 
 typedef struct dtv_l3_lnb_scope_capability {
     uint32_t id;
     dtv_l3_support support;
+    uint32_t receivers_mask;
+    uint32_t commands;
+    dtv_l3_support readback;
 } dtv_l3_lnb_scope_capability;
+
+typedef struct dtv_l3_lnb_state {
+    uint32_t controlled;
+    dtv_l3_lnb_consistency consistency;
+    dtv_l3_support readback;
+    uint64_t scope_generation;
+    dtv_l3_restore_result restoration;
+} dtv_l3_lnb_state;
 
 typedef struct dtv_l3_shared_scope_capability {
     uint32_t id;
@@ -550,6 +606,46 @@ typedef struct dtv_l3_product_adapter {
     dtv_l3_stream_attach_ex_fn stream_attach_ex;
     dtv_l3_stream_stop_fn stream_stop;
     dtv_l3_stream_stop_ex_fn stream_stop_ex;
+    /* G8 optional reader/LNB callbacks; NULL reports UNSUPPORTED. */
+    dtv_l3_result (*reader_status)(void *product_context,
+                                   uint32_t reader_id,
+                                   dtv_l3_reader_observation *out);
+    dtv_l3_result (*reader_open)(void *product_context,
+                                 uint32_t reader_id,
+                                 uint64_t deadline_ns,
+                                 void **session_out,
+                                 uint8_t *atr,
+                                 size_t atr_capacity,
+                                 size_t *atr_length);
+    dtv_l3_result (*reader_transmit)(void *product_context,
+                                     void *session,
+                                     const uint8_t *apdu,
+                                     size_t apdu_length,
+                                     uint8_t *response,
+                                     size_t response_capacity,
+                                     size_t *response_length,
+                                     uint64_t deadline_ns);
+    dtv_l3_result (*reader_reset)(void *product_context,
+                                  void *session,
+                                  uint64_t deadline_ns,
+                                  uint8_t *atr,
+                                  size_t atr_capacity,
+                                  size_t *atr_length);
+    dtv_l3_result (*reader_close)(void *product_context,
+                                  void *session,
+                                  uint32_t disposition,
+                                  uint64_t deadline_ns);
+    dtv_l3_result (*lnb_status)(void *product_context,
+                                uint32_t scope_id,
+                                dtv_l3_lnb_state *out);
+    dtv_l3_result (*lnb_set)(void *product_context,
+                             uint32_t scope_id,
+                             dtv_l3_lnb_command command,
+                             uint64_t deadline_ns,
+                             dtv_l3_lnb_state *out);
+    dtv_l3_result (*lnb_restore)(void *product_context,
+                                 uint32_t scope_id,
+                                 dtv_l3_restore_result *out);
 } dtv_l3_product_adapter;
 
 /*
@@ -809,13 +905,44 @@ dtv_l3_result dtv_l3_stream_release(dtv_l3_stream *stream,
 /* Frees the token. A retired token stays readable as STALE until destroyed. */
 dtv_l3_result dtv_l3_stream_destroy(dtv_l3_stream *stream);
 
-/* CARD/LNB stay UNSUPPORTED in this increment; no provider side effect. */
+/* Legacy reader stub; G8 uses reader_open/transmit/reset/release. */
 dtv_l3_result dtv_l3_reader_acquire(dtv_l3_context *owner,
                                     uint32_t reader_id,
                                     dtv_l3_reader **reader_out);
+dtv_l3_result dtv_l3_card_status(dtv_l3_context *owner,
+                                 uint32_t reader_id,
+                                 dtv_l3_card_info *status);
+dtv_l3_result dtv_l3_reader_open(dtv_l3_context *owner,
+                                 uint32_t reader_id,
+                                 uint64_t deadline_ns,
+                                 dtv_l3_reader **reader,
+                                 uint8_t *atr,
+                                 size_t atr_capacity,
+                                 size_t *atr_length);
+dtv_l3_result dtv_l3_reader_transmit(dtv_l3_reader *reader,
+                                     uint64_t request_id,
+                                     const uint8_t *apdu,
+                                     size_t apdu_length,
+                                     uint8_t *response,
+                                     size_t response_capacity,
+                                     size_t *response_length,
+                                     uint64_t deadline_ns);
+dtv_l3_result dtv_l3_reader_reset(dtv_l3_reader *reader,
+                                  uint64_t deadline_ns,
+                                  uint8_t *atr,
+                                  size_t atr_capacity,
+                                  size_t *atr_length);
+dtv_l3_result dtv_l3_reader_release(dtv_l3_reader *reader,
+                                    uint32_t disposition,
+                                    uint64_t deadline_ns);
+dtv_l3_result dtv_l3_lnb_status(dtv_l3_context *owner,
+                                uint32_t scope_id,
+                                dtv_l3_lnb_state *status);
 dtv_l3_result dtv_l3_lnb_set(dtv_l3_context *owner,
-                             uint32_t receiver_id,
-                             uint32_t mode);
+                             uint32_t scope_id,
+                             dtv_l3_lnb_command command,
+                             uint64_t deadline_ns,
+                             dtv_l3_lnb_state *status);
 
 #ifdef __cplusplus
 }
