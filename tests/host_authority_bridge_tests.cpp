@@ -106,7 +106,7 @@ public:
             capture_condition.wait(lock, [this] { return capture_released; });
         }
         return fail_capture_start && receiver == 2U
-            ? Result<void>::failure(Error::UNSUPPORTED)
+            ? Result<void>::failure(capture_start_error)
             : Result<void>::success();
     }
     Result<void> stop_capture(std::uint8_t, ipc::System) noexcept override
@@ -119,6 +119,7 @@ public:
     unsigned capture_starts = 0U;
     unsigned capture_stops = 0U;
     bool fail_capture_start = false;
+    Error capture_start_error = Error::UNSUPPORTED;
     bool internal_card_observation_supported = false;
     w::Optional<bool> internal_card_inserted{};
     std::mutex card_status_mutex;
@@ -2335,10 +2336,12 @@ bool test_authority_stream_prepare_commit_stop()
 }
 
 bool failed_attach_cleanup_case(bool missing_final_when_unattached,
-                                bool force_unquiesced = false)
+                                bool force_unquiesced = false,
+                                Error attach_error = Error::UNSUPPORTED)
 {
     Backend backend;
     backend.fail_capture_start = true;
+    backend.capture_start_error = attach_error;
     Nonce nonce;
     Time time;
     Stream stream(missing_final_when_unattached);
@@ -2468,7 +2471,7 @@ bool failed_attach_cleanup_case(bool missing_final_when_unattached,
         result = bridge.take_data_attach_result(data.value());
         if (!result.ready) std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    if (!result.ready || result.error != Error::UNSUPPORTED ||
+    if (!result.ready || result.error != attach_error ||
         result.response.stream_id != start_response.value().stream_id) {
         std::cerr << "failed ATTACH result ready=" << result.ready
                   << " error=" << static_cast<unsigned>(result.error)
@@ -2643,8 +2646,11 @@ bool test_failed_attach_prepare_is_reported_to_data_owner()
     const bool final_available = failed_attach_cleanup_case(false);
     const bool final_missing = failed_attach_cleanup_case(true);
     const bool nonquiesced = failed_attach_cleanup_case(true, true);
+    const bool busy_attach = failed_attach_cleanup_case(
+        false, false, Error::BUSY);
     const bool attached_final_missing = test_attached_missing_final_stays_fatal();
-    return final_available && final_missing && nonquiesced && attached_final_missing;
+    return final_available && final_missing && nonquiesced && busy_attach &&
+           attached_final_missing;
 }
 
 bool test_rejected_start_does_not_record_stream()

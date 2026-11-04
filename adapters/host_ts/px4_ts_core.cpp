@@ -15,6 +15,7 @@
 #include <cstddef>
 #include <cstdint>
 #include <cstdio>
+#include <cstdlib>
 #include <cstring>
 #include <limits>
 #include <memory>
@@ -31,6 +32,17 @@ using namespace ipc;
 using namespace ipc::posix;
 
 constexpr std::uint64_t kTsProgressTimeoutMs = 5000U;
+
+void report_recording_stage(const Px4TsArguments& arguments, const char* stage,
+                            Error result) noexcept
+{
+    const char* const enabled = std::getenv("ASICEN_RECORDING_DIAGNOSTIC");
+    if (enabled == nullptr || std::strcmp(enabled, "1") != 0) return;
+    std::fprintf(stderr,
+        "asicen-ts-diagnostic receiver=%u stage=%s result=%s code=%u\n",
+        static_cast<unsigned>(arguments.receiver), stage, error_string(result),
+        static_cast<unsigned>(result));
+}
 
 enum class Px4TsParseMode : std::uint8_t { normal, control };
 
@@ -910,6 +922,8 @@ public:
             const auto error = wire::decode_error_response(frame.payload);
             if (!error) return fail(error.error(), Px4TsFailureKind::ipc);
             failure_ = wire_error(error.value().error.code);
+            if (!attached_)
+                report_recording_stage(arguments_, "attach-response", failure_);
             return Result<void>::failure(failure_);
         }
         if (frame.header.kind == wire::Kind::response &&
@@ -1480,6 +1494,7 @@ static Result<Px4TsRunResult> run_wire_profile(
         : wire::begin_recording(control_transport, options,
                                 Timeout{arguments.tune_timeout_ms + 6000U});
     if (!started) {
+        report_recording_stage(arguments, "control-setup", started.error);
         if (diagnostics != nullptr && started.remote_error_code != 0U)
             diagnostics->stage = Px4TsDiagnosticStage::recording_setup;
         control.value().close();
@@ -1521,12 +1536,14 @@ static Result<Px4TsRunResult> run_wire_profile(
         data.value().write_all(ByteView{attach_frame.data(), attach_size.value()},
                                Timeout{2000U});
     if (!attach_written) {
+        report_recording_stage(arguments, "attach-request", attach_written.error());
         data.value().close();
         (void)wire::stop_recording(control_transport, session, Timeout{4000U});
         (void)wire::release_recording(control_transport, session, Timeout{4000U});
         control.value().close();
         return Result<Px4TsRunResult>::failure(attach_written.error());
     }
+    report_recording_stage(arguments, "attach-request", Error::OK);
 
     std::unique_ptr<std::uint8_t[]> frame_storage;
 #if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)

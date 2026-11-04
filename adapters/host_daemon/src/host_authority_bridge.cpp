@@ -275,6 +275,12 @@ Error HostAuthorityBridge::finish_failed_attach_cleanup(std::size_t index) noexc
         data.ticket.client_id, data.lease_id);
     if (!terminal || terminal.value().stream_id != data.ticket.stream_id ||
         !terminal.value().quiesced) return Error::INTERNAL;
+    if (terminal.value().cleanup_error != Error::OK && slots_) {
+        const std::size_t owner_index = find_slot(data.ticket.client_id);
+        if (owner_index < kHostAuthoritySessionCapacity)
+            slots_[owner_index].quiesced_sticky_cleanup_error =
+                terminal.value().cleanup_error;
+    }
     if (terminal.value().cleanup_error == Error::OK)
         forget_stream(data.ticket.client_id, data.ticket.stream_id);
     const std::uint64_t generation = data.generation;
@@ -1025,6 +1031,15 @@ void HostAuthorityBridge::consume(const ControlWorkerCompletion& completion,
                 finish_slot(index);
                 return;
             }
+            std::fprintf(stderr,
+                "Core bridge disconnect completion slot=%zu client=%llu "
+                "request=%llu state=%u error=%u quiesced_sticky_error=%u "
+                "fatal=%u\n",
+                index, static_cast<unsigned long long>(value.key.client_id),
+                static_cast<unsigned long long>(value.key.request_id),
+                static_cast<unsigned>(slot.state), static_cast<unsigned>(value.error),
+                static_cast<unsigned>(slot.quiesced_sticky_cleanup_error),
+                fatal_ ? 1U : 0U);
             slot.state = SlotState::fatal_unresolved;
             enter_fatal();
             return;

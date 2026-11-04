@@ -1173,6 +1173,17 @@ Result<void> ReceiverEngine::prepare_attach_v1(const StreamAttachTicket& ticket)
             data_attached = true;
     }
     const Error failure = !started ? started.error() : data_error;
+    if (failure != Error::OK) {
+        std::fprintf(stderr,
+            "Core stream prepare receiver=%u client=%llu lease=%llu stream=%llu "
+            "stage=%s error=%u\n",
+            static_cast<unsigned>(receiver),
+            static_cast<unsigned long long>(ticket.client_id),
+            static_cast<unsigned long long>(ticket.lease_id),
+            static_cast<unsigned long long>(ticket.stream_id),
+            !started ? "start_capture" : "stream_attach",
+            static_cast<unsigned>(failure));
+    }
     bool prepared = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
