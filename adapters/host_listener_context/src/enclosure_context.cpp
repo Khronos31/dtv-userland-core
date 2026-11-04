@@ -10,6 +10,7 @@
 #include <array>
 #include <atomic>
 #include <chrono>
+#include <cstdio>
 #include <limits>
 #include <new>
 #include <thread>
@@ -202,13 +203,18 @@ struct EnclosureContext::Impl final {
     Error perform_cleanup() noexcept
     {
         Error first_error = Error::OK;
-        const auto retain_error = [&first_error](Error error) noexcept {
-            if (first_error == Error::OK && error != Error::OK)
+        const auto retain_error = [&first_error](const char* stage,
+                                                 Error error) noexcept {
+            if (first_error == Error::OK && error != Error::OK) {
                 first_error = error;
+                std::fprintf(stderr,
+                    "Core context cleanup first_failure stage=%s error=%u\n",
+                    stage, static_cast<unsigned>(error));
+            }
         };
         bool owner_quiesced = true;
         if (published) {
-            retain_error(io->unpublish_pair(listeners));
+            retain_error("unpublish", io->unpublish_pair(listeners));
             published = false;
         }
         if (io) {
@@ -234,8 +240,12 @@ struct EnclosureContext::Impl final {
                 slot.frame_buffer.reset();
             }
         }
-        const Error shutdown_started = bridge->begin_shutdown();
-        retain_error(shutdown_started);
+        const bool bridge_was_stopped = bridge->stopped();
+        const Error shutdown_started = bridge_was_stopped
+            ? bridge->shutdown_result() : bridge->begin_shutdown();
+        retain_error(bridge_was_stopped ? "bridge.shutdown_result"
+                                        : "bridge.begin_shutdown",
+                     shutdown_started);
         if (shutdown_started != Error::OK && !bridge->stopped())
             owner_quiesced = false;
         std::array<detail::ReadyEvent, detail::kListenerIoEventCapacity> events{};
@@ -247,21 +257,21 @@ struct EnclosureContext::Impl final {
             if (advanced != Error::OK && !bridge->stopped()) sleep_briefly();
         }
         const Error bridge_shutdown = bridge->shutdown_result();
-        retain_error(bridge_shutdown);
+        retain_error("bridge.shutdown_result", bridge_shutdown);
         if (bridge_shutdown != Error::OK) owner_quiesced = false;
         const auto joined = workers->join();
         if (!joined) {
-            retain_error(joined.error());
+            retain_error("workers.join", joined.error());
             owner_quiesced = false;
         }
         if (namespace_reserved) {
-            retain_error(io->release_namespace());
+            retain_error("release_namespace", io->release_namespace());
             namespace_reserved = false;
         }
         if (owner_quiesced) {
             const auto shutdown = family->shutdown();
             if (!shutdown) {
-                retain_error(shutdown.error());
+                retain_error("family.shutdown", shutdown.error());
                 owner_quiesced = false;
             }
         }
@@ -842,10 +852,26 @@ struct EnclosureContext::Impl final {
             before_wait_ms, max_wait_ms)};
         const Error waited = io->poll(workers->wake_fd(), bounded, events.data(),
                                       events.size(), count);
-        if (waited != Error::OK) return Result<void>::failure(waited);
+        if (waited != Error::OK) {
+            std::fprintf(stderr,
+                "Core context poll source=listener result=%u events=%zu\n",
+                static_cast<unsigned>(waited), count);
+            return Result<void>::failure(waited);
+        }
         if (count > events.size()) return Result<void>::failure(Error::PROTOCOL_ERROR);
         process_events(events.data(), count);
         const Error advanced = bridge->poll(family->time().monotonic_ms());
+        if (advanced != Error::OK) {
+            const auto control = bridge->counts();
+            const auto data = bridge->data_counts();
+            std::fprintf(stderr,
+                "Core context poll source=bridge result=%u stopped=%u "
+                "shutdown_result=%u control_unresolved=%zu "
+                "data_unresolved=%zu\n",
+                static_cast<unsigned>(advanced), bridge->stopped() ? 1U : 0U,
+                static_cast<unsigned>(bridge->shutdown_result()),
+                control.fatal_unresolved, data.fatal_unresolved);
+        }
         complete_control_responses();
         pump_data();
         return advanced == Error::OK ? Result<void>::success()

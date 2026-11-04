@@ -2,7 +2,10 @@
 #include "dtv/userland/host_daemon/host_authority_bridge.h"
 
 #include <array>
+#include <cstdio>
 #include <limits>
+
+#define enter_fatal() enter_fatal_at(__LINE__)
 
 namespace px4::userland::ipc::posix {
 namespace {
@@ -1331,11 +1334,57 @@ void HostAuthorityBridge::stop_ingresses() noexcept
     }
 }
 
-void HostAuthorityBridge::enter_fatal() noexcept
+void HostAuthorityBridge::enter_fatal_at(unsigned source_line) noexcept
 {
     if (!fatal_) {
         accepting_ = false;
         fatal_ = true;
+        const HostAuthorityBridgeCounts control = counts();
+        const HostAuthorityDataCounts data = data_counts();
+        std::fprintf(stderr,
+            "Core bridge fatal line=%u worker_error=%u control_active=%zu "
+            "control_tombstone=%zu control_unresolved=%zu data_active=%zu "
+            "data_tombstone=%zu data_unresolved=%zu data_retired=%zu\n",
+            source_line, static_cast<unsigned>(workers_.error()), control.active,
+            control.tombstone, control.fatal_unresolved, data.active,
+            data.tombstone, data.fatal_unresolved, data.retired);
+        for (std::size_t i = 0U; slots_ && i < kHostAuthoritySessionCapacity; ++i) {
+            const Slot& slot = slots_[i];
+            if (slot.state == SlotState::free) continue;
+            std::fprintf(stderr,
+                "Core bridge fatal control slot=%zu client=%llu state=%u "
+                "inflight=%zu key_client=%llu key_request=%llu "
+                "cleanup_pending=%u cleanup_inflight=%u close_pending=%u\n",
+                i, static_cast<unsigned long long>(slot.client_id),
+                static_cast<unsigned>(slot.state), slot.inflight,
+                static_cast<unsigned long long>(slot.inflight_key.client_id),
+                static_cast<unsigned long long>(slot.inflight_key.request_id),
+                slot.cleanup_pending ? 1U : 0U, slot.cleanup_inflight ? 1U : 0U,
+                slot.close_pending ? 1U : 0U);
+            for (const Slot::StreamOwner& stream : slot.streams) {
+                if (!stream.active) continue;
+                std::fprintf(stderr,
+                    "Core bridge fatal stream slot=%zu client=%llu lease=%llu "
+                    "stream=%llu\n", i,
+                    static_cast<unsigned long long>(slot.client_id),
+                    static_cast<unsigned long long>(stream.lease_id),
+                    static_cast<unsigned long long>(stream.stream_id));
+            }
+        }
+        for (std::size_t i = 0U; i < data_slots_.size(); ++i) {
+            const DataSlot& slot = data_slots_[i];
+            if (slot.state == DataSlotState::free ||
+                slot.state == DataSlotState::retired) continue;
+            std::fprintf(stderr,
+                "Core bridge fatal data slot=%zu generation=%llu lease=%llu "
+                "state=%u cleanup_pending=%u cleanup_inflight=%u "
+                "connection_open=%u sequence=%llu\n",
+                i, static_cast<unsigned long long>(slot.generation),
+                static_cast<unsigned long long>(slot.lease_id),
+                static_cast<unsigned>(slot.state), slot.cleanup_pending ? 1U : 0U,
+                slot.cleanup_inflight ? 1U : 0U, slot.connection_open ? 1U : 0U,
+                static_cast<unsigned long long>(slot.next_sequence));
+        }
         stop_ingresses();
         close_all();
         close_all_data();
@@ -1538,3 +1587,5 @@ Error HostAuthorityBridge::shutdown_result() const noexcept
 }
 
 }  // namespace px4::userland::ipc::posix
+
+#undef enter_fatal

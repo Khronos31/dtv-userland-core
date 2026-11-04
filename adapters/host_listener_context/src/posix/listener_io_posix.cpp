@@ -8,6 +8,7 @@
 #include <cerrno>
 #include <cstdint>
 #include <cstring>
+#include <cstdio>
 #include <fcntl.h>
 #include <memory>
 #include <new>
@@ -372,7 +373,23 @@ public:
             events[event_count++] = ReadyEvent{kinds[index], listener_kinds[index],
                 index < 2U ? ListenerToken{index == 0U ? 1U : 2U} : ListenerToken{},
                 connection_tokens[index], mapped};
-            if ((flags & POLLNVAL) != 0) return Error::INTERNAL;
+            if ((flags & POLLNVAL) != 0) {
+                std::size_t connection_index = 0U;
+                std::uint32_t connection_generation = 0U;
+                (void)decode_token(connection_tokens[index], connection_index,
+                                   connection_generation);
+                std::fprintf(stderr,
+                    "Core listener poll invalid_fd=%d revents=%d kind=%u "
+                    "listener=%u connection_slot=%zu connection_generation=%u "
+                    "connection_token=%llu worker_wake=%u\n",
+                    descriptors[index].fd,
+                    static_cast<int>(flags), static_cast<unsigned>(kinds[index]),
+                    static_cast<unsigned>(listener_kinds[index]), connection_index,
+                    connection_generation,
+                    static_cast<unsigned long long>(connection_tokens[index].value),
+                    kinds[index] == ReadyKind::worker_wake ? 1U : 0U);
+                return Error::INTERNAL;
+            }
             (void)slots[index];
         }
         return Error::OK;

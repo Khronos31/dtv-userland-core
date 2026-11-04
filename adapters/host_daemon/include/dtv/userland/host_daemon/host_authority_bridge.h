@@ -292,7 +292,7 @@ private:
     bool remember_stream(std::size_t slot, std::uint64_t lease_id,
                          std::uint64_t stream_id) noexcept;
     void stop_ingresses() noexcept;
-    void enter_fatal() noexcept;
+    void enter_fatal_at(unsigned source_line) noexcept;
     void advance() noexcept;
     void consume(const ControlWorkerCompletion& completion,
                  std::size_t lane) noexcept;

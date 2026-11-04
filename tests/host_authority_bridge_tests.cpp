@@ -4089,21 +4089,26 @@ bool test_fatal_late_acquire_is_not_finalized_early()
         (void)bridge->poll();
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
+    const Error repeated_shutdown = bridge->begin_shutdown();
     const auto status = tuner->engine_status();
     const auto final_counts = bridge->counts();
-    if (!(bridge->stopped() && bridge->shutdown_result() == Error::INTERNAL &&
+    if (!(bridge->stopped() && repeated_shutdown == Error::NOT_READY &&
+           bridge->shutdown_result() == Error::INTERNAL &&
            final_counts.fatal_unresolved == 2U && status &&
            status.value().leased[2U] && status.value().leased[4U])) {
         std::cerr << "fatal final stopped=" << bridge->stopped() << " result="
                   << static_cast<unsigned>(bridge->shutdown_result()) << " counts="
                   << final_counts.free << "/" << final_counts.active << "/"
                   << final_counts.tombstone << "/" << final_counts.fatal_unresolved
-                  << " status=" << static_cast<bool>(status);
+                  << " status=" << static_cast<bool>(status)
+                  << " repeated-shutdown="
+                  << static_cast<unsigned>(repeated_shutdown);
         if (status) std::cerr << " leases=" << status.value().leased[2U] << "/"
                               << status.value().leased[4U];
         std::cerr << '\n';
     }
-    return bridge->stopped() && bridge->shutdown_result() == Error::INTERNAL &&
+    return bridge->stopped() && repeated_shutdown == Error::NOT_READY &&
+           bridge->shutdown_result() == Error::INTERNAL &&
            final_counts.fatal_unresolved == 2U && status &&
            other_ingress_stops == 1U &&
            status.value().leased[2U] && status.value().leased[4U];
