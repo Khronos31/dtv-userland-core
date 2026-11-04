@@ -1,6 +1,7 @@
 /* SPDX-License-Identifier: GPL-2.0-or-later */
 #include "owner_engine.h"
 
+#include <atomic>
 #include <chrono>
 #include <condition_variable>
 #include <cstdint>
@@ -2105,6 +2106,54 @@ void test_resubmit_disconnect_window_cancels_accepted_id() {
     CHECK(owner.release() == DTV_L3_OK);
 }
 
+void test_b2_deadline_progresses_while_queue_busy() {
+    ProviderMock provider;
+    OwnerEngine owner(provider, 95);
+    owner.initialize_claims(1);
+    std::vector<std::uint8_t> payload;
+    auto request = request_for(payload);
+    const auto now_ns = static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+    request.deadline_ns = now_ns + 30000000ull;
+    std::shared_ptr<OwnerEngine::Operation> operation;
+    CHECK(owner.start(request, &operation) == DTV_L3_ACCEPTED);
+    std::atomic<bool> tail_done{false};
+    for (int index = 0; index < 200; ++index) {
+        owner.enqueue_test_work([] {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+        });
+    }
+    owner.enqueue_test_work([&] { tail_done.store(true); });
+    std::this_thread::sleep_for(std::chrono::milliseconds(120));
+    dtv_l3_op_state state = DTV_L3_OP_RUNNING;
+    dtv_l3_result result = DTV_L3_ACCEPTED;
+    const std::uint8_t *data = nullptr;
+    std::size_t data_size = 0;
+    dtv_l3_cancel_cause cause = DTV_L3_CANCEL_CAUSE_NONE;
+    std::uint32_t resubmits = 0;
+    CHECK(owner.poll_result(operation, &state, &result, &data, &data_size,
+                            &cause, &resubmits) == DTV_L3_OK);
+    CHECK(state == DTV_L3_OP_FAILED);
+    CHECK(result == DTV_L3_TIMEOUT);
+    CHECK(!tail_done.load());
+    const auto deadline = std::chrono::steady_clock::now() +
+                          std::chrono::seconds(2);
+    while (!tail_done.load() && std::chrono::steady_clock::now() < deadline) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+    CHECK(tail_done.load());
+    const auto binding = owner.binding();
+    CHECK(provider.fire(binding.get(), operation->id, DTV_L3_OK));
+    CHECK(owner.release_operation(operation) == DTV_L3_OK);
+    CHECK(owner.close(2000) == DTV_L3_OK);
+    CHECK(wait_for_snapshot(owner, [](const OwnerEngine::Snapshot &snapshot) {
+        return snapshot.releasable;
+    }));
+    CHECK(owner.release() == DTV_L3_OK);
+}
+
 }  // namespace
 
 int main() {
@@ -2118,6 +2167,7 @@ int main() {
     test_r2_close_deadline_and_status_outlive_blocking_provider_calls();
     test_r3_cancel_before_registration_is_replayed_after_acceptance();
     test_b2_control_and_status_progress_while_submit_is_blocked();
+    test_b2_deadline_progresses_while_queue_busy();
     test_provider_route_slots_control_and_layered_rejection();
     test_failed_claim_residual_recovery_and_release_result_visibility();
     test_lease_borrow_gate_and_stale_generation();

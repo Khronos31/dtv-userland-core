@@ -38,6 +38,15 @@ struct fixture {
     dtv_l3_ts_deliver_fn deliver;
     void *deliver_context;
     dtv_l3_product_adapter factory_adapter;
+    int v1_manifest_mismatch;
+    uint64_t seen_grant_token;
+    uint16_t seen_grant_vendor;
+    uint16_t seen_grant_product;
+    dtv_l3_receiver_capability receivers[1];
+    dtv_l3_reader_capability readers[1];
+    dtv_l3_lnb_scope_capability lnb_scopes[1];
+    dtv_l3_shared_scope_capability shared_scopes[1];
+    dtv_l3_capability_catalog catalog;
     struct pending pending[MAX_PENDING];
 };
 
@@ -292,11 +301,23 @@ static int wait_releasable(dtv_l3_context *owner) {
     return 0;
 }
 
+static int release_owner(dtv_l3_context *owner) {
+    unsigned int attempt;
+    for (attempt = 0; attempt < 4000; ++attempt) {
+        const dtv_l3_result result = dtv_l3_context_release(owner);
+        if (result != DTV_L3_BUSY) {
+            return result == DTV_L3_OK;
+        }
+        sleep_ms(1);
+    }
+    return 0;
+}
+
 static int close_and_release(dtv_l3_context *owner) {
     if (dtv_l3_close(owner, 2000) != DTV_L3_OK || !wait_releasable(owner)) {
         return 0;
     }
-    return dtv_l3_context_release(owner) == DTV_L3_OK;
+    return release_owner(owner);
 }
 
 static int fire_pending(struct fixture *fixture, uint64_t id) {
@@ -476,6 +497,70 @@ static void factory_release(void *owner) {
     ++fixture->factory_release_calls;
 }
 
+static dtv_l3_result factory_create_v1(
+    void *context,
+    const dtv_l3_open_args *args,
+    const dtv_l3_product_adapter **out,
+    uint32_t *claim_count_out,
+    void **owner_out) {
+    struct fixture *fixture = context;
+    ++fixture->factory_create_calls;
+    if (args->grant_count != 0 && args->grants != NULL &&
+        args->grants[0].descriptor != NULL) {
+        fixture->seen_grant_token = args->grants[0].token;
+        fixture->seen_grant_vendor = args->grants[0].descriptor->vendor_id;
+        fixture->seen_grant_product = args->grants[0].descriptor->product_id;
+    }
+    if (args->firmware != NULL && args->firmware->manifest != NULL &&
+        (fixture->v1_manifest_mismatch ||
+         args->firmware->manifest->length_bytes != args->firmware->size)) {
+        *out = NULL;
+        *owner_out = fixture;
+        return DTV_L3_FAILED;
+    }
+    *out = &fixture->factory_adapter;
+    *claim_count_out = 2;
+    *owner_out = fixture;
+    return DTV_L3_OK;
+}
+
+static dtv_l3_factory factory_v1_for(struct fixture *fixture) {
+    return (dtv_l3_factory){.struct_size = sizeof(dtv_l3_factory),
+                            .factory_context = fixture,
+                            .create = factory_create_v1,
+                            .release = factory_release};
+}
+
+static void fixture_catalog_init(struct fixture *fixture,
+                                 const dtv_l3_firmware *firmware) {
+    fixture->receivers[0] = (dtv_l3_receiver_capability){
+        .id = 0,
+        .systems = DTV_L3_SYSTEM_ISDB_T,
+        .pid_filter = DTV_L3_PID_FILTER_SOFTWARE,
+        .support = DTV_L3_SUPPORT_SUPPORTED};
+    fixture->readers[0] = (dtv_l3_reader_capability){
+        .id = 0,
+        .external_apdu = DTV_L3_SUPPORT_UNSUPPORTED,
+        .support = DTV_L3_SUPPORT_SUPPORTED};
+    fixture->lnb_scopes[0] = (dtv_l3_lnb_scope_capability){
+        .id = 0, .support = DTV_L3_SUPPORT_UNSUPPORTED};
+    fixture->shared_scopes[0] = (dtv_l3_shared_scope_capability){
+        .id = 3,
+        .compatibility = DTV_L3_LEASE_SHAREABLE,
+        .support = DTV_L3_SUPPORT_SUPPORTED};
+    fixture->catalog = (dtv_l3_capability_catalog){
+        .receivers = fixture->receivers,
+        .receiver_count = 1,
+        .readers = fixture->readers,
+        .reader_count = 1,
+        .lnb_scopes = fixture->lnb_scopes,
+        .lnb_scope_count = 1,
+        .shared_scopes = fixture->shared_scopes,
+        .shared_scope_count = 1};
+    fixture->factory_adapter = adapter_for(fixture, firmware);
+    fixture->factory_adapter.catalog = &fixture->catalog;
+}
+
 static dtv_l3_adapter_factory factory_for(struct fixture *fixture) {
     return (dtv_l3_adapter_factory){.factory_context = fixture,
                                     .create = factory_create_ok,
@@ -556,6 +641,111 @@ static int test_factory_failure(void) {
     return 0;
 }
 
+static int test_args_factory(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_factory factory;
+    dtv_l3_open_args args;
+    dtv_l3_open_result opened;
+    dtv_l3_op_result result;
+    dtv_l3_grant_descriptor descriptor;
+    dtv_l3_grant grant;
+    const dtv_l3_capability_catalog *catalog = NULL;
+    const uint8_t firmware[2] = {0x55, 0xaa};
+    const dtv_l3_firmware_manifest manifest = {
+        .format = 0x46523330u, .length_bytes = sizeof(firmware)};
+    const dtv_l3_firmware firmware_view = {
+        .source = DTV_L3_FIRMWARE_BYTES,
+        .manifest = &manifest,
+        .bytes = firmware,
+        .size = sizeof(firmware)};
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture_catalog_init(&fixture, &firmware_view);
+    usb = usb_provider_for(&fixture);
+    factory = factory_v1_for(&fixture);
+    memset(&descriptor, 0, sizeof(descriptor));
+    descriptor.vendor_id = 0x054c;
+    descriptor.product_id = 0x04b2;
+    descriptor.bus = 5;
+    descriptor.address = 4;
+    descriptor.num_interfaces = 1;
+    grant.token = 0xabc;
+    grant.descriptor = &descriptor;
+    memset(&args, 0, sizeof(args));
+    args.struct_size = sizeof(args);
+    args.usb_provider = &usb;
+    args.factory = &factory;
+    args.grants = &grant;
+    args.grant_count = 1;
+    args.firmware = &firmware_view;
+    opened = dtv_l3_open_with_args(&args);
+    if (opened.result != DTV_L3_ACCEPTED || opened.owner == NULL ||
+        opened.op == NULL) {
+        return 1;
+    }
+    if (fixture.factory_create_calls != 1 ||
+        fixture.seen_grant_token != 0xabc ||
+        fixture.seen_grant_vendor != 0x054c ||
+        fixture.seen_grant_product != 0x04b2) {
+        return 2;
+    }
+    if (dtv_l3_capabilities_get_catalog(opened.owner, &catalog) != DTV_L3_OK ||
+        catalog == NULL || catalog->receiver_count != 1 ||
+        catalog->receivers[0].systems != DTV_L3_SYSTEM_ISDB_T ||
+        catalog->receivers[0].pid_filter != DTV_L3_PID_FILTER_SOFTWARE ||
+        catalog->readers[0].external_apdu != DTV_L3_SUPPORT_UNSUPPORTED ||
+        catalog->lnb_scopes[0].support != DTV_L3_SUPPORT_UNSUPPORTED ||
+        catalog->shared_scopes[0].support != DTV_L3_SUPPORT_SUPPORTED) {
+        return 3;
+    }
+    if (dtv_l3_op_wait(opened.op, 2000) != DTV_L3_OK ||
+        dtv_l3_op_poll(opened.op, &result) != DTV_L3_OK ||
+        result.result != DTV_L3_OK || fixture.claim_calls != 2 ||
+        dtv_l3_op_release(opened.op) != DTV_L3_OK) {
+        return 4;
+    }
+    if (!close_and_release(opened.owner) ||
+        fixture.factory_release_calls != 1) {
+        return 5;
+    }
+    return 0;
+}
+
+static int test_args_factory_manifest_reject(void) {
+    struct fixture fixture;
+    dtv_l3_usb_provider usb;
+    dtv_l3_factory factory;
+    dtv_l3_open_args args;
+    dtv_l3_open_result opened;
+    const uint8_t firmware[2] = {0x01, 0x02};
+    const dtv_l3_firmware_manifest manifest = {
+        .format = 0x46523330u, .length_bytes = 99};
+    const dtv_l3_firmware firmware_view = {
+        .source = DTV_L3_FIRMWARE_BYTES,
+        .manifest = &manifest,
+        .bytes = firmware,
+        .size = sizeof(firmware)};
+
+    memset(&fixture, 0, sizeof(fixture));
+    fixture.v1_manifest_mismatch = 1;
+    fixture_catalog_init(&fixture, &firmware_view);
+    usb = usb_provider_for(&fixture);
+    factory = factory_v1_for(&fixture);
+    memset(&args, 0, sizeof(args));
+    args.struct_size = sizeof(args);
+    args.usb_provider = &usb;
+    args.factory = &factory;
+    args.firmware = &firmware_view;
+    opened = dtv_l3_open_with_args(&args);
+    if (opened.result != DTV_L3_FAILED || opened.owner != NULL ||
+        opened.op != NULL || fixture.claim_calls != 0 ||
+        fixture.factory_release_calls != 1) {
+        return 1;
+    }
+    return 0;
+}
+
 static int test_missing_product_callbacks(void) {
     struct fixture fixture;
     dtv_l3_usb_provider usb;
@@ -599,6 +789,12 @@ int main(int argc, char **argv) {
     }
     if (strcmp(argv[1], "missing") == 0) {
         return test_missing_product_callbacks();
+    }
+    if (strcmp(argv[1], "args-factory") == 0) {
+        return test_args_factory();
+    }
+    if (strcmp(argv[1], "args-manifest-reject") == 0) {
+        return test_args_factory_manifest_reject();
     }
     return 65;
 }

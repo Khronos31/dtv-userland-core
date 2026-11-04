@@ -338,6 +338,13 @@ typedef struct dtv_l3_provider {
  * firmware, CARD, or LNB policy. The same binding and local transfer ID are
  * used by submit, cancel, and completion.
  */
+typedef enum dtv_l3_submit_mode {
+    /* Device I/O and completion do not block the submit caller. */
+    DTV_L3_SUBMIT_NONBLOCKING = 0,
+    /* submit may block; the owner never calls it from the control lane. */
+    DTV_L3_SUBMIT_MAY_BLOCK = 1
+} dtv_l3_submit_mode;
+
 typedef struct dtv_l3_usb_provider {
     void *provider_context;
     dtv_l3_claim_fn claim;
@@ -346,6 +353,8 @@ typedef struct dtv_l3_usb_provider {
     dtv_l3_transfer_cancel_fn cancel;
     dtv_l3_claim_cancel_fn claim_cancel;
     dtv_l3_cancel_scope cancel_scope;
+    /* Zero is NONBLOCKING for existing single-pipe providers. */
+    dtv_l3_submit_mode submit_mode;
     dtv_l3_logger logger;
 } dtv_l3_usb_provider;
 
@@ -366,8 +375,17 @@ typedef dtv_l3_result (*dtv_l3_firmware_read_fn)(
     const uint8_t **data,
     size_t *size);
 
+typedef struct dtv_l3_firmware_manifest {
+    uint32_t format;
+    uint64_t length_bytes;
+    /* Optional 32-byte SHA-256; NULL when the format has no digest. */
+    const uint8_t *sha256;
+    uint32_t flags;
+} dtv_l3_firmware_manifest;
+
 typedef struct dtv_l3_firmware {
     dtv_l3_firmware_source source;
+    const dtv_l3_firmware_manifest *manifest;
     const char *path;
     const uint8_t *bytes;
     size_t size;
@@ -392,6 +410,64 @@ typedef struct dtv_l3_capabilities {
     dtv_l3_cancel_scope cancel_scope;
 } dtv_l3_capabilities;
 
+typedef enum dtv_l3_support {
+    DTV_L3_SUPPORT_UNKNOWN = 0,
+    DTV_L3_SUPPORT_UNSUPPORTED = 1,
+    DTV_L3_SUPPORT_SUPPORTED = 2
+} dtv_l3_support;
+
+typedef enum dtv_l3_pid_filter {
+    DTV_L3_PID_FILTER_NONE = 0,
+    DTV_L3_PID_FILTER_HARDWARE = 1,
+    DTV_L3_PID_FILTER_SOFTWARE = 2
+} dtv_l3_pid_filter;
+
+#define DTV_L3_SYSTEM_ISDB_T 0x0001u
+#define DTV_L3_SYSTEM_ISDB_S 0x0002u
+#define DTV_L3_SYSTEM_ISDB_C 0x0004u
+
+typedef struct dtv_l3_receiver_capability {
+    uint32_t id;
+    /* Bitmask of DTV_L3_SYSTEM_*; zero means UNKNOWN. */
+    uint32_t systems;
+    dtv_l3_pid_filter pid_filter;
+    dtv_l3_support support;
+} dtv_l3_receiver_capability;
+
+typedef struct dtv_l3_reader_capability {
+    uint32_t id;
+    dtv_l3_support external_apdu;
+    dtv_l3_support support;
+} dtv_l3_reader_capability;
+
+typedef struct dtv_l3_lnb_scope_capability {
+    uint32_t id;
+    dtv_l3_support support;
+} dtv_l3_lnb_scope_capability;
+
+typedef struct dtv_l3_shared_scope_capability {
+    uint32_t id;
+    uint32_t compatibility;
+    dtv_l3_support support;
+} dtv_l3_shared_scope_capability;
+
+/*
+ * Static catalog published by the product before open, and session values
+ * returned by the adapter after open. Arrays are borrowed and must stay valid
+ * until context_release. UNKNOWN is distinct from UNSUPPORTED.
+ */
+typedef struct dtv_l3_capability_catalog {
+    const dtv_l3_receiver_capability *receivers;
+    uint32_t receiver_count;
+    const dtv_l3_reader_capability *readers;
+    uint32_t reader_count;
+    const dtv_l3_lnb_scope_capability *lnb_scopes;
+    uint32_t lnb_scope_count;
+    const dtv_l3_shared_scope_capability *shared_scopes;
+    uint32_t shared_scope_count;
+    dtv_l3_support ts_form;
+} dtv_l3_capability_catalog;
+
 typedef dtv_l3_result (*dtv_l3_adapter_reader_acquire_fn)(
     void *product_context,
     uint32_t reader_id,
@@ -410,6 +486,7 @@ typedef dtv_l3_result (*dtv_l3_adapter_lnb_set_fn)(
 typedef struct dtv_l3_product_adapter {
     void *product_context;
     dtv_l3_capabilities capabilities;
+    const dtv_l3_capability_catalog *catalog;
     const dtv_l3_firmware *firmware;
     dtv_l3_scope_query_fn scope_query;
     dtv_l3_tune_fn tune;
@@ -439,6 +516,54 @@ typedef struct dtv_l3_adapter_factory {
     dtv_l3_adapter_create_fn create;
     dtv_l3_adapter_release_fn release;
 } dtv_l3_adapter_factory;
+
+typedef struct dtv_l3_grant_descriptor {
+    uint16_t vendor_id;
+    uint16_t product_id;
+    uint8_t bus;
+    uint8_t address;
+    uint8_t reserved[2];
+    uint32_t num_interfaces;
+    uint32_t num_endpoints;
+} dtv_l3_grant_descriptor;
+
+/* token is host-opaque; descriptor is a host snapshot, not a new identity. */
+typedef struct dtv_l3_grant {
+    uint64_t token;
+    const dtv_l3_grant_descriptor *descriptor;
+} dtv_l3_grant;
+
+typedef struct dtv_l3_factory dtv_l3_factory;
+
+typedef struct dtv_l3_open_args {
+    uint32_t struct_size;
+    const dtv_l3_usb_provider *usb_provider;
+    const dtv_l3_factory *factory;
+    const dtv_l3_grant *grants;
+    uint32_t grant_count;
+    const dtv_l3_firmware *firmware;
+    uint32_t power_permission;
+} dtv_l3_open_args;
+
+/*
+ * v1 factory: the factory chooses claim_count from the host descriptor/grant
+ * and returns it with the adapter. Core does not accept a caller claim count.
+ * The manifest must be checked before any claim side effect; mismatch returns
+ * a failure with zero claims.
+ */
+typedef dtv_l3_result (*dtv_l3_factory_create_fn)(
+    void *factory_context,
+    const dtv_l3_open_args *args,
+    const dtv_l3_product_adapter **adapter_out,
+    uint32_t *claim_count_out,
+    void **adapter_owner_out);
+
+struct dtv_l3_factory {
+    uint32_t struct_size;
+    void *factory_context;
+    dtv_l3_factory_create_fn create;
+    dtv_l3_adapter_release_fn release;
+};
 
 typedef struct dtv_l3_open_result {
     dtv_l3_result result;
@@ -529,8 +654,12 @@ dtv_l3_open_result dtv_l3_open_factory(
     const dtv_l3_adapter_factory *factory,
     const dtv_l3_open_config *config,
     uint32_t claim_count);
+dtv_l3_open_result dtv_l3_open_with_args(const dtv_l3_open_args *args);
 dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
                                       dtv_l3_capabilities *capabilities);
+dtv_l3_result dtv_l3_capabilities_get_catalog(
+    dtv_l3_context *owner,
+    const dtv_l3_capability_catalog **catalog);
 dtv_l3_result dtv_l3_open_status_get(
     dtv_l3_context *owner,
     dtv_l3_open_status *status);

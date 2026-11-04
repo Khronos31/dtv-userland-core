@@ -274,6 +274,7 @@ struct dtv_l3_context {
           logger(provider.logger),
           engine(make_engine_legacy(*legacy, provider)) {
         legacy->set_binding(engine->binding());
+        engine->set_submit_mode(DTV_L3_SUBMIT_NONBLOCKING);
         capabilities.cancel_scope = provider.cancel_scope;
     }
     dtv_l3_context(const dtv_l3_usb_provider &usb,
@@ -282,9 +283,11 @@ struct dtv_l3_context {
           product_adapter(std::make_unique<CProductAdapter>(adapter)),
           product_view(&adapter),
           capabilities(adapter.capabilities),
+          catalog(adapter.catalog),
           logger(usb.logger),
           engine(make_engine_ex(*usb_provider, *product_adapter, usb.logger)) {
         product_adapter->set_binding(engine->binding());
+        engine->set_submit_mode(usb.submit_mode);
     }
     ~dtv_l3_context() {
         if (open_thread.joinable()) {
@@ -300,6 +303,7 @@ struct dtv_l3_context {
     std::unique_ptr<CProductAdapter> product_adapter;
     const dtv_l3_product_adapter *product_view = nullptr;
     dtv_l3_capabilities capabilities{};
+    const dtv_l3_capability_catalog *catalog = nullptr;
     dtv_l3_adapter_release_fn adapter_release = nullptr;
     void *adapter_owner = nullptr;
     dtv_l3_logger logger;
@@ -563,6 +567,68 @@ dtv_l3_open_result dtv_l3_open_factory(
     opened.owner->adapter_release = factory->release;
     opened.owner->adapter_owner = adapter_owner;
     return opened;
+}
+
+dtv_l3_open_result dtv_l3_open_with_args(const dtv_l3_open_args *args) {
+    if (args == nullptr || args->usb_provider == nullptr ||
+        args->usb_provider->claim == nullptr ||
+        args->usb_provider->release_claim == nullptr ||
+        args->usb_provider->submit == nullptr ||
+        args->usb_provider->cancel == nullptr || args->factory == nullptr ||
+        args->factory->create == nullptr ||
+        (args->grant_count != 0 && args->grants == nullptr)) {
+        return {DTV_L3_INVALID, nullptr, nullptr};
+    }
+    const dtv_l3_product_adapter *adapter = nullptr;
+    uint32_t claim_count = 0;
+    void *adapter_owner = nullptr;
+    dtv_l3_result created = DTV_L3_FAILED;
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        created = args->factory->create(args->factory->factory_context, args,
+                                        &adapter, &claim_count,
+                                        &adapter_owner);
+    } catch (...) {
+        log_provider(&args->usb_provider->logger, DTV_L3_LOG_ERROR,
+                     "dtv_l3_open_with_args", "contained C++ exception");
+        return {DTV_L3_FAILED, nullptr, nullptr};
+    }
+    if (created != DTV_L3_OK || adapter == nullptr) {
+        if (args->factory->release != nullptr && adapter_owner != nullptr) {
+            args->factory->release(adapter_owner);
+        }
+        return {created == DTV_L3_OK ? DTV_L3_FAILED : created, nullptr,
+                nullptr};
+    }
+    const dtv_l3_open_result opened =
+        dtv_l3_open_ex(args->usb_provider, adapter, claim_count);
+    if (opened.result != DTV_L3_ACCEPTED) {
+        if (args->factory->release != nullptr && adapter_owner != nullptr) {
+            args->factory->release(adapter_owner);
+        }
+        return opened;
+    }
+    opened.owner->adapter_release = args->factory->release;
+    opened.owner->adapter_owner = adapter_owner;
+    return opened;
+}
+
+dtv_l3_result dtv_l3_capabilities_get_catalog(
+    dtv_l3_context *owner,
+    const dtv_l3_capability_catalog **catalog) {
+    try {
+        l3_owner_prototype::maybe_throw_test_entry_exception();
+        if (owner == nullptr || catalog == nullptr) {
+            return DTV_L3_INVALID;
+        }
+        if (owner->catalog == nullptr) {
+            return DTV_L3_UNSUPPORTED;
+        }
+        *catalog = owner->catalog;
+        return DTV_L3_OK;
+    } catch (...) {
+        return entry_failure(owner, "dtv_l3_capabilities_get_catalog");
+    }
 }
 
 dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,

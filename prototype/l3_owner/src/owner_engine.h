@@ -162,6 +162,7 @@ public:
 
     void initialize_claims(std::uint32_t count);
     void abort_open_after_lane_exception();
+    void set_submit_mode(dtv_l3_submit_mode mode);
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
@@ -220,6 +221,8 @@ public:
 
     void mark_open_lane_running();
     void mark_open_lane_exited();
+    /* Prototype test seam; not part of the C contract. */
+    void enqueue_test_work(std::function<void()> work);
 
     std::shared_ptr<Binding> binding() const;
     std::size_t cleanup_count() const;
@@ -352,6 +355,7 @@ private:
     Provider &provider_;
     dtv_l3_logger logger_;
     ProductAdapter *product_adapter_ = nullptr;
+    dtv_l3_submit_mode submit_mode_ = DTV_L3_SUBMIT_NONBLOCKING;
     mutable std::mutex mutex_;
     bool retired_gate_ = false;
     bool released_ = false;

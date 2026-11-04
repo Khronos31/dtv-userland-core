@@ -70,6 +70,16 @@ set_target_properties(l3_exception_log_c PROPERTIES
     C_EXTENSIONS NO
 )
 
+add_executable(l3_b2_progress_c tests/b2_progress_contract.c)
+target_include_directories(l3_b2_progress_c PRIVATE include)
+target_link_libraries(l3_b2_progress_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_b2_progress_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_b2_progress_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
 add_executable(l3_product_integration_c tests/product_integration_contract.c)
 target_include_directories(l3_product_integration_c PRIVATE include)
 target_link_libraries(l3_product_integration_c PRIVATE l3_owner_model Threads::Threads)
@@ -101,14 +111,14 @@ set_target_properties(l3_provider_semantics_c PROPERTIES
 )
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 
 if(L3_OWNER_ENABLE_ASAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
         target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=address)
     endforeach()
@@ -179,4 +189,11 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_product_factory COMMAND l3_product_integration_c factory)
     add_test(NAME l3_c_product_factory_fail COMMAND l3_product_integration_c factory-fail)
     add_test(NAME l3_c_product_missing COMMAND l3_product_integration_c missing)
+    add_test(NAME l3_c_product_args_factory COMMAND l3_product_integration_c args-factory)
+    add_test(NAME l3_c_product_args_manifest_reject COMMAND l3_product_integration_c args-manifest-reject)
+    add_test(NAME l3_c_b2_caller_cancel COMMAND l3_b2_progress_c caller-cancel)
+    add_test(NAME l3_c_b2_blocked_cancel_deadline COMMAND l3_b2_progress_c blocked-cancel-deadline)
+    add_test(NAME l3_c_b2_may_block_submit COMMAND l3_b2_progress_c may-block-submit)
+    add_test(NAME l3_c_b2_may_block_resubmit COMMAND l3_b2_progress_c may-block-resubmit)
+    add_test(NAME l3_c_b2_release_block_close COMMAND l3_b2_progress_c release-block-close)
 endif()

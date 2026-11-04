@@ -113,6 +113,11 @@ void OwnerEngine::log(dtv_l3_log_level level,
     }
 }
 
+void OwnerEngine::set_submit_mode(dtv_l3_submit_mode mode) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    submit_mode_ = mode;
+}
+
 void OwnerEngine::abort_open_after_lane_exception() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -276,6 +281,11 @@ void OwnerEngine::mark_open_lane_running() {
     open_lane_ = DTV_L3_LANE_RUNNING;
 }
 
+void OwnerEngine::enqueue_test_work(std::function<void()> work) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    enqueue_locked(std::move(work));
+}
+
 void OwnerEngine::mark_open_lane_exited() {
     std::lock_guard<std::mutex> lock(mutex_);
     open_lane_ = DTV_L3_LANE_EXITED;
@@ -287,6 +297,10 @@ dtv_l3_result OwnerEngine::start(
     std::shared_ptr<Operation> *operation) {
     if (operation == nullptr ||
         (request.out_size != 0 && request.out_data == nullptr)) {
+        return DTV_L3_INVALID;
+    }
+    if (request.resubmit_on_provider_abort != 0 &&
+        submit_mode_ != DTV_L3_SUBMIT_NONBLOCKING) {
         return DTV_L3_INVALID;
     }
     if ((request.kind == DTV_L3_TRANSFER_BULK &&
@@ -373,6 +387,7 @@ dtv_l3_result OwnerEngine::start(
         }
     }();
     bool pending_resubmit = false;
+    bool cancel_now = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
@@ -381,8 +396,11 @@ dtv_l3_result OwnerEngine::start(
             if (!op->completion_received) {
                 in_flight_.emplace(op->id, op);
             }
-            if (op->cancel_requested && !op->resubmit_pending) {
-                queue_cancel_locked(op);
+            if (op->cancel_requested && !op->resubmit_pending &&
+                !op->cancel_in_progress && !op->cancel_sent) {
+                op->cancel_in_progress = true;
+                ++provider_calls_in_flight_;
+                cancel_now = true;
             }
             pending_resubmit = op->resubmit_pending;
         } else {
@@ -400,6 +418,9 @@ dtv_l3_result OwnerEngine::start(
     if (submit_threw) {
         log(DTV_L3_LOG_WARN, "provider.submit",
             "contained C++ exception");
+    }
+    if (cancel_now) {
+        run_cancel(op, false);
     }
     if (pending_resubmit) {
         resubmit_operation(op);
@@ -1559,6 +1580,7 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
         cancel_threw = true;
         result = DTV_L3_FAILED;
     }
+    bool retry_cancel = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
@@ -1570,13 +1592,18 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
                 !(before_submit && result == DTV_L3_INVALID);
         }
         if (before_submit && result == DTV_L3_INVALID && operation->submitted) {
-            queue_cancel_locked(operation);
+            operation->cancel_in_progress = true;
+            ++provider_calls_in_flight_;
+            retry_cancel = true;
         }
         state_condition_.notify_all();
     }
     if (cancel_threw) {
         log(DTV_L3_LOG_WARN, "provider.cancel",
             "contained C++ exception");
+    }
+    if (retry_cancel) {
+        run_cancel(operation, false);
     }
     finish_close();
     return result;
@@ -1587,6 +1614,8 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
     if (!borrow) {
         return DTV_L3_BUSY;
     }
+    std::uint32_t claim_cancel_index = 0;
+    bool do_claim_cancel = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (open_state_ != OpenState::Opening || close_requested_) {
@@ -1596,8 +1625,18 @@ dtv_l3_result OwnerEngine::cancel_open_if_opening() {
         if (initialization_phase_ != InitializationPhase::NotStarted) {
             open_state_ = OpenState::Closing;
         }
-        request_claim_cancel_locked();
+        if (claim_in_flight_ && in_flight_claim_valid_ &&
+            in_flight_claim_index_ < claim_cancel_requested_.size() &&
+            !claim_cancel_requested_[in_flight_claim_index_]) {
+            claim_cancel_index = in_flight_claim_index_;
+            claim_cancel_requested_[claim_cancel_index] = true;
+            ++provider_calls_in_flight_;
+            do_claim_cancel = true;
+        }
         state_condition_.notify_all();
+    }
+    if (do_claim_cancel) {
+        run_claim_cancel(claim_cancel_index);
     }
     finish_close();
     return DTV_L3_ACCEPTED;
@@ -2318,6 +2357,7 @@ void OwnerEngine::resubmit_operation(
     CallbackFrame frame;
     dtv_l3_result result = DTV_L3_FAILED;
     bool submit_threw = false;
+    bool cancel_now = false;
     try {
         result = provider_.submit(
             operation->binding.get(), new_id, request,
@@ -2337,7 +2377,14 @@ void OwnerEngine::resubmit_operation(
             if (!operation->completion_received &&
                 (operation->cancel_requested || close_requested_ ||
                  disconnected_)) {
-                queue_cancel_locked(operation, true);
+                if (close_requested_) {
+                    queue_cancel_locked(operation, true);
+                } else if (!operation->cancel_in_progress &&
+                           !operation->cancel_sent) {
+                    operation->cancel_in_progress = true;
+                    ++provider_calls_in_flight_;
+                    cancel_now = true;
+                }
             }
         } else if (operation->state == DTV_L3_OP_OPENING ||
                    operation->state == DTV_L3_OP_RUNNING) {
@@ -2356,6 +2403,9 @@ void OwnerEngine::resubmit_operation(
     if (submit_threw) {
         log(DTV_L3_LOG_WARN, "provider.submit",
             "contained C++ exception");
+    }
+    if (cancel_now) {
+        run_cancel(operation, false);
     }
     if (need_finish_close) {
         finish_close();
@@ -2702,6 +2752,7 @@ void OwnerEngine::worker_loop() {
                     return;
                 }
             }
+            (void)expire_operations_locked();
             work = std::move(work_queue_.front());
             work_queue_.pop_front();
         }
@@ -2710,6 +2761,11 @@ void OwnerEngine::worker_loop() {
         } catch (...) {
             log(DTV_L3_LOG_ERROR, "control_lane",
                 "contained C++ exception");
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            (void)expire_operations_locked();
+            state_condition_.notify_all();
         }
     }
 }

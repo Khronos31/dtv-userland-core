@@ -27,6 +27,18 @@ The host provider has no tune/stream/firmware policy. Product adapters and the
 firmware view they retain must stay alive until `dtv_l3_context_release`
 succeeds. Core calls adapter callbacks outside its large lock.
 
+The newer integration candidate (`dtv_l3_open_with_args` + `dtv_l3_factory`)
+adds per-receiver-system/reader/LNB/shared-scope capability values with
+SUPPORTED/UNSUPPORTED/UNKNOWN, host grant descriptors, a firmware manifest, and
+factory-chosen `claim_count`. The factory must validate the manifest before any
+claim side effect. `dtv_l3_capabilities_get_catalog` returns the borrowed
+catalog. The older `dtv_l3_open_factory` remains as the initial candidate.
+
+B2 before-close cancellation runs on the requesting thread; the control lane
+only expires operation deadlines before and after each queued item. A
+MAY_BLOCK submit provider rejects `resubmit_on_provider_abort` before any side
+effect.
+
 The prototype source, header, tests, build definition, and this README are
 licensed under GPL-2.0-or-later. The repository root `LICENSE` remains MIT for
 the existing Core components. This target does not link or copy those
