@@ -810,12 +810,8 @@ dtv_l3_result dtv_l3_capabilities_get(dtv_l3_context *owner,
 dtv_l3_result dtv_l3_capabilities_get_catalog(
     dtv_l3_context *owner,
     const dtv_l3_capability_catalog **catalog);
-/*
- * Runs deferred cancel/submit recovery work on the calling host thread. It
- * must be called outside a callback frame and not from the control lane.
- * op_wait/op_poll/read_ts_wait remain state-only; this entry is the explicit
- * opt-in drain point until the wait contract is decided.
- */
+/* Compatibility hook. Deferred cancel/submit recovery is scheduled on the
+ * library control lane; callers do not need to pump progress. */
 dtv_l3_result dtv_l3_progress(dtv_l3_context *owner);
 dtv_l3_result dtv_l3_open_status_get(
     dtv_l3_context *owner,

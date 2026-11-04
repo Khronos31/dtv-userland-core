@@ -216,6 +216,19 @@ static int wait_flag(struct fixture *fixture, int *flag) {
     return 0;
 }
 
+static int wait_submit_calls(struct fixture *fixture, unsigned int expected) {
+    unsigned int attempt;
+    for (attempt = 0; attempt < 2000; ++attempt) {
+        unsigned int calls;
+        pthread_mutex_lock(&fixture->mutex);
+        calls = fixture->submit_calls;
+        pthread_mutex_unlock(&fixture->mutex);
+        if (calls >= expected) return 1;
+        sleep_ms(1);
+    }
+    return 0;
+}
+
 static void set_flag(struct fixture *fixture, int *flag) {
     pthread_mutex_lock(&fixture->mutex);
     *flag = 1;
@@ -573,8 +586,8 @@ static int test_recovery_submit_without_frame_flag(void) {
         fixture_destroy(&fixture);
         return 3;
     }
-    /* No SUBMIT_IN_FRAME flag: recovery waits for an explicit host drain. */
-    if (dtv_l3_progress(owner) != DTV_L3_OK || fixture.submit_calls != 2) {
+    /* Recovery is submitted by the library control lane without a host drain. */
+    if (!wait_submit_calls(&fixture, 2)) {
         fixture_destroy(&fixture);
         return 4;
     }

@@ -913,7 +913,6 @@ dtv_l3_result dtv_l3_transfer_start(dtv_l3_context *owner,
             return DTV_L3_INVALID;
         }
         *op_out = nullptr;
-        (void)owner->engine->progress_recovery();
         auto op = std::make_unique<dtv_l3_op>();
         op->owner = owner;
         op->kind = DTV_L3_OP_KIND_TRANSFER;
@@ -944,7 +943,6 @@ dtv_l3_result dtv_l3_op_cancel(dtv_l3_op *op) {
         if (op == nullptr || op->owner == nullptr) {
             return DTV_L3_INVALID;
         }
-        (void)op->owner->engine->progress_recovery();
         if (op->kind == DTV_L3_OP_KIND_OPEN) {
             dtv_l3_op_result result{};
             const auto poll_result = poll_open_op(op->owner, &result);
@@ -1004,7 +1002,6 @@ dtv_l3_result dtv_l3_op_wait(dtv_l3_op *op, uint32_t timeout_ms) {
         if (op == nullptr || op->owner == nullptr) {
             return DTV_L3_INVALID;
         }
-        (void)op->owner->engine->progress_recovery();
         if (op->kind == DTV_L3_OP_KIND_OPEN) {
             dtv_l3_op_result result{};
             const auto call_result = poll_open_op(op->owner, &result);

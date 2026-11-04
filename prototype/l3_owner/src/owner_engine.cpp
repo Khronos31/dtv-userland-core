@@ -160,7 +160,9 @@ void OwnerEngine::dispatch_cancel(const std::shared_ptr<Operation> &operation,
          (call_flags_ & DTV_L3_CALL_FLAG_CANCEL_IN_FRAME) == 0) ||
         in_control_lane()) {
         std::lock_guard<std::mutex> lock(mutex_);
-        recovery_queue_.push_back(RecoveryWork{false, operation, before_submit});
+        enqueue_locked([this, operation, before_submit] {
+            run_cancel(operation, before_submit);
+        });
         state_condition_.notify_all();
         return;
     }
@@ -539,7 +541,10 @@ dtv_l3_result OwnerEngine::start(
         dispatch_cancel(op, false);
     }
     if (pending_resubmit) {
-        resubmit_operation(op);
+        std::lock_guard<std::mutex> lock(mutex_);
+        enqueue_locked([this, op] { resubmit_operation(op); });
+        op->resubmit_pending = false;
+        state_condition_.notify_all();
     }
     finish_close();
     return result;
@@ -2471,7 +2476,8 @@ void OwnerEngine::on_completion(
             (in_callback_frame() &&
              (call_flags_ & DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME) == 0)) {
             std::lock_guard<std::mutex> lock(mutex_);
-            op_shared->resubmit_pending = true;
+            enqueue_locked([this, op_shared] { resubmit_operation(op_shared); });
+            op_shared->resubmit_pending = false;
             state_condition_.notify_all();
         } else {
             resubmit_operation(op_shared);
@@ -2487,11 +2493,11 @@ void OwnerEngine::resubmit_operation(
     if (!operation) {
         return;
     }
-    if (in_control_lane() ||
-        (in_callback_frame() &&
-         (call_flags_ & DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME) == 0)) {
+    if (in_callback_frame() &&
+        (call_flags_ & DTV_L3_CALL_FLAG_SUBMIT_IN_FRAME) == 0) {
         std::lock_guard<std::mutex> lock(mutex_);
-        operation->resubmit_pending = true;
+        enqueue_locked([this, operation] { resubmit_operation(operation); });
+        operation->resubmit_pending = false;
         state_condition_.notify_all();
         return;
     }
