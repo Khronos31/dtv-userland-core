@@ -4,6 +4,7 @@
 
 #include <dtv/l3_owner.h>
 
+#include <chrono>
 #include <condition_variable>
 #include <cstdint>
 #include <deque>
@@ -11,6 +12,7 @@
 #include <map>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <thread>
 #include <vector>
 
@@ -87,6 +89,9 @@ public:
         (void)index;
         return DTV_L3_UNSUPPORTED;
     }
+    virtual dtv_l3_cancel_scope cancel_scope() const {
+        return DTV_L3_CANCEL_SCOPE_TRANSFER;
+    }
 };
 
 class OwnerEngine {
@@ -111,6 +116,7 @@ public:
         dtv_l3_lane_state control_lane;
         bool releasable;
         std::uint32_t live_lanes;
+        bool disconnected;
     };
 
     enum class ClaimState { NotAttempted, InFlight, Ready, Retained, Unknown, Released };
@@ -121,10 +127,15 @@ public:
         std::uint64_t id = 0;
         dtv_l3_op_state state = DTV_L3_OP_OPENING;
         dtv_l3_result result = DTV_L3_ACCEPTED;
+        dtv_l3_cancel_cause cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+        std::uint32_t provider_abort_resubmits = 0;
+        dtv_l3_transfer_request request_template{};
+        std::uint32_t pipe_key = 0;
         std::vector<std::uint8_t> retained_payload;
         std::vector<std::uint8_t> response;
         bool released = false;
         bool submitted = false;
+        bool completion_received = false;
         bool cancel_requested = false;
         bool cancel_in_progress = false;
         bool cancel_sent = false;
@@ -174,7 +185,9 @@ public:
                               dtv_l3_op_state *state,
                               dtv_l3_result *result,
                               const std::uint8_t **data,
-                              std::size_t *data_size);
+                              std::size_t *data_size,
+                              dtv_l3_cancel_cause *cancel_cause,
+                              std::uint32_t *provider_abort_resubmits);
     dtv_l3_result wait_operation(const std::shared_ptr<Operation> &operation,
                                  std::uint32_t timeout_ms);
     dtv_l3_result wait_open(std::uint32_t timeout_ms);
@@ -292,6 +305,9 @@ private:
                        Operation *operation);
     bool active_streams_locked() const;
     bool physical_settled_locked() const;
+    bool expire_operations_locked();
+    std::optional<std::chrono::steady_clock::time_point> next_deadline_locked()
+        const;
     void finish_close();
     void on_ts_deliver(std::uint64_t generation,
                        const std::uint8_t *data,
@@ -324,6 +340,7 @@ private:
     bool open_lane_spawned_ = false;
     InitializationPhase initialization_phase_ = InitializationPhase::NotStarted;
     bool close_requested_ = false;
+    bool disconnected_ = false;
     bool physical_quiesced_ = false;
     bool cleanup_complete_ = false;
     bool cleanup_started_ = false;
@@ -351,6 +368,7 @@ private:
     std::shared_ptr<Binding> binding_;
     std::shared_ptr<void> stream_ = std::make_shared<int>(1);
     std::map<std::uint64_t, std::shared_ptr<Operation>> operations_;
+    std::map<std::uint64_t, std::shared_ptr<Operation>> in_flight_;
     std::map<std::uint32_t, LeaseRecord> leases_;
     std::map<std::uint32_t, BridgeRecord> bridges_;
     std::map<std::uint64_t, std::shared_ptr<StreamRecord>> streams_;

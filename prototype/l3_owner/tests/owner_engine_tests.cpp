@@ -119,7 +119,7 @@ public:
             const dtv_l3_transfer_completion completion{
                 *immediate_result,
                 immediate_data.empty() ? nullptr : immediate_data.data(),
-                immediate_data.size()};
+                immediate_data.size(), immediate_data.size(), 1};
             complete(binding, id, &completion, callback_context);
         }
         if (submit_return_barrier) {
@@ -153,7 +153,7 @@ public:
         }
         if (complete_now) {
             const dtv_l3_transfer_completion completion{
-                DTV_L3_CANCELLED, nullptr, 0};
+                DTV_L3_CANCELLED, nullptr, 0, 0, 1};
             pending.complete(binding, id, &completion,
                              pending.callback_context);
         }
@@ -304,7 +304,8 @@ public:
             transfers.erase(found);
         }
         const dtv_l3_transfer_completion completion{
-            result, data.empty() ? nullptr : data.data(), data.size()};
+            result, data.empty() ? nullptr : data.data(), data.size(),
+            data.size(), 1};
         pending.complete(binding, id, &completion, pending.callback_context);
         return true;
     }
@@ -1785,8 +1786,8 @@ void test_wait_deadline_is_not_terminal_timeout() {
     CHECK(owner.wait_operation(operation, 2000) == DTV_L3_OK);
     dtv_l3_op_state op_state = DTV_L3_OP_OPENING;
     dtv_l3_result op_result = DTV_L3_ACCEPTED;
-    CHECK(owner.poll_result(operation, &op_state, &op_result, nullptr, nullptr) ==
-          DTV_L3_INVALID);
+    CHECK(owner.poll_result(operation, &op_state, &op_result, nullptr, nullptr,
+                            nullptr, nullptr) == DTV_L3_INVALID);
     CHECK(operation->state == DTV_L3_OP_FAILED);
     CHECK(operation->result == DTV_L3_TIMEOUT);
     CHECK(op_state == DTV_L3_OP_OPENING);

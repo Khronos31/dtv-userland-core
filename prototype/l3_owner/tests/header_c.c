@@ -62,7 +62,12 @@ static dtv_l3_result cancel(void *context,
                            uint64_t transfer_id) {
     struct fixture *fixture = context;
     const uint8_t data[] = {0x90, 0x00};
-    const dtv_l3_transfer_completion completion = {DTV_L3_OK, data, sizeof(data)};
+    const dtv_l3_transfer_completion completion = {
+        .result = DTV_L3_OK,
+        .data = data,
+        .size = sizeof(data),
+        .actual_length = sizeof(data),
+        .actual_length_known = 1};
     if (fixture->binding != binding || fixture->transfer_id != transfer_id ||
         fixture->complete == NULL) {
         return DTV_L3_INVALID;

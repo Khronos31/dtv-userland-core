@@ -182,8 +182,12 @@ static dtv_l3_result provider_cancel(void *context,
         sched_yield();
     }
     if (fixture->complete_on_cancel && fixture->complete != NULL) {
-        const dtv_l3_transfer_completion completion = {DTV_L3_CANCELLED, NULL,
-                                                       0};
+        const dtv_l3_transfer_completion completion = {
+            .result = DTV_L3_CANCELLED,
+            .data = NULL,
+            .size = 0,
+            .actual_length = 0,
+            .actual_length_known = 1};
         fixture->complete(fixture->complete_binding, fixture->complete_id,
                           &completion, fixture->complete_context);
     }
@@ -386,7 +390,12 @@ static int provider_fire(struct fixture *fixture,
     if (fixture->complete == NULL) {
         return 0;
     }
-    const dtv_l3_transfer_completion completion = {result, data, size};
+    const dtv_l3_transfer_completion completion = {
+        .result = result,
+        .data = data,
+        .size = size,
+        .actual_length = size,
+        .actual_length_known = 1};
     fixture->complete(fixture->complete_binding, fixture->complete_id,
                       &completion, fixture->complete_context);
     return 1;

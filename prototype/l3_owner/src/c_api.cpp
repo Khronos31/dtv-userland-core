@@ -107,6 +107,10 @@ public:
                                       index);
     }
 
+    dtv_l3_cancel_scope cancel_scope() const override {
+        return provider_.cancel_scope;
+    }
+
     void set_binding(std::shared_ptr<l3_owner_prototype::Binding> binding) {
         binding_ = std::move(binding);
     }
@@ -289,7 +293,8 @@ dtv_l3_result dtv_l3_open_status_get(dtv_l3_context *owner,
         static_cast<uint32_t>(snapshot.cleanup_claims_remaining);
     status->last_cleanup_error = snapshot.last_cleanup_error;
     status->restoration_failed = snapshot.restoration_failed ? 1 : 0;
-    status->reserved[0] = status->reserved[1] = status->reserved[2] = 0;
+    status->disconnected = snapshot.disconnected ? 1 : 0;
+    status->reserved[0] = status->reserved[1] = 0;
     return DTV_L3_OK;
 }
 
@@ -318,6 +323,7 @@ dtv_l3_result dtv_l3_close_status_get(dtv_l3_context *owner,
     status->open_lane = snapshot.open_lane;
     status->control_lane = snapshot.control_lane;
     status->live_lanes = snapshot.live_lanes;
+    status->disconnected = snapshot.disconnected ? 1 : 0;
     return DTV_L3_OK;
 }
 
@@ -414,12 +420,15 @@ dtv_l3_result dtv_l3_op_poll(dtv_l3_op *op, dtv_l3_op_result *result) {
     }
     result->kind = op->kind;
     result->cleanup_epoch = 0;
+    result->cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+    result->provider_abort_resubmits = 0;
     if (op->kind == DTV_L3_OP_KIND_OPEN) {
         return poll_open_op(op->owner, result);
     }
-    return op->owner->engine->poll_result(op->operation, &result->state,
-                                          &result->result, &result->data,
-                                          &result->data_size);
+    return op->owner->engine->poll_result(
+        op->operation, &result->state, &result->result, &result->data,
+        &result->data_size, &result->cancel_cause,
+        &result->provider_abort_resubmits);
 }
 
 dtv_l3_result dtv_l3_op_wait(dtv_l3_op *op, uint32_t timeout_ms) {

@@ -21,6 +21,19 @@ std::chrono::milliseconds wait_duration(std::uint32_t timeout_ms) {
     return std::chrono::milliseconds(timeout_ms);
 }
 
+std::uint64_t monotonic_now_ns() {
+    return static_cast<std::uint64_t>(
+        std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch())
+            .count());
+}
+
+std::chrono::steady_clock::time_point deadline_time_point(
+    std::uint64_t deadline_ns) {
+    return std::chrono::steady_clock::time_point(
+        std::chrono::nanoseconds(deadline_ns));
+}
+
 struct LaneStartFailure {};
 }  // namespace
 
@@ -195,7 +208,11 @@ dtv_l3_result OwnerEngine::start(
          (request.endpoint == 0 || request.control.request_type != 0 ||
           request.control.request != 0 || request.control.value != 0 ||
           request.control.index != 0)) ||
-        (request.kind == DTV_L3_TRANSFER_CONTROL && request.endpoint != 0) ||
+        (request.kind == DTV_L3_TRANSFER_CONTROL &&
+         (request.endpoint != 0 ||
+          ((request.control.request_type & 0x80u) != 0
+               ? request.out_size != 0
+               : request.out_size == 0 && request.in_capacity != 0))) ||
         (request.kind != DTV_L3_TRANSFER_BULK &&
          request.kind != DTV_L3_TRANSFER_CONTROL)) {
         return DTV_L3_INVALID;
@@ -208,19 +225,36 @@ dtv_l3_result OwnerEngine::start(
     auto op = std::make_shared<Operation>();
     std::shared_ptr<Binding> binding;
     dtv_l3_transfer_request provider_request = request;
+    const std::uint32_t pipe_key =
+        request.kind == DTV_L3_TRANSFER_CONTROL ? 0u : request.endpoint;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         if (request.claim_index >= claims_.size()) {
             return DTV_L3_INVALID;
         }
+        if (disconnected_) {
+            return DTV_L3_DISCONNECTED;
+        }
         if (open_state_ != OpenState::Ready || close_requested_ ||
             claims_[request.claim_index] != ClaimState::Ready) {
             return DTV_L3_BUSY;
+        }
+        for (const auto &entry : operations_) {
+            const auto &other = entry.second;
+            if ((other->state == DTV_L3_OP_OPENING ||
+                 other->state == DTV_L3_OP_RUNNING) &&
+                other->pipe_key == pipe_key &&
+                other->request_template.timeout_ms != request.timeout_ms) {
+                return DTV_L3_INVALID;
+            }
         }
         binding = binding_;
         op->owner = this;
         op->binding = binding;
         op->id = next_transfer_id_++;
+        op->request_template = request;
+        op->request_template.out_data = nullptr;
+        op->pipe_key = pipe_key;
         if (request.out_size != 0) {
             op->retained_payload.assign(
                 request.out_data, request.out_data + request.out_size);
@@ -242,17 +276,22 @@ dtv_l3_result OwnerEngine::start(
         --provider_calls_in_flight_;
         if (result == DTV_L3_ACCEPTED) {
             op->submitted = true;
+            if (!op->completion_received) {
+                in_flight_.emplace(op->id, op);
+            }
             if (op->cancel_requested) {
                 queue_cancel_locked(op);
             }
         } else {
-            if (op->state == DTV_L3_OP_OPENING) {
+            if (op->state == DTV_L3_OP_OPENING ||
+                op->state == DTV_L3_OP_RUNNING) {
                 op->state = DTV_L3_OP_FAILED;
                 op->result = result;
             }
             op->submitted = true;
         }
         state_condition_.notify_all();
+        work_condition_.notify_all();
     }
     finish_close();
     return result;
@@ -278,6 +317,9 @@ dtv_l3_result OwnerEngine::acquire_lease(std::uint32_t receiver_id,
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
+    if (disconnected_) {
+        return DTV_L3_DISCONNECTED;
+    }
     if (close_requested_ || open_state_ != OpenState::Ready) {
         return DTV_L3_BUSY;
     }
@@ -319,6 +361,9 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
         const auto found = leases_.find(lease_id);
         if (found == leases_.end()) {
             return DTV_L3_STALE;
+        }
+        if (disconnected_) {
+            return DTV_L3_DISCONNECTED;
         }
         if (close_requested_ || open_state_ != OpenState::Ready) {
             return DTV_L3_BUSY;
@@ -377,6 +422,9 @@ dtv_l3_result OwnerEngine::start_lease(std::uint32_t lease_id) {
     if (found == leases_.end()) {
         return DTV_L3_STALE;
     }
+    if (disconnected_) {
+        return DTV_L3_DISCONNECTED;
+    }
     if (close_requested_ || open_state_ != OpenState::Ready) {
         return DTV_L3_BUSY;
     }
@@ -409,6 +457,9 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         const auto found = leases_.find(lease_id);
         if (found == leases_.end()) {
             return DTV_L3_STALE;
+        }
+        if (disconnected_) {
+            return DTV_L3_DISCONNECTED;
         }
         if (close_requested_ || open_state_ != OpenState::Ready) {
             return DTV_L3_BUSY;
@@ -1319,9 +1370,12 @@ dtv_l3_result OwnerEngine::poll_result(
     dtv_l3_op_state *state,
     dtv_l3_result *result,
     const std::uint8_t **data,
-    std::size_t *data_size) {
+    std::size_t *data_size,
+    dtv_l3_cancel_cause *cancel_cause,
+    std::uint32_t *provider_abort_resubmits) {
     if (!operation || state == nullptr || result == nullptr || data == nullptr ||
-        data_size == nullptr) {
+        data_size == nullptr || cancel_cause == nullptr ||
+        provider_abort_resubmits == nullptr) {
         return DTV_L3_INVALID;
     }
     Borrow borrow(*this);
@@ -1337,6 +1391,8 @@ dtv_l3_result OwnerEngine::poll_result(
     *result = operation->result;
     *data = operation->response.empty() ? nullptr : operation->response.data();
     *data_size = operation->response.size();
+    *cancel_cause = operation->cancel_cause;
+    *provider_abort_resubmits = operation->provider_abort_resubmits;
     return DTV_L3_OK;
 }
 
@@ -1678,6 +1734,7 @@ dtv_l3_result OwnerEngine::close_status(Snapshot *snapshot) {
         physical_quiesced_ && cleanup_complete_ && all_ops_recovered_locked() &&
         lanes_exit_committed_locked() && provider_calls_in_flight_ == 0 &&
         work_queue_.empty();
+    snapshot->disconnected = disconnected_;
     return DTV_L3_OK;
 }
 
@@ -1736,6 +1793,7 @@ dtv_l3_result OwnerEngine::release(
         maybe_commit_control_exit_locked();
         if (!physical_quiesced_ || !all_ops_recovered_locked() ||
             !cleanup_complete_ || !streams_.empty() || !leases_.empty() ||
+            provider_calls_in_flight_ != 0 || !work_queue_.empty() ||
             !lanes_exit_committed_locked()) {
             return DTV_L3_BUSY;
         }
@@ -1751,7 +1809,8 @@ dtv_l3_result OwnerEngine::release(
     if (active_borrows_ != 0 || cleanup_epoch_ != epoch ||
         !physical_quiesced_ || !cleanup_complete_ ||
         !all_ops_recovered_locked() || !streams_.empty() ||
-        !leases_.empty() || !lanes_exit_committed_locked()) {
+        !leases_.empty() || provider_calls_in_flight_ != 0 ||
+        !work_queue_.empty() || !lanes_exit_committed_locked()) {
         return DTV_L3_BUSY;
     }
     released_ = true;
@@ -1819,25 +1878,133 @@ void OwnerEngine::on_completion(
         return;
     }
     bool should_finish_close = false;
+    bool matched = false;
+    bool do_resubmit = false;
+    std::shared_ptr<Operation> op_shared;
+    dtv_l3_transfer_request resubmit_request{};
+    std::uint64_t resubmit_id = 0;
     {
         std::lock_guard<std::mutex> lock(mutex_);
+        const auto in_flight = in_flight_.find(id);
+        if (in_flight != in_flight_.end()) {
+            op_shared = in_flight->second;
+            in_flight_.erase(in_flight);
+        }
         const auto found = operations_.find(id);
-        if (binding != binding_.get() || found == operations_.end() ||
-            found->second.get() != operation ||
-            operation->state == DTV_L3_OP_DONE ||
-            operation->state == DTV_L3_OP_FAILED) {
-            return;
-        }
-        operation->result = completion.result;
-        if (completion.size != 0 && completion.data != nullptr) {
-            operation->response.assign(
-                completion.data, completion.data + completion.size);
-        }
-        operation->state = completion.result == DTV_L3_OK
+        if (binding == binding_.get() && found != operations_.end() &&
+            found->second.get() == operation) {
+            matched = true;
+            op_shared = found->second;
+            Operation &op = *op_shared;
+            op.completion_received = true;
+            if (op.state == DTV_L3_OP_DONE || op.state == DTV_L3_OP_FAILED) {
+                /* A late completion after an owner deadline or disconnect. */
+            } else if (completion.result == DTV_L3_CANCELLED) {
+                op.cancel_cause = op.cancel_requested
+                                      ? DTV_L3_CANCEL_CAUSE_REQUESTED
+                                      : DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT;
+                const bool outbound = op.request_template.out_size != 0;
+                const bool proven_unsent =
+                    completion.actual_length_known != 0 &&
+                    completion.actual_length == 0;
+                if (outbound && !proven_unsent) {
+                    op.result = DTV_L3_OUTCOME_UNKNOWN;
+                    op.state = DTV_L3_OP_FAILED;
+                } else if (outbound) {
+                    op.result = DTV_L3_CANCELLED;
+                    op.state = DTV_L3_OP_FAILED;
+                } else if (op.cancel_cause ==
+                               DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT &&
+                           op.request_template.resubmit_on_provider_abort != 0 &&
+                           op.submitted && !op.cancel_requested &&
+                           !close_requested_ && !disconnected_) {
+                    op.provider_abort_resubmits++;
+                    op.completion_received = false;
+                    op.submitted = false;
+                    op.cancel_sent = false;
+                    op.cancel_in_progress = false;
+                    const auto old_id = op.id;
+                    const auto new_id = next_transfer_id_++;
+                    operations_.erase(old_id);
+                    op.id = new_id;
+                    operations_.emplace(new_id, op_shared);
+                    resubmit_request = op.request_template;
+                    if (!op.retained_payload.empty()) {
+                        resubmit_request.out_data =
+                            op.retained_payload.data();
+                    }
+                    resubmit_id = new_id;
+                    do_resubmit = true;
+                } else {
+                    op.result = DTV_L3_CANCELLED;
+                    op.state = DTV_L3_OP_FAILED;
+                }
+            } else if (completion.result == DTV_L3_DISCONNECTED) {
+                op.cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+                op.result = DTV_L3_DISCONNECTED;
+                op.state = DTV_L3_OP_FAILED;
+                disconnected_ = true;
+                for (auto &entry : operations_) {
+                    auto &other = *entry.second;
+                    if (&other == &op) {
+                        continue;
+                    }
+                    if (other.state == DTV_L3_OP_OPENING ||
+                        other.state == DTV_L3_OP_RUNNING) {
+                        other.cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+                        other.result = DTV_L3_DISCONNECTED;
+                        other.state = DTV_L3_OP_FAILED;
+                    }
+                }
+            } else {
+                op.cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+                op.result = completion.result;
+                if (completion.size != 0 && completion.data != nullptr) {
+                    op.response.assign(completion.data,
+                                       completion.data + completion.size);
+                }
+                op.state = completion.result == DTV_L3_OK
                                ? DTV_L3_OP_DONE
                                : DTV_L3_OP_FAILED;
+            }
+        }
         should_finish_close = close_requested_;
         state_condition_.notify_all();
+    }
+    if (!matched) {
+        if (should_finish_close) {
+            finish_close();
+        }
+        return;
+    }
+    if (do_resubmit) {
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            ++provider_calls_in_flight_;
+        }
+        CallbackFrame frame;
+        const auto submit_result = provider_.submit(
+            op_shared->binding.get(), resubmit_id, resubmit_request,
+            &OwnerEngine::completion_thunk, op_shared.get());
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            if (submit_result == DTV_L3_ACCEPTED) {
+                op_shared->submitted = true;
+                if (!op_shared->completion_received) {
+                    const auto found = operations_.find(resubmit_id);
+                    if (found != operations_.end()) {
+                        in_flight_.emplace(resubmit_id, found->second);
+                    }
+                }
+            } else if (op_shared->state == DTV_L3_OP_OPENING ||
+                       op_shared->state == DTV_L3_OP_RUNNING) {
+                op_shared->state = DTV_L3_OP_FAILED;
+                op_shared->result = submit_result;
+            }
+            should_finish_close = close_requested_;
+            state_condition_.notify_all();
+        }
     }
     if (should_finish_close) {
         finish_close();
@@ -2006,15 +2173,84 @@ void OwnerEngine::run_claim_cancel(std::uint32_t index) {
     finish_close();
 }
 
+bool OwnerEngine::expire_operations_locked() {
+    if (close_requested_ || disconnected_) {
+        return false;
+    }
+    const auto now = monotonic_now_ns();
+    bool expired = false;
+    for (auto &entry : operations_) {
+        auto &op = *entry.second;
+        if (!op.submitted ||
+            (op.state != DTV_L3_OP_OPENING &&
+             op.state != DTV_L3_OP_RUNNING) ||
+            op.request_template.deadline_ns == DTV_L3_DEADLINE_NONE ||
+            op.cancel_requested || now < op.request_template.deadline_ns) {
+            continue;
+        }
+        /*
+         * A response deadline is an operation result. It does not cancel the
+         * shared IN pipe, so a late response can still be discarded and TS can
+         * continue. The accepted completion remains outstanding until it
+         * returns.
+         */
+        op.cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
+        op.result = DTV_L3_TIMEOUT;
+        op.state = DTV_L3_OP_FAILED;
+        expired = true;
+    }
+    if (expired) {
+        state_condition_.notify_all();
+    }
+    return expired;
+}
+
+std::optional<std::chrono::steady_clock::time_point>
+OwnerEngine::next_deadline_locked() const {
+    if (close_requested_ || disconnected_) {
+        return std::nullopt;
+    }
+    std::optional<std::uint64_t> next;
+    for (const auto &entry : operations_) {
+        const auto &op = *entry.second;
+        if (!op.submitted ||
+            (op.state != DTV_L3_OP_OPENING &&
+             op.state != DTV_L3_OP_RUNNING) ||
+            op.request_template.deadline_ns == DTV_L3_DEADLINE_NONE ||
+            op.cancel_requested) {
+            continue;
+        }
+        if (!next || op.request_template.deadline_ns < *next) {
+            next = op.request_template.deadline_ns;
+        }
+    }
+    if (!next) {
+        return std::nullopt;
+    }
+    return deadline_time_point(*next);
+}
+
 void OwnerEngine::worker_loop() {
     for (;;) {
         std::function<void()> work;
         {
             std::unique_lock<std::mutex> lock(mutex_);
-            work_condition_.wait(lock, [this] {
+            const auto ready = [this] {
                 return worker_stopping_ || !work_queue_.empty() ||
                        control_lane_may_exit_locked();
-            });
+            };
+            while (!ready()) {
+                const auto next = next_deadline_locked();
+                if (!next) {
+                    work_condition_.wait(lock);
+                    continue;
+                }
+                if (work_condition_.wait_until(lock, *next) ==
+                    std::cv_status::timeout) {
+                    /* The control lane owns the deadline timer; no host loop. */
+                    (void)expire_operations_locked();
+                }
+            }
             if (work_queue_.empty()) {
                 if (worker_stopping_) {
                     return;
@@ -2074,7 +2310,8 @@ bool OwnerEngine::lanes_exit_committed_locked() const {
 }
 
 bool OwnerEngine::all_ops_recovered_locked() const {
-    return operations_.empty() && physical_settled_locked();
+    return operations_.empty() && in_flight_.empty() &&
+           physical_settled_locked();
 }
 
 bool OwnerEngine::active_streams_locked() const {

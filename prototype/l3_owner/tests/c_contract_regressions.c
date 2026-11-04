@@ -99,7 +99,11 @@ static dtv_l3_result provider_cancel(void *context,
     if (fixture->complete_on_cancel) {
         const uint8_t data[] = {0x90, 0x00};
         const dtv_l3_transfer_completion completion = {
-            DTV_L3_OK, data, sizeof(data)};
+            .result = DTV_L3_OK,
+            .data = data,
+            .size = sizeof(data),
+            .actual_length = sizeof(data),
+            .actual_length_known = 1};
         if (fixture->complete == NULL || fixture->binding != binding ||
             fixture->transfer_id != transfer_id) {
             return DTV_L3_INVALID;

@@ -28,11 +28,36 @@ typedef enum dtv_l3_result {
     DTV_L3_FAILED = 7,
     DTV_L3_STALE = 8,
     DTV_L3_WAIT_TIMEOUT = 9,
-    DTV_L3_CLOSING = 10
+    DTV_L3_CLOSING = 10,
+    DTV_L3_DISCONNECTED = 11,
+    DTV_L3_OUTCOME_UNKNOWN = 12
 } dtv_l3_result;
 
 /* A wait deadline of zero observes immediately; this value waits indefinitely. */
 #define DTV_L3_WAIT_FOREVER 0xffffffffu
+
+/*
+ * An operation deadline is an absolute monotonic time in nanoseconds. Zero is
+ * "no deadline" and is distinct from a zero USB pipe timeout.
+ */
+#define DTV_L3_DEADLINE_NONE 0u
+
+/*
+ * The provider may cancel only the named transfer or every transfer on the
+ * USB pipe. A host-requested cancel can therefore end transfers it did not
+ * name. The owner classifies those terminations; it never invents a cancel
+ * request for a transfer it did not ask to cancel.
+ */
+typedef enum dtv_l3_cancel_scope {
+    DTV_L3_CANCEL_SCOPE_TRANSFER = 0,
+    DTV_L3_CANCEL_SCOPE_PIPE = 1
+} dtv_l3_cancel_scope;
+
+typedef enum dtv_l3_cancel_cause {
+    DTV_L3_CANCEL_CAUSE_NONE = 0,
+    DTV_L3_CANCEL_CAUSE_REQUESTED = 1,
+    DTV_L3_CANCEL_CAUSE_PROVIDER_ABORT = 2
+} dtv_l3_cancel_cause;
 
 typedef enum dtv_l3_op_state {
     DTV_L3_OP_OPENING = 0,
@@ -88,6 +113,7 @@ typedef enum dtv_l3_lane_state {
 typedef struct dtv_l3_transfer_request {
     uint32_t kind;
     uint32_t endpoint;
+    /* USB pipe timeout. Zero means no timeout; it is not an operation deadline. */
     uint32_t timeout_ms;
     const uint8_t *out_data;
     size_t out_size;
@@ -99,12 +125,22 @@ typedef struct dtv_l3_transfer_request {
         uint16_t value;
         uint16_t index;
     } control;
+    /* Absolute monotonic operation deadline; separate from timeout_ms. */
+    uint64_t deadline_ns;
+    /*
+     * Opt in only for a stream IN transfer whose loss after a pipe-wide abort
+     * may be recovered by submitting the same request again.
+     */
+    uint32_t resubmit_on_provider_abort;
 } dtv_l3_transfer_request;
 
 typedef struct dtv_l3_transfer_completion {
     dtv_l3_result result;
     const uint8_t *data;
     size_t size;
+    /* Provider-observed bytes. Actual length is unknown unless flagged. */
+    size_t actual_length;
+    uint8_t actual_length_known;
 } dtv_l3_transfer_completion;
 
 /*
@@ -119,7 +155,13 @@ typedef void (*dtv_l3_transfer_complete_fn)(
     const dtv_l3_transfer_completion *completion,
     void *callback_context);
 
-/* ACCEPTED means exactly one terminal callback later; rejection means none. */
+/*
+ * ACCEPTED means exactly one terminal callback later; rejection means none.
+ * The callback may run inside submit. The owner copies out_data before submit
+ * and copies completion IN data before the callback returns. One USB pipe must
+ * use one timeout policy at a time; the owner rejects a conflicting policy
+ * before calling submit.
+ */
 typedef dtv_l3_result (*dtv_l3_transfer_submit_fn)(
     void *provider_context,
     dtv_l3_provider_binding *binding,
@@ -252,6 +294,8 @@ typedef struct dtv_l3_provider {
     dtv_l3_stream_stop_fn stream_stop;
     dtv_l3_tune_fn tune;
     dtv_l3_claim_cancel_fn claim_cancel;
+    /* Zero is CANCEL_SCOPE_TRANSFER for existing single-pipe providers. */
+    dtv_l3_cancel_scope cancel_scope;
 } dtv_l3_provider;
 
 typedef struct dtv_l3_open_result {
@@ -268,7 +312,8 @@ typedef struct dtv_l3_open_status {
     uint32_t cleanup_claims_remaining;
     dtv_l3_result last_cleanup_error;
     uint8_t restoration_failed;
-    uint8_t reserved[3];
+    uint8_t disconnected;
+    uint8_t reserved[2];
 } dtv_l3_open_status;
 
 typedef struct dtv_l3_close_status {
@@ -281,6 +326,7 @@ typedef struct dtv_l3_close_status {
     dtv_l3_lane_state open_lane;
     dtv_l3_lane_state control_lane;
     uint32_t live_lanes;
+    uint8_t disconnected;
 } dtv_l3_close_status;
 
 typedef struct dtv_l3_op_result {
@@ -290,6 +336,8 @@ typedef struct dtv_l3_op_result {
     uint64_t cleanup_epoch;
     const uint8_t *data;
     size_t data_size;
+    dtv_l3_cancel_cause cancel_cause;
+    uint32_t provider_abort_resubmits;
 } dtv_l3_op_result;
 
 typedef struct dtv_l3_lease_status {
