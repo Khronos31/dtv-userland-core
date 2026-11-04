@@ -143,12 +143,16 @@ public:
     };
 
     explicit OwnerEngine(Provider &provider, std::uint64_t binding_value);
+    OwnerEngine(Provider &provider,
+                std::uint64_t binding_value,
+                const dtv_l3_logger &logger);
     ~OwnerEngine();
 
     OwnerEngine(const OwnerEngine &) = delete;
     OwnerEngine &operator=(const OwnerEngine &) = delete;
 
     void initialize_claims(std::uint32_t count);
+    void abort_open_after_lane_exception();
     dtv_l3_result retry_cleanup();
     dtv_l3_result start(const dtv_l3_transfer_request &request,
                        std::shared_ptr<Operation> *operation);
@@ -300,6 +304,9 @@ private:
                                  std::uint64_t id,
                                  const dtv_l3_transfer_completion *completion,
                                  void *callback_context);
+    void log(dtv_l3_log_level level,
+             const char *fn,
+             const char *message) const noexcept;
     void on_completion(Binding *binding,
                        std::uint64_t id,
                        const dtv_l3_transfer_completion &completion,
@@ -333,6 +340,7 @@ private:
     bool all_ops_recovered_locked() const;
 
     Provider &provider_;
+    dtv_l3_logger logger_;
     mutable std::mutex mutex_;
     bool retired_gate_ = false;
     bool released_ = false;
@@ -408,6 +416,23 @@ public:
 /* Prototype test seam; not part of the C contract. Lane 1 is open, 2 control. */
 void set_test_lane_start_failure_mask(int mask);
 bool test_lane_start_fails(int lane_mask_bit);
+
+/* Prototype test seam; not part of the C contract. Bits are one-shot. */
+enum : unsigned int {
+    kTestInjectEntry = 1u << 0,
+    kTestInjectOpenContext = 1u << 1,
+    kTestInjectOpenOp = 1u << 2,
+    kTestInjectStartPayload = 1u << 3,
+    kTestInjectStartSubmit = 1u << 4,
+    kTestInjectClaim = 1u << 5,
+    kTestInjectCancel = 1u << 6,
+    kTestInjectReleaseClaim = 1u << 7,
+    kTestInjectCompletionCopy = 1u << 8,
+    kTestInjectTsDeliver = 1u << 9
+};
+void set_test_exception_mask(unsigned int mask);
+void maybe_throw_test_exception(unsigned int bit);
+void maybe_throw_test_entry_exception();
 
 }  // namespace l3_owner_prototype
 

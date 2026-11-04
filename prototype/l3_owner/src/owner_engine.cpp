@@ -5,6 +5,7 @@
 #include <atomic>
 #include <chrono>
 #include <cstring>
+#include <new>
 
 namespace l3_owner_prototype {
 
@@ -16,6 +17,18 @@ constexpr int kControlLaneMask = 2;
 
 thread_local int callback_frame_depth = 0;
 std::atomic<int> lane_start_failure_mask{0};
+std::atomic<unsigned int> test_exception_mask{0};
+
+void throw_if_test_bit(unsigned int bit) {
+    unsigned int current = test_exception_mask.load(std::memory_order_acquire);
+    while ((current & bit) != 0) {
+        if (test_exception_mask.compare_exchange_weak(
+                current, current & ~bit, std::memory_order_acq_rel,
+                std::memory_order_acquire)) {
+            throw std::bad_alloc();
+        }
+    }
+}
 
 std::chrono::milliseconds wait_duration(std::uint32_t timeout_ms) {
     return std::chrono::milliseconds(timeout_ms);
@@ -38,7 +51,15 @@ struct LaneStartFailure {};
 }  // namespace
 
 OwnerEngine::OwnerEngine(Provider &provider, std::uint64_t binding_value)
-    : provider_(provider), binding_(std::make_shared<Binding>(binding_value)) {
+    : OwnerEngine(provider, binding_value,
+                  dtv_l3_logger{nullptr, nullptr, DTV_L3_LOG_ERROR}) {}
+
+OwnerEngine::OwnerEngine(Provider &provider,
+                         std::uint64_t binding_value,
+                         const dtv_l3_logger &logger)
+    : provider_(provider),
+      logger_(logger),
+      binding_(std::make_shared<Binding>(binding_value)) {
     if (test_lane_start_fails(kControlLaneMask)) {
         throw LaneStartFailure{};
     }
@@ -63,6 +84,45 @@ OwnerEngine::~OwnerEngine() {
     if (worker_.joinable()) {
         worker_.join();
     }
+}
+
+void OwnerEngine::log(dtv_l3_log_level level,
+                      const char *fn,
+                      const char *message) const noexcept {
+    if (logger_.fn == nullptr || level > logger_.min_level) {
+        return;
+    }
+    CallbackFrame frame;
+    try {
+        logger_.fn(logger_.userdata, level, fn, message);
+    } catch (...) {
+        /* Logging failure never propagates or recurses into another log. */
+    }
+}
+
+void OwnerEngine::abort_open_after_lane_exception() {
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        close_requested_ = true;
+        if (open_state_ != OpenState::Failed &&
+            open_state_ != OpenState::Closed) {
+            open_state_ = OpenState::Failed;
+        }
+        open_result_ = DTV_L3_FAILED;
+        claims_.clear();
+        claim_quiesced_.clear();
+        claim_cleanup_errors_.clear();
+        claim_cancel_requested_.clear();
+        claim_in_flight_ = false;
+        in_flight_claim_valid_ = false;
+        initialization_phase_ = InitializationPhase::Returned;
+        open_lane_ = DTV_L3_LANE_EXIT_COMMITTED;
+        maybe_commit_control_exit_locked();
+        state_condition_.notify_all();
+        work_condition_.notify_all();
+    }
+    log(DTV_L3_LOG_ERROR, "open_lane", "contained C++ exception");
+    finish_close();
 }
 
 OwnerEngine::Borrow::Borrow(OwnerEngine &owner)
@@ -116,7 +176,19 @@ void OwnerEngine::initialize_claims(std::uint32_t count) {
         }
 
         CallbackFrame frame;
-        const auto claim = provider_.claim(binding.get(), index);
+        dtv_l3_claim_result claim{DTV_L3_FAILED, DTV_L3_CLAIM_RETAINED};
+        bool claim_threw = false;
+        try {
+            maybe_throw_test_exception(kTestInjectClaim);
+            claim = provider_.claim(binding.get(), index);
+        } catch (...) {
+            claim_threw = true;
+            claim = {DTV_L3_FAILED, DTV_L3_CLAIM_RETAINED};
+        }
+        if (claim_threw) {
+            log(DTV_L3_LOG_WARN, "provider.claim",
+                "contained C++ exception");
+        }
         {
             std::lock_guard<std::mutex> lock(mutex_);
             --provider_calls_in_flight_;
@@ -263,6 +335,7 @@ dtv_l3_result OwnerEngine::start(
         op->request_template.out_data = nullptr;
         op->pipe_key = pipe_key;
         if (request.out_size != 0) {
+            maybe_throw_test_exception(kTestInjectStartPayload);
             op->retained_payload.assign(
                 request.out_data, request.out_data + request.out_size);
             provider_request.out_data = op->retained_payload.data();
@@ -275,9 +348,17 @@ dtv_l3_result OwnerEngine::start(
         std::lock_guard<std::mutex> lock(mutex_);
         ++provider_calls_in_flight_;
     }
-    const auto result = provider_.submit(
-        binding.get(), op->id, provider_request, &OwnerEngine::completion_thunk,
-        op.get());
+    bool submit_threw = false;
+    const auto result = [&] {
+        try {
+            maybe_throw_test_exception(kTestInjectStartSubmit);
+            return provider_.submit(binding.get(), op->id, provider_request,
+                                    &OwnerEngine::completion_thunk, op.get());
+        } catch (...) {
+            submit_threw = true;
+            return DTV_L3_FAILED;
+        }
+    }();
     bool pending_resubmit = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -303,6 +384,10 @@ dtv_l3_result OwnerEngine::start(
         state_condition_.notify_all();
         work_condition_.notify_all();
     }
+    if (submit_threw) {
+        log(DTV_L3_LOG_WARN, "provider.submit",
+            "contained C++ exception");
+    }
     if (pending_resubmit) {
         resubmit_operation(op);
     }
@@ -320,7 +405,18 @@ dtv_l3_result OwnerEngine::acquire_lease(std::uint32_t receiver_id,
         return DTV_L3_BUSY;
     }
     dtv_l3_scope_info scope{};
-    const auto scope_result = provider_.scope_query(receiver_id, &scope);
+    dtv_l3_result scope_result = DTV_L3_FAILED;
+    bool scope_threw = false;
+    try {
+        scope_result = provider_.scope_query(receiver_id, &scope);
+    } catch (...) {
+        scope_threw = true;
+        scope_result = DTV_L3_FAILED;
+    }
+    if (scope_threw) {
+        log(DTV_L3_LOG_WARN, "provider.scope_query",
+            "contained C++ exception");
+    }
     if (scope_result != DTV_L3_OK) {
         return scope_result;
     }
@@ -392,8 +488,14 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
     }
 
     std::uint64_t programmed = requested_hz;
-    const auto tune_result =
-        provider_.tune(receiver_id, requested_hz, &programmed);
+    dtv_l3_result tune_result = DTV_L3_FAILED;
+    bool tune_threw = false;
+    try {
+        tune_result = provider_.tune(receiver_id, requested_hz, &programmed);
+    } catch (...) {
+        tune_threw = true;
+        tune_result = DTV_L3_FAILED;
+    }
 
     dtv_l3_result result = DTV_L3_OK;
     {
@@ -420,6 +522,10 @@ dtv_l3_result OwnerEngine::tune_lease(std::uint32_t lease_id,
                 *tune_revision = found->second.tune_revision;
             }
         }
+    }
+    if (tune_threw) {
+        log(DTV_L3_LOG_WARN, "provider.tune",
+            "contained C++ exception");
     }
     finish_close();
     return result;
@@ -516,7 +622,14 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             std::lock_guard<std::mutex> lock(mutex_);
             ++provider_calls_in_flight_;
         }
-        const auto start_result = provider_.bridge_start(bridge_id, receiver_id);
+        dtv_l3_result start_result = DTV_L3_FAILED;
+        bool start_threw = false;
+        try {
+            start_result = provider_.bridge_start(bridge_id, receiver_id);
+        } catch (...) {
+            start_threw = true;
+            start_result = DTV_L3_FAILED;
+        }
         bool start_ok = false;
         {
             std::lock_guard<std::mutex> lock(mutex_);
@@ -540,6 +653,10 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             }
             state_condition_.notify_all();
         }
+        if (start_threw) {
+            log(DTV_L3_LOG_WARN, "provider.bridge_start",
+                "contained C++ exception");
+        }
         if (!start_ok) {
             finish_close();
             return start_result;
@@ -558,13 +675,25 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
             std::lock_guard<std::mutex> lock(mutex_);
             ++provider_calls_in_flight_;
         }
-        attach_result = provider_.stream_attach(
-            generation, &StreamSink::deliver, stream->sink.get());
-        std::lock_guard<std::mutex> lock(mutex_);
-        --provider_calls_in_flight_;
-        stream->attaching = false;
-        abort = attach_result != DTV_L3_OK || close_requested_;
-        state_condition_.notify_all();
+        bool attach_threw = false;
+        try {
+            attach_result = provider_.stream_attach(
+                generation, &StreamSink::deliver, stream->sink.get());
+        } catch (...) {
+            attach_threw = true;
+            attach_result = DTV_L3_FAILED;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            stream->attaching = false;
+            abort = attach_result != DTV_L3_OK || close_requested_;
+            state_condition_.notify_all();
+        }
+        if (attach_threw) {
+            log(DTV_L3_LOG_WARN, "provider.stream_attach",
+                "contained C++ exception");
+        }
     }
     if (abort) {
         const bool attached = attach_result == DTV_L3_OK;
@@ -574,11 +703,21 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
                 std::lock_guard<std::mutex> lock(mutex_);
                 ++provider_calls_in_flight_;
             }
-            stop_result = provider_.stream_stop(generation);
+            bool stop_threw = false;
+            try {
+                stop_result = provider_.stream_stop(generation);
+            } catch (...) {
+                stop_threw = true;
+                stop_result = DTV_L3_FAILED;
+            }
             {
                 std::lock_guard<std::mutex> lock(mutex_);
                 --provider_calls_in_flight_;
                 state_condition_.notify_all();
+            }
+            if (stop_threw) {
+                log(DTV_L3_LOG_WARN, "provider.stream_stop",
+                    "contained C++ exception");
             }
         }
 
@@ -595,20 +734,32 @@ dtv_l3_result OwnerEngine::attach_lease(std::uint32_t lease_id,
         }
         dtv_l3_result bridge_result = DTV_L3_OK;
         if (stop_bridge) {
-            bridge_result = provider_.bridge_stop(bridge_id);
-            std::lock_guard<std::mutex> lock(mutex_);
-            --provider_calls_in_flight_;
-            auto &bridge = bridges_[bridge_id];
-            bridge.stop_pending = false;
-            if (bridge_result == DTV_L3_OK) {
-                bridge.running = false;
-                bridge.stop_residual = false;
-                ++bridge.stop_count;
-            } else {
-                bridge.running = true;
-                bridge.stop_residual = true;
+            bool bridge_threw = false;
+            try {
+                bridge_result = provider_.bridge_stop(bridge_id);
+            } catch (...) {
+                bridge_threw = true;
+                bridge_result = DTV_L3_FAILED;
             }
-            state_condition_.notify_all();
+            {
+                std::lock_guard<std::mutex> lock(mutex_);
+                --provider_calls_in_flight_;
+                auto &bridge = bridges_[bridge_id];
+                bridge.stop_pending = false;
+                if (bridge_result == DTV_L3_OK) {
+                    bridge.running = false;
+                    bridge.stop_residual = false;
+                    ++bridge.stop_count;
+                } else {
+                    bridge.running = true;
+                    bridge.stop_residual = true;
+                }
+                state_condition_.notify_all();
+            }
+            if (bridge_threw) {
+                log(DTV_L3_LOG_WARN, "provider.bridge_stop",
+                    "contained C++ exception");
+            }
         }
 
         {
@@ -700,7 +851,14 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
         ++provider_calls_in_flight_;
     }
 
-    const auto stop_result = provider_.stream_stop(generation);
+    dtv_l3_result stop_result = DTV_L3_FAILED;
+    bool stop_threw = false;
+    try {
+        stop_result = provider_.stream_stop(generation);
+    } catch (...) {
+        stop_threw = true;
+        stop_result = DTV_L3_FAILED;
+    }
     bool need_bridge_stop = false;
     dtv_l3_result bridge_result = DTV_L3_OK;
     {
@@ -749,28 +907,44 @@ dtv_l3_result OwnerEngine::stop_stream(std::uint64_t generation,
         }
         state_condition_.notify_all();
     }
+    if (stop_threw) {
+        log(DTV_L3_LOG_WARN, "provider.stream_stop",
+            "contained C++ exception");
+    }
 
     if (need_bridge_stop) {
-        bridge_result = provider_.bridge_stop(bridge_id);
-        std::lock_guard<std::mutex> lock(mutex_);
-        --provider_calls_in_flight_;
-        auto &bridge = bridges_[bridge_id];
-        bridge.stop_pending = false;
-        if (bridge_result == DTV_L3_OK) {
-            bridge.running = false;
-            bridge.stop_residual = false;
-            ++bridge.stop_count;
-        } else {
-            bridge.running = true;
-            bridge.stop_residual = true;
-            const auto found = leases_.find(stream->lease_id);
-            if (found != leases_.end()) {
-                found->second.stop_residual = true;
-                found->second.state = DTV_L3_LEASE_RETAINED;
-            }
+        bool bridge_threw = false;
+        try {
+            bridge_result = provider_.bridge_stop(bridge_id);
+        } catch (...) {
+            bridge_threw = true;
+            bridge_result = DTV_L3_FAILED;
         }
-        refresh_lease_locked(stream->lease_id);
-        state_condition_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            auto &bridge = bridges_[bridge_id];
+            bridge.stop_pending = false;
+            if (bridge_result == DTV_L3_OK) {
+                bridge.running = false;
+                bridge.stop_residual = false;
+                ++bridge.stop_count;
+            } else {
+                bridge.running = true;
+                bridge.stop_residual = true;
+                const auto found = leases_.find(stream->lease_id);
+                if (found != leases_.end()) {
+                    found->second.stop_residual = true;
+                    found->second.state = DTV_L3_LEASE_RETAINED;
+                }
+            }
+            refresh_lease_locked(stream->lease_id);
+            state_condition_.notify_all();
+        }
+        if (bridge_threw) {
+            log(DTV_L3_LOG_WARN, "provider.bridge_stop",
+                "contained C++ exception");
+        }
     } else {
         std::lock_guard<std::mutex> lock(mutex_);
         refresh_lease_locked(stream->lease_id);
@@ -1070,7 +1244,14 @@ dtv_l3_result OwnerEngine::release_lease(std::uint32_t lease_id) {
         finish_close();
         return result;
     }
-    const auto stop_result = provider_.bridge_stop(bridge_id);
+    dtv_l3_result stop_result = DTV_L3_FAILED;
+    bool bridge_threw = false;
+    try {
+        stop_result = provider_.bridge_stop(bridge_id);
+    } catch (...) {
+        bridge_threw = true;
+        stop_result = DTV_L3_FAILED;
+    }
     result = DTV_L3_BUSY;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1093,6 +1274,10 @@ dtv_l3_result OwnerEngine::release_lease(std::uint32_t lease_id) {
         }
         state_condition_.notify_all();
     }
+    if (bridge_threw) {
+        log(DTV_L3_LOG_WARN, "provider.bridge_stop",
+            "contained C++ exception");
+    }
     finish_close();
     return result;
 }
@@ -1104,7 +1289,12 @@ void OwnerEngine::StreamSink::deliver(void *callback_context,
     if (sink == nullptr || sink->owner == nullptr) {
         return;
     }
-    sink->owner->on_ts_deliver(sink->generation, data, size);
+    try {
+        sink->owner->on_ts_deliver(sink->generation, data, size);
+    } catch (...) {
+        sink->owner->log(DTV_L3_LOG_WARN, "ts.deliver",
+                         "contained C++ exception");
+    }
 }
 
 void OwnerEngine::on_ts_deliver(std::uint64_t generation,
@@ -1132,6 +1322,7 @@ void OwnerEngine::on_ts_deliver(std::uint64_t generation,
     if (data == nullptr) {
         return;
     }
+    maybe_throw_test_exception(kTestInjectTsDeliver);
     stream.staging.insert(stream.staging.end(), data, data + size);
     bool queued = false;
     while (stream.staging.size() >= 188) {
@@ -1223,7 +1414,14 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
     }
 
     CallbackFrame frame;
-    const auto stop_result = provider_.stream_stop(generation);
+    dtv_l3_result stop_result = DTV_L3_FAILED;
+    bool stop_threw = false;
+    try {
+        stop_result = provider_.stream_stop(generation);
+    } catch (...) {
+        stop_threw = true;
+        stop_result = DTV_L3_FAILED;
+    }
     bool need_bridge_stop = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1258,29 +1456,46 @@ void OwnerEngine::retire_stream_for_close(std::uint64_t generation) {
         }
         state_condition_.notify_all();
     }
+    if (stop_threw) {
+        log(DTV_L3_LOG_WARN, "provider.stream_stop",
+            "contained C++ exception");
+    }
 
     if (need_bridge_stop) {
         CallbackFrame frame;
-        const auto bridge_result = provider_.bridge_stop(bridge_id);
-        std::lock_guard<std::mutex> lock(mutex_);
-        --provider_calls_in_flight_;
-        auto &bridge = bridges_[bridge_id];
-        bridge.stop_pending = false;
-        if (bridge_result == DTV_L3_OK) {
-            bridge.running = false;
-            bridge.stop_residual = false;
-            ++bridge.stop_count;
-        } else {
-            bridge.running = true;
-            bridge.stop_residual = true;
-            const auto lease = leases_.find(stream->lease_id);
-            if (lease != leases_.end()) {
-                lease->second.stop_residual = true;
-                lease->second.state = DTV_L3_LEASE_RETAINED;
-            }
+        dtv_l3_result bridge_result = DTV_L3_FAILED;
+        bool bridge_threw = false;
+        try {
+            bridge_result = provider_.bridge_stop(bridge_id);
+        } catch (...) {
+            bridge_threw = true;
+            bridge_result = DTV_L3_FAILED;
         }
-        refresh_lease_locked(stream->lease_id);
-        state_condition_.notify_all();
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            auto &bridge = bridges_[bridge_id];
+            bridge.stop_pending = false;
+            if (bridge_result == DTV_L3_OK) {
+                bridge.running = false;
+                bridge.stop_residual = false;
+                ++bridge.stop_count;
+            } else {
+                bridge.running = true;
+                bridge.stop_residual = true;
+                const auto lease = leases_.find(stream->lease_id);
+                if (lease != leases_.end()) {
+                    lease->second.stop_residual = true;
+                    lease->second.state = DTV_L3_LEASE_RETAINED;
+                }
+            }
+            refresh_lease_locked(stream->lease_id);
+            state_condition_.notify_all();
+        }
+        if (bridge_threw) {
+            log(DTV_L3_LOG_WARN, "provider.bridge_stop",
+                "contained C++ exception");
+        }
     }
 
     {
@@ -1322,17 +1537,33 @@ dtv_l3_result OwnerEngine::cancel(const std::shared_ptr<Operation> &operation) {
         operation->cancel_in_progress = true;
         ++provider_calls_in_flight_;
     }
-    const auto result = provider_.cancel(operation->binding.get(), operation->id);
+    dtv_l3_result result = DTV_L3_FAILED;
+    bool cancel_threw = false;
+    try {
+        maybe_throw_test_exception(kTestInjectCancel);
+        result = provider_.cancel(operation->binding.get(), operation->id);
+    } catch (...) {
+        cancel_threw = true;
+        result = DTV_L3_FAILED;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
         operation->cancel_in_progress = false;
-        operation->cancel_sent =
-            !(before_submit && result == DTV_L3_INVALID);
+        if (cancel_threw) {
+            operation->cancel_sent = false;
+        } else {
+            operation->cancel_sent =
+                !(before_submit && result == DTV_L3_INVALID);
+        }
         if (before_submit && result == DTV_L3_INVALID && operation->submitted) {
             queue_cancel_locked(operation);
         }
         state_condition_.notify_all();
+    }
+    if (cancel_threw) {
+        log(DTV_L3_LOG_WARN, "provider.cancel",
+            "contained C++ exception");
     }
     finish_close();
     return result;
@@ -1878,7 +2109,12 @@ void OwnerEngine::completion_thunk(
     }
     auto *operation = static_cast<Operation *>(callback_context);
     CallbackFrame frame;
-    operation->owner->on_completion(binding, id, *completion, operation);
+    try {
+        operation->owner->on_completion(binding, id, *completion, operation);
+    } catch (...) {
+        operation->owner->log(DTV_L3_LOG_ERROR, "completion_thunk",
+                              "contained C++ exception");
+    }
 }
 
 void OwnerEngine::on_completion(
@@ -1893,6 +2129,7 @@ void OwnerEngine::on_completion(
     bool should_finish_close = false;
     bool matched = false;
     bool do_resubmit = false;
+    bool copy_threw = false;
     std::shared_ptr<Operation> op_shared;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -1967,18 +2204,35 @@ void OwnerEngine::on_completion(
                 }
             } else {
                 op.cancel_cause = DTV_L3_CANCEL_CAUSE_NONE;
-                op.result = completion.result;
+                bool copy_failed = false;
                 if (completion.size != 0 && completion.data != nullptr) {
-                    op.response.assign(completion.data,
-                                       completion.data + completion.size);
+                    try {
+                        maybe_throw_test_exception(kTestInjectCompletionCopy);
+                        op.response.assign(completion.data,
+                                           completion.data + completion.size);
+                    } catch (...) {
+                        copy_failed = true;
+                        op.response.clear();
+                    }
                 }
-                op.state = completion.result == DTV_L3_OK
-                               ? DTV_L3_OP_DONE
-                               : DTV_L3_OP_FAILED;
+                if (copy_failed) {
+                    copy_threw = true;
+                    op.result = DTV_L3_FAILED;
+                    op.state = DTV_L3_OP_FAILED;
+                } else {
+                    op.result = completion.result;
+                    op.state = completion.result == DTV_L3_OK
+                                   ? DTV_L3_OP_DONE
+                                   : DTV_L3_OP_FAILED;
+                }
             }
         }
         should_finish_close = close_requested_;
         state_condition_.notify_all();
+    }
+    if (copy_threw) {
+        log(DTV_L3_LOG_WARN, "completion.copy",
+            "contained C++ exception");
     }
     if (!matched) {
         if (should_finish_close) {
@@ -2049,9 +2303,16 @@ void OwnerEngine::resubmit_operation(
     }
 
     CallbackFrame frame;
-    const auto result = provider_.submit(
-        operation->binding.get(), new_id, request,
-        &OwnerEngine::completion_thunk, operation.get());
+    dtv_l3_result result = DTV_L3_FAILED;
+    bool submit_threw = false;
+    try {
+        result = provider_.submit(
+            operation->binding.get(), new_id, request,
+            &OwnerEngine::completion_thunk, operation.get());
+    } catch (...) {
+        submit_threw = true;
+        result = DTV_L3_FAILED;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
@@ -2078,6 +2339,10 @@ void OwnerEngine::resubmit_operation(
         need_finish_close = close_requested_;
         state_condition_.notify_all();
         work_condition_.notify_all();
+    }
+    if (submit_threw) {
+        log(DTV_L3_LOG_WARN, "provider.submit",
+            "contained C++ exception");
     }
     if (need_finish_close) {
         finish_close();
@@ -2132,17 +2397,32 @@ void OwnerEngine::queue_cancel_locked(
 void OwnerEngine::run_cancel(const std::shared_ptr<Operation> &operation,
                              bool before_submit) {
     CallbackFrame frame;
-    const auto result = provider_.cancel(operation->binding.get(), operation->id);
+    dtv_l3_result result = DTV_L3_FAILED;
+    bool cancel_threw = false;
+    try {
+        result = provider_.cancel(operation->binding.get(), operation->id);
+    } catch (...) {
+        cancel_threw = true;
+        result = DTV_L3_FAILED;
+    }
     {
         std::lock_guard<std::mutex> lock(mutex_);
         --provider_calls_in_flight_;
         operation->cancel_in_progress = false;
-        operation->cancel_sent =
-            !(before_submit && result == DTV_L3_INVALID);
+        if (cancel_threw) {
+            operation->cancel_sent = false;
+        } else {
+            operation->cancel_sent =
+                !(before_submit && result == DTV_L3_INVALID);
+        }
         if (before_submit && result == DTV_L3_INVALID && operation->submitted) {
             queue_cancel_locked(operation);
         }
         state_condition_.notify_all();
+    }
+    if (cancel_threw) {
+        log(DTV_L3_LOG_WARN, "provider.cancel",
+            "contained C++ exception");
     }
     finish_close();
 }
@@ -2164,24 +2444,42 @@ void OwnerEngine::run_cleanup() {
     for (auto index = release_indices.rbegin(); index != release_indices.rend();
          ++index) {
         CallbackFrame frame;
-        const auto result = provider_.release_claim(binding.get(), *index);
-        std::lock_guard<std::mutex> lock(mutex_);
-        claim_quiesced_[*index] =
-            result.quiescence == DTV_L3_RELEASE_QUIESCED;
-        if (result.residual_state == DTV_L3_CLAIM_NONE) {
-            claims_[*index] = ClaimState::Released;
-        } else if (result.residual_state == DTV_L3_CLAIM_RETAINED) {
-            claims_[*index] = ClaimState::Retained;
-        } else {
-            claims_[*index] = ClaimState::Unknown;
+        dtv_l3_release_result result{
+            DTV_L3_RELEASE_QUIESCENCE_UNKNOWN, DTV_L3_CLAIM_RETAINED,
+            DTV_L3_RESTORE_UNKNOWN, DTV_L3_FAILED};
+        bool release_threw = false;
+        try {
+            maybe_throw_test_exception(kTestInjectReleaseClaim);
+            result = provider_.release_claim(binding.get(), *index);
+        } catch (...) {
+            release_threw = true;
+            result = {DTV_L3_RELEASE_QUIESCENCE_UNKNOWN,
+                      DTV_L3_CLAIM_RETAINED, DTV_L3_RESTORE_UNKNOWN,
+                      DTV_L3_FAILED};
         }
-        claim_cleanup_errors_[*index] = result.error;
-        if (result.restoration == DTV_L3_RESTORE_FAILED ||
-            result.restoration == DTV_L3_RESTORE_UNKNOWN) {
-            restoration_failed_ = true;
-            if (claim_cleanup_errors_[*index] == DTV_L3_OK) {
-                claim_cleanup_errors_[*index] = DTV_L3_FAILED;
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            claim_quiesced_[*index] =
+                result.quiescence == DTV_L3_RELEASE_QUIESCED;
+            if (result.residual_state == DTV_L3_CLAIM_NONE) {
+                claims_[*index] = ClaimState::Released;
+            } else if (result.residual_state == DTV_L3_CLAIM_RETAINED) {
+                claims_[*index] = ClaimState::Retained;
+            } else {
+                claims_[*index] = ClaimState::Unknown;
             }
+            claim_cleanup_errors_[*index] = result.error;
+            if (result.restoration == DTV_L3_RESTORE_FAILED ||
+                result.restoration == DTV_L3_RESTORE_UNKNOWN) {
+                restoration_failed_ = true;
+                if (claim_cleanup_errors_[*index] == DTV_L3_OK) {
+                    claim_cleanup_errors_[*index] = DTV_L3_FAILED;
+                }
+            }
+        }
+        if (release_threw) {
+            log(DTV_L3_LOG_WARN, "provider.release_claim",
+                "contained C++ exception");
         }
     }
 
@@ -2244,11 +2542,24 @@ void OwnerEngine::run_claim_cancel(std::uint32_t index) {
     }
     if (binding) {
         CallbackFrame frame;
-        const auto result = provider_.claim_cancel(binding.get(), index);
-        std::lock_guard<std::mutex> lock(mutex_);
-        --provider_calls_in_flight_;
-        claim_cancel_result_ = result;
-        state_condition_.notify_all();
+        dtv_l3_result result = DTV_L3_FAILED;
+        bool claim_cancel_threw = false;
+        try {
+            result = provider_.claim_cancel(binding.get(), index);
+        } catch (...) {
+            claim_cancel_threw = true;
+            result = DTV_L3_FAILED;
+        }
+        {
+            std::lock_guard<std::mutex> lock(mutex_);
+            --provider_calls_in_flight_;
+            claim_cancel_result_ = result;
+            state_condition_.notify_all();
+        }
+        if (claim_cancel_threw) {
+            log(DTV_L3_LOG_WARN, "provider.claim_cancel",
+                "contained C++ exception");
+        }
     }
     finish_close();
 }
@@ -2344,7 +2655,12 @@ void OwnerEngine::worker_loop() {
             work = std::move(work_queue_.front());
             work_queue_.pop_front();
         }
-        work();
+        try {
+            work();
+        } catch (...) {
+            log(DTV_L3_LOG_ERROR, "control_lane",
+                "contained C++ exception");
+        }
     }
 }
 
@@ -2452,6 +2768,18 @@ void set_test_lane_start_failure_mask(int mask) {
 bool test_lane_start_fails(int lane_mask_bit) {
     return (lane_start_failure_mask.load(std::memory_order_acquire) &
             lane_mask_bit) != 0;
+}
+
+void set_test_exception_mask(unsigned int mask) {
+    test_exception_mask.store(mask, std::memory_order_release);
+}
+
+void maybe_throw_test_exception(unsigned int bit) {
+    throw_if_test_bit(bit);
+}
+
+void maybe_throw_test_entry_exception() {
+    throw_if_test_bit(kTestInjectEntry);
 }
 
 }  // namespace l3_owner_prototype

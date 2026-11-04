@@ -281,6 +281,34 @@ typedef dtv_l3_result (*dtv_l3_claim_cancel_fn)(
     dtv_l3_provider_binding *binding,
     uint32_t claim_index);
 
+typedef enum dtv_l3_log_level {
+    DTV_L3_LOG_ERROR = 0,
+    DTV_L3_LOG_WARN = 1,
+    DTV_L3_LOG_INFO = 2,
+    DTV_L3_LOG_DEBUG = 3
+} dtv_l3_log_level;
+
+/*
+ * Receives diagnostics for one context. The callback is invoked outside the
+ * owner's internal lock and may run on the open lane, the control lane, a
+ * provider completion thread, or the thread that called an owner entry point.
+ * The fn and message strings are valid only for the duration of the call.
+ * The callback must not throw; an exception is contained and never retried.
+ * It may re-enter the owner, but such calls observe non-blocking behavior in a
+ * callback frame. The owner holds no process-wide logger.
+ */
+typedef void (*dtv_l3_log_fn)(void *userdata,
+                              dtv_l3_log_level level,
+                              const char *fn,
+                              const char *message);
+
+typedef struct dtv_l3_logger {
+    dtv_l3_log_fn fn;
+    void *userdata;
+    /* A message is delivered when its level is at most this value. */
+    dtv_l3_log_level min_level;
+} dtv_l3_logger;
+
 typedef struct dtv_l3_provider {
     void *provider_context;
     dtv_l3_claim_fn claim;
@@ -296,6 +324,8 @@ typedef struct dtv_l3_provider {
     dtv_l3_claim_cancel_fn claim_cancel;
     /* Zero is CANCEL_SCOPE_TRANSFER for existing single-pipe providers. */
     dtv_l3_cancel_scope cancel_scope;
+    /* Context-specific diagnostics; fn == NULL disables logging. */
+    dtv_l3_logger logger;
 } dtv_l3_provider;
 
 typedef struct dtv_l3_open_result {
@@ -367,6 +397,14 @@ typedef struct dtv_l3_stream_status {
     uint8_t read_borrows;
     uint8_t reserved[6];
 } dtv_l3_stream_status;
+
+/*
+ * Every C entry point and provider completion thunk contains C++ exceptions
+ * and reports DTV_L3_FAILED without publishing an output handle. An exception
+ * in a provider callback fails that step; already accepted transfers,
+ * ownership, and borrows are retained until their normal terminal path. A
+ * contained exception is not a claim that physical state has settled.
+ */
 
 /* ACCEPTED transfers an owner before claim work; later failure keeps it recoverable. */
 dtv_l3_open_result dtv_l3_open(const dtv_l3_provider *provider,

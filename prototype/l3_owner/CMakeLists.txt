@@ -60,6 +60,22 @@ set_target_properties(l3_waits_lanes_c PROPERTIES
     C_EXTENSIONS NO
 )
 
+add_executable(l3_exception_log_c tests/exception_log_contract.c)
+target_include_directories(l3_exception_log_c PRIVATE include)
+target_link_libraries(l3_exception_log_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_exception_log_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_exception_log_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_exception_log_cpp tests/exception_log_cpp.cpp)
+target_include_directories(l3_exception_log_cpp PRIVATE src)
+target_link_libraries(l3_exception_log_cpp PRIVATE l3_owner_model Threads::Threads)
+target_compile_features(l3_exception_log_cpp PRIVATE cxx_std_17)
+set_target_properties(l3_exception_log_cpp PROPERTIES CXX_EXTENSIONS OFF)
+
 add_executable(l3_header_cpp tests/header_cpp.cpp)
 target_include_directories(l3_header_cpp PRIVATE include)
 target_compile_features(l3_header_cpp PRIVATE cxx_std_17)
@@ -75,14 +91,14 @@ set_target_properties(l3_provider_semantics_c PROPERTIES
 )
 
 if(L3_OWNER_ENABLE_TSAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp)
         target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=thread)
     endforeach()
 endif()
 
 if(L3_OWNER_ENABLE_ASAN)
-    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp)
         target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
         target_link_options(${target} PRIVATE -fsanitize=address)
     endforeach()
@@ -133,4 +149,16 @@ if(BUILD_TESTING)
     add_test(NAME l3_c_provider_pipe_timeout_deadline COMMAND l3_provider_semantics_c pipe-timeout-deadline)
     add_test(NAME l3_c_provider_sync_abort_resubmit COMMAND l3_provider_semantics_c sync-abort-resubmit)
     add_test(NAME l3_c_provider_two_contexts COMMAND l3_provider_semantics_c two-contexts)
+    add_test(NAME l3_c_exception_entry COMMAND l3_exception_log_c entry)
+    add_test(NAME l3_c_exception_open_alloc COMMAND l3_exception_log_c open-alloc)
+    add_test(NAME l3_c_exception_transfer_alloc COMMAND l3_exception_log_c transfer-alloc)
+    add_test(NAME l3_c_exception_claim COMMAND l3_exception_log_c claim-exception)
+    add_test(NAME l3_c_exception_cancel COMMAND l3_exception_log_c cancel-exception)
+    add_test(NAME l3_c_exception_completion_copy COMMAND l3_exception_log_c completion-copy)
+    add_test(NAME l3_c_exception_release_claim COMMAND l3_exception_log_c release-claim)
+    add_test(NAME l3_c_exception_ts_deliver COMMAND l3_exception_log_c ts-deliver)
+    add_test(NAME l3_c_exception_logging COMMAND l3_exception_log_c logging)
+    add_test(NAME l3_c_exception_reentry COMMAND l3_exception_log_c reentry)
+    add_test(NAME l3_c_exception_stderr COMMAND l3_exception_log_c stderr)
+    add_test(NAME l3_cpp_exception_logger COMMAND l3_exception_log_cpp)
 endif()
