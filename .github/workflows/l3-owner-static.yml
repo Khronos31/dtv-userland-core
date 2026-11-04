@@ -1,0 +1,36 @@
+name: L3 Owner Static
+
+on:
+  pull_request:
+    paths:
+      - '.github/workflows/l3-owner-static.yml'
+      - 'prototype/l3_owner/**'
+      - 'CMakeLists.txt'
+
+permissions:
+  contents: read
+
+jobs:
+  static:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - os: ubuntu-latest
+            name: linux-x64
+          - os: ubuntu-24.04-arm
+            name: linux-arm64
+          - os: macos-14
+            name: macos-arm64
+          - os: windows-2022
+            name: windows-x64
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Configure
+        run: >-
+          cmake -S . -B build
+          -DDTV_USERLAND_BUILD_L3_OWNER=ON
+          -DDTV_USERLAND_BUILD_TESTING=OFF
+      - name: Build static library
+        run: cmake --build build --config Release --target dtv_userland_l3_owner --parallel 2
