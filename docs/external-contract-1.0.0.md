@@ -496,7 +496,7 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 製品ごとの能力差、製品固有オプション、およびハードウェア制約は、共通規則を規定する本書から分離し、付録案として管理する（private な agent-workspace の作業記録への参照であり、各製品リポジトリの main ブランチには配置されていない）。
 
 - 製品付録案（agent-workspace 固定コミット）: [`design/external-contract-product-appendices-20261103.md`](https://github.com/Khronos31/agent-workspace/blob/d8e75bc9eb149203921a2f908843b46767e88243/design/external-contract-product-appendices-20261103.md)
-- 各製品リポジトリの照合時点固定 baseline コミット（照合時点の固定参照であり、恒久的な最新 main とは主張しない。SPEC や release-validation 等の存在を確認済み。torne は今回の RC 照合対象外）:
+- 各製品リポジトリの照合時点固定 baseline コミット（照合時点の固定参照であり、恒久的な最新 main とは主張しない。release-validation は 4 製品にある。SPEC.md は PX4 と ASICEN にあり、Siano と PIX の固定コミットには無い。torne は今回の RC 照合対象外）:
   - PX4: `Khronos31/px4-userland` commit [`b9f5ff2d`](https://github.com/Khronos31/px4-userland/tree/b9f5ff2dabae51a4fc00418f88979fd6dac3ffc7)
   - ASICEN: `Khronos31/asicen-userland` commit [`6eaff496`](https://github.com/Khronos31/asicen-userland/tree/6eaff496332577069fa2cf2c67cce3bb30f59a21)
   - Siano: `Khronos31/siano-userland` commit [`49df1ba3`](https://github.com/Khronos31/siano-userland/tree/49df1ba38adf2b919cedda06019d610b6807843e)
