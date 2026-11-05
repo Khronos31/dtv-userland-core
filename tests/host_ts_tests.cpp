@@ -177,6 +177,8 @@ bool cli_contract()
 
 int main()
 {
+    if (px4::userland::cli::px4_ts_exit_status(
+            px4::userland::Error::RESOURCE_LIMIT) != 70) return 1;
 #if defined(DTV_USERLAND_HOST_TS_TEST_ACCESS)
     namespace wire = dtv::userland::wire;
     using px4::userland::ipc::CountersPayload;

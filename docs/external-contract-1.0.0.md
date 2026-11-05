@@ -1,7 +1,7 @@
 # DTV userland 1.0.0 外部契約
 
-状態: **Core PR #147 外部契約正本（レビュー・マージ判定待ち）。** 本書は 1.0.0 の外部契約（L1: プロセス、L2: wire/JSON）を一本にまとめた正本文書である。本文中の「採用済み」「確定」はユーザー決定記録に明示の根拠がある項目を指し、「未決」「照合事項」は測定や資料確認が残る項目を指す。
-ユーザー確定回答 6640223907「L3は1.0.0に含めません」に基づき、L3（組込み / インプロセス）は 1.0.0 の規範対象から除外し、1.1 の候補として扱う（§6）。マージ判断は PR 手続きにおいてユーザーが行う。新しい案の採用やマージ後の正本変更はユーザー判断による。本書の更新に伴う実装・ライセンス表示・バージョン・タグ・リリース自体の変更は行わない。
+状態: **Core PR #147 外部契約正本（2026-11-05T07:47:26Z、コミット 320864247d5edb4b879134d8273b32521b4085b6 にて main へマージ済み）。** 本書は 1.0.0 の外部契約（L1: プロセス、L2: wire/JSON）を一本にまとめた正本文書である。本文中の「採用済み」「確定」はユーザー決定記録に明示の根拠がある項目を指し、「未決」「照合事項」は測定や資料確認が残る項目を指す。
+ユーザー確定回答 6640223907「L3は1.0.0に含めません」に基づき、L3（組込み / インプロセス）は 1.0.0 の規範対象から除外し、1.1 の候補として扱う（§6）。新しい案の採用や正本変更はユーザー判断による。本書の更新に伴う実装・ライセンス表示・バージョン・タグ・リリース自体の変更は行わない。
 
 - 対象: PX4 / ASICEN / Siano / PIX / torne の 1.0.0
 - 規範材料: ユーザー決定記録、Core の `docs/`、全 5 製品 CLI 共通契約の §0（確定対象表）に限る。
@@ -214,7 +214,7 @@
 - 信頼できる正常な final レコードが取得できず、かつ STOP 処理によるハードウェアの停止（quiesce）が確認できない場合は成功（0）にしてはならない。
 - 軽微なパケットドロップの発生のみを受信失敗とはみなさない。ドロップ発生後の正常終了は終了コード 0 とする。
 - OS 非対応引数は既存の未知引数/2 を維持し、能力非対応の 3 や Windows EOF 決定と混同しない（ユーザー回答 6610524673）。
-- 固定 Core Error enum（`include/dtv/userland/error.h`）に定義されているのは `INVALID_ARGUMENT`, `VERSION_MISMATCH`, `NOT_FOUND`, `BUSY`, `NOT_READY`, `TIMEOUT`, `USB_IO`, `DISCONNECTED`, `PROTOCOL_ERROR`, `FIRMWARE_REJECTED`, `UNSUPPORTED`, `NO_CARD`, `CARD_REMOVED`, `BUFFER_TOO_SMALL`, `SLOW_CONSUMER`, `RESOURCE_LIMIT`, `INTERNAL` 等であり、草案にあった `INVALID_STATE` や `ACCESS_DENIED` は Core Error enum に存在しない。終了コードの分類体系（0, 2..10, 70）および primary error 保持は採用済みであるが、個別の Error enum から各終了コードへの網羅的な対応は未確定であり、本書の例示を承認済みの確定マッピング表として扱わない（§7 #16）。
+- 固定 Core Error enum（`include/dtv/userland/error.h`）に定義されているのは `INVALID_ARGUMENT`, `VERSION_MISMATCH`, `NOT_FOUND`, `BUSY`, `NOT_READY`, `TIMEOUT`, `USB_IO`, `DISCONNECTED`, `PROTOCOL_ERROR`, `FIRMWARE_REJECTED`, `UNSUPPORTED`, `NO_CARD`, `CARD_REMOVED`, `BUFFER_TOO_SMALL`, `SLOW_CONSUMER`, `RESOURCE_LIMIT`, `INTERNAL` 等であり、草案にあった `INVALID_STATE` や `ACCESS_DENIED` は Core Error enum に存在しない。終了コードの分類体系（0, 2..10, 70）および primary error 保持は採用済みであるが、個別の Error enum から各終了コードへの網羅的な対応は未確定であり、本書の例示を承認済みの確定マッピング表として扱わない（§7 #16）。なお、各製品の固定 main 実装から抽出された対応表は照合記録（`63e8ed6c:evidence/rc-main-canon-once-20261105.json` F3）に参考情報として存在するが、これは固定 main 時点の実装抽出にすぎず、新規の規範や承認済みのマッピング表ではない。また、`BUFFER_TOO_SMALL` などの文脈依存エラーの扱いを含む個別対応の網羅的確定は未決のまま維持する。
 
 ### 3.8 シグナルと stdin EOF
 
@@ -452,9 +452,9 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 | # | 項目 | 採用方針・検証候補 | 根拠・出典 | 残る確認作業 |
 |---:|---|---|---|---|
-| 10 | `--tune-timeout-ms` の範囲・既定値 | 範囲 100..120000ms、既定 30000ms を検証候補とする | ユーザー回答 6610524673 | 実機妥当性は未測定（`adoption-status.md`）。実機確認後に最終凍結する未実測候補値 |
-| 12 | 全体クローズ期限（L1/L2） | 15 秒を検証初期候補とし、期限結果と最終資源回収を分離する | ユーザー回答 6610524673 | 実機妥当性は未証明（`adoption-status.md`）。実機測定により最終秒数を決定する未実測候補値 |
-| 16 | 終了コード Error→code 細部対応 | 分類 0, 2..10, 70 および primary error 保持を採用済み | 本書 §3.7、`include/dtv/userland/error.h` | 固定 Core Error enum との不一致（INVALID_STATE/ACCESS_DENIED の非存在）を整理。個別 Error マッピングの網羅的確定は未完了の決定事項 |
+| 10 | `--tune-timeout-ms` の範囲・既定値 | 範囲 100..120000ms、既定 30000ms を検証候補とする | ユーザー回答 6610524673、6652628677 | 実機妥当性は未測定（`adoption-status.md`）。数値は未実測のままであり、RC 検証を通じて候補値の妥当性を確かめる方針とする |
+| 12 | 全体クローズ期限（L1/L2） | 15 秒を検証初期候補とし、期限結果と最終資源回収を分離する | ユーザー回答 6610524673、6652628677 | 実機妥当性は未証明（`adoption-status.md`）。数値は未実測のままであり、RC 検証を通じて候補値の妥当性を確かめる方針とする |
+| 16 | 終了コード Error→code 細部対応 | 分類 0, 2..10, 70 および primary error 保持を採用済み | 本書 §3.7、`include/dtv/userland/error.h`、照合記録 `63e8ed6c:evidence/rc-main-canon-once-20261105.json` F3 | 固定 main 時点の実装抽出表は照合記録に存在するが新規規範や承認済み表ではなく、分類体系を規範とする。`BUFFER_TOO_SMALL` などの文脈依存エラーを含む個別 Error マッピングの網羅的確定は未決の決定事項 |
 
 ### 7.3 1.1 へ移行（L3 関連、6 件）
 
@@ -493,15 +493,14 @@ L2 の規範は Core の各個別文書に置く。本書はシステム全体�
 
 ### 8.2 製品付録（能力差・製品固有オプション）
 
-製品ごとの能力差、製品固有オプション、およびハードウェア制約は、共通規則を規定する本書から分離し、付録案として管理する（private な agent-workspace の作業記録への参照であり、main ブランチには配置されていない）。
+製品ごとの能力差、製品固有オプション、およびハードウェア制約は、共通規則を規定する本書から分離し、付録案として管理する（private な agent-workspace の作業記録への参照であり、各製品リポジトリの main ブランチには配置されていない）。
 
 - 製品付録案（agent-workspace 固定コミット）: [`design/external-contract-product-appendices-20261103.md`](https://github.com/Khronos31/agent-workspace/blob/d8e75bc9eb149203921a2f908843b46767e88243/design/external-contract-product-appendices-20261103.md)
-- 各製品リポジトリの固定 main コミット（SPEC および release-validation 候補。各固定コミット上の実在確認は未了であり、候補資料としてのみ扱う）:
-  - PX4: `Khronos31/px4-userland` commit [`773b6687`](https://github.com/Khronos31/px4-userland/tree/773b66875b47c2b4342ff983288776256d99cac9)
-  - ASICEN: `Khronos31/asicen-userland` commit [`5b1bf1d4`](https://github.com/Khronos31/asicen-userland/tree/5b1bf1d41b6869626297e894b906466527b64bd4)
-  - Siano: `Khronos31/siano-userland` commit [`67219340`](https://github.com/Khronos31/siano-userland/tree/67219340008d892b2dcd3a5cd2aee56ac81c79f7)
-  - PIX: `Khronos31/pix-userland` commit [`112dc6d6`](https://github.com/Khronos31/pix-userland/tree/112dc6d6f66975ee72ccd75dfdb0ed3a976014ec)
-  - torne: `Khronos31/torne-userland` commit [`ab79d1f4`](https://github.com/Khronos31/torne-userland/tree/ab79d1f4c3a9007eb89e39a0ad97dbdb692eb8d0)
+- 各製品リポジトリの照合時点固定 baseline コミット（照合時点の固定参照であり、恒久的な最新 main とは主張しない。release-validation は 4 製品にある。SPEC.md は PX4 と ASICEN にあり、Siano と PIX の固定コミットには無い。torne は今回の RC 照合対象外）:
+  - PX4: `Khronos31/px4-userland` commit [`b9f5ff2d`](https://github.com/Khronos31/px4-userland/tree/b9f5ff2dabae51a4fc00418f88979fd6dac3ffc7)
+  - ASICEN: `Khronos31/asicen-userland` commit [`6eaff496`](https://github.com/Khronos31/asicen-userland/tree/6eaff496332577069fa2cf2c67cce3bb30f59a21)
+  - Siano: `Khronos31/siano-userland` commit [`49df1ba3`](https://github.com/Khronos31/siano-userland/tree/49df1ba38adf2b919cedda06019d610b6807843e)
+  - PIX: `Khronos31/pix-userland` commit [`5d8bd93a`](https://github.com/Khronos31/pix-userland/tree/5d8bd93a7efbc59f5b455248a6e928b17863616f)
 
 ### 8.3 品質基準（5 分 TS 受信品質）
 

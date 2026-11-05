@@ -708,7 +708,7 @@ int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
-    case Error::RESOURCE_LIMIT: return 4;
+    case Error::RESOURCE_LIMIT: return 70;
     case Error::INTERNAL: return 70;
     }
     return 70;
