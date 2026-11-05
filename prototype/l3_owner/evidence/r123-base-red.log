@@ -1,0 +1,34 @@
+baseline source=339f3cac9e843ff3585ce412aa58930b8012b3c5
+fixture=final owner_engine_tests.cpp copied without production-source changes
+Test project /tmp/l3-owner-r123-base-final-normal
+    Start 1: l3_owner_tests
+1/3 Test #1: l3_owner_tests ...................***Failed    6.01 sec
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:409: !snapshot.physical_quiesced failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:410: provider.released_claim_count() == 0 failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:413: close_future.get() == DTV_L3_TIMEOUT failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:444: !snapshot.physical_quiesced failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:445: provider.released_claim_count() == 0 failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:448: close_future.get() == DTV_L3_TIMEOUT failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:475: close_ready failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:505: close_ready failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:520: close_future.get() == DTV_L3_TIMEOUT failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:549: provider.cancel_count(binding.get(), operation->id) == 2 failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:560: snapshot.physical_quiesced failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:561: operation->state == DTV_L3_OP_FAILED failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:562: owner.cleanup_count() == 1 failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:563: provider.released_claim_count() == 1 failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:564: owner.release_operation(operation) == DTV_L3_OK failed
+/tmp/l3-owner-r123-base-final/prototype/l3_owner/tests/owner_engine_tests.cpp:565: owner.release() == DTV_L3_OK failed
+
+    Start 2: l3_header_c
+2/3 Test #2: l3_header_c ......................   Passed    0.00 sec
+    Start 3: l3_header_cpp
+3/3 Test #3: l3_header_cpp ....................   Passed    0.00 sec
+
+67% tests passed, 1 tests failed out of 3
+
+Total Test time (real) =   6.01 sec
+
+The following tests FAILED:
+	  1 - l3_owner_tests (Failed)
+Errors while running CTest

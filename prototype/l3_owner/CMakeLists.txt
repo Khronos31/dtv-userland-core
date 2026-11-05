@@ -1,0 +1,204 @@
+# SPDX-License-Identifier: GPL-2.0-or-later
+cmake_minimum_required(VERSION 3.16)
+project(l3_owner_prototype LANGUAGES C CXX)
+
+include(CTest)
+find_package(Threads REQUIRED)
+
+option(L3_OWNER_ENABLE_TSAN "Compile the isolated owner tests with ThreadSanitizer" OFF)
+option(L3_OWNER_ENABLE_ASAN "Compile the isolated owner tests with AddressSanitizer" OFF)
+
+add_library(l3_owner_model STATIC src/owner_engine.cpp src/c_api.cpp)
+target_include_directories(l3_owner_model PUBLIC include PRIVATE src)
+target_compile_features(l3_owner_model PUBLIC cxx_std_17)
+target_link_libraries(l3_owner_model PUBLIC Threads::Threads)
+set_target_properties(l3_owner_model PROPERTIES CXX_EXTENSIONS OFF)
+
+add_executable(l3_owner_tests tests/owner_engine_tests.cpp)
+target_include_directories(l3_owner_tests PRIVATE src)
+target_link_libraries(l3_owner_tests PRIVATE l3_owner_model Threads::Threads)
+target_compile_features(l3_owner_tests PRIVATE cxx_std_17)
+set_target_properties(l3_owner_tests PROPERTIES CXX_EXTENSIONS OFF)
+
+add_executable(l3_header_c tests/header_c.c)
+target_include_directories(l3_header_c PRIVATE include)
+target_link_libraries(l3_header_c PRIVATE l3_owner_model Threads::Threads)
+set_target_properties(l3_header_c PROPERTIES C_STANDARD 11 C_STANDARD_REQUIRED YES)
+
+add_executable(l3_public_contract_c tests/c_contract_regressions.c
+    tests/initialize_claims_wrap.cpp)
+target_include_directories(l3_public_contract_c PRIVATE include)
+target_include_directories(l3_public_contract_c PRIVATE src)
+target_link_libraries(l3_public_contract_c PRIVATE l3_owner_model Threads::Threads)
+target_link_options(l3_public_contract_c PRIVATE
+    "LINKER:--wrap=_ZN18l3_owner_prototype11OwnerEngine17initialize_claimsEj"
+    "LINKER:--wrap=pthread_mutex_unlock")
+target_compile_options(l3_public_contract_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_public_contract_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_lease_stream_c tests/lease_stream_contract.c)
+target_include_directories(l3_lease_stream_c PRIVATE include)
+target_link_libraries(l3_lease_stream_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_lease_stream_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_lease_stream_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_waits_lanes_c tests/waits_lanes_contract.c)
+target_include_directories(l3_waits_lanes_c PRIVATE include)
+target_link_libraries(l3_waits_lanes_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_waits_lanes_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_waits_lanes_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_exception_log_c tests/exception_log_contract.c)
+target_include_directories(l3_exception_log_c PRIVATE include)
+target_link_libraries(l3_exception_log_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_exception_log_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_exception_log_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_b2_progress_c tests/b2_progress_contract.c)
+target_include_directories(l3_b2_progress_c PRIVATE include)
+target_link_libraries(l3_b2_progress_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_b2_progress_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_b2_progress_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_product_integration_c tests/product_integration_contract.c)
+target_include_directories(l3_product_integration_c PRIVATE include)
+target_link_libraries(l3_product_integration_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_product_integration_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_product_integration_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+add_executable(l3_exception_log_cpp tests/exception_log_cpp.cpp)
+target_include_directories(l3_exception_log_cpp PRIVATE src)
+target_link_libraries(l3_exception_log_cpp PRIVATE l3_owner_model Threads::Threads)
+target_compile_features(l3_exception_log_cpp PRIVATE cxx_std_17)
+set_target_properties(l3_exception_log_cpp PROPERTIES CXX_EXTENSIONS OFF)
+
+add_executable(l3_header_cpp tests/header_cpp.cpp)
+target_include_directories(l3_header_cpp PRIVATE include)
+target_compile_features(l3_header_cpp PRIVATE cxx_std_17)
+
+add_executable(l3_provider_semantics_c tests/provider_semantics_contract.c)
+target_include_directories(l3_provider_semantics_c PRIVATE include)
+target_link_libraries(l3_provider_semantics_c PRIVATE l3_owner_model Threads::Threads)
+target_compile_options(l3_provider_semantics_c PRIVATE -Wall -Wextra -Werror)
+set_target_properties(l3_provider_semantics_c PROPERTIES
+    C_STANDARD 11
+    C_STANDARD_REQUIRED YES
+    C_EXTENSIONS NO
+)
+
+if(L3_OWNER_ENABLE_TSAN)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
+        target_compile_options(${target} PRIVATE -fsanitize=thread -fno-omit-frame-pointer -g)
+        target_link_options(${target} PRIVATE -fsanitize=thread)
+    endforeach()
+endif()
+
+if(L3_OWNER_ENABLE_ASAN)
+    foreach(target l3_owner_model l3_owner_tests l3_header_c l3_public_contract_c l3_lease_stream_c l3_waits_lanes_c l3_provider_semantics_c l3_exception_log_c l3_exception_log_cpp l3_product_integration_c l3_b2_progress_c)
+        target_compile_options(${target} PRIVATE -fsanitize=address -fno-omit-frame-pointer -g)
+        target_link_options(${target} PRIVATE -fsanitize=address)
+    endforeach()
+endif()
+
+if(BUILD_TESTING)
+    add_test(NAME l3_owner_tests COMMAND l3_owner_tests)
+    add_test(NAME l3_header_c COMMAND l3_header_c)
+    add_test(NAME l3_header_cpp COMMAND l3_header_cpp)
+    add_test(NAME l3_c_reject_recovery COMMAND l3_public_contract_c reject)
+    add_test(NAME l3_c_open_cancel_local COMMAND l3_public_contract_c cancel)
+    add_test(NAME l3_c_release_nonblocking COMMAND l3_public_contract_c release)
+    add_test(NAME l3_c_open_poll_stable COMMAND l3_public_contract_c poll)
+    add_test(NAME l3_c_open_cancel_preinit COMMAND l3_public_contract_c preinit-cancel)
+    add_test(NAME l3_c_open_cancel_repeat COMMAND l3_public_contract_c repeat-cancel)
+    add_test(NAME l3_c_open_epoch_stable COMMAND l3_public_contract_c epoch)
+    add_test(NAME l3_c_open_cancel_after_setup COMMAND l3_public_contract_c after-setup)
+    add_test(NAME l3_c_lease_share_exclusive COMMAND l3_lease_stream_c share)
+    add_test(NAME l3_c_lease_tuning_generations COMMAND l3_lease_stream_c tuning)
+    add_test(NAME l3_c_lease_ts_boundary COMMAND l3_lease_stream_c ts)
+    add_test(NAME l3_c_lease_drain_eof COMMAND l3_lease_stream_c drain)
+    add_test(NAME l3_c_lease_discard_unread COMMAND l3_lease_stream_c discard)
+    add_test(NAME l3_c_lease_unsupported COMMAND l3_lease_stream_c unsupported)
+    add_test(NAME l3_c_lease_attach_fail COMMAND l3_lease_stream_c attach-fail)
+    add_test(NAME l3_c_lease_stop_residual COMMAND l3_lease_stream_c residual)
+    add_test(NAME l3_c_lease_close COMMAND l3_lease_stream_c close)
+    add_test(NAME l3_c_lease_attach_abort COMMAND l3_lease_stream_c attach-abort)
+    add_test(NAME l3_c_wait_blocking_claim COMMAND l3_waits_lanes_c open-wait-close)
+    add_test(NAME l3_c_wait_close_once COMMAND l3_waits_lanes_c close-once)
+    add_test(NAME l3_c_wait_release_gate COMMAND l3_waits_lanes_c release-gate)
+    add_test(NAME l3_c_wait_close_poll COMMAND l3_waits_lanes_c close-poll)
+    add_test(NAME l3_c_wait_read_wait COMMAND l3_waits_lanes_c read-wait)
+    add_test(NAME l3_c_wait_startup_fail COMMAND l3_waits_lanes_c startup-fail)
+    add_test(NAME l3_c_wait_cancel_reentry COMMAND l3_waits_lanes_c cancel-reentry)
+    add_test(NAME l3_c_wait_cleanup_reentry COMMAND l3_waits_lanes_c cleanup-reentry)
+    add_test(NAME l3_c_wait_completion COMMAND l3_waits_lanes_c wait-completion)
+    add_test(NAME l3_c_wait_packet COMMAND l3_waits_lanes_c wait-packet)
+    add_test(NAME l3_c_claim_cancel_return COMMAND l3_waits_lanes_c claim-cancel-return)
+    add_test(NAME l3_c_claim_cancel_unsupported COMMAND l3_waits_lanes_c claim-cancel-unsupported)
+    add_test(NAME l3_c_claim_cancel_after_ready COMMAND l3_waits_lanes_c claim-cancel-after-ready)
+    add_test(NAME l3_c_provider_pipe_abort_out COMMAND l3_provider_semantics_c pipe-abort-out)
+    add_test(NAME l3_c_provider_pipe_abort_in COMMAND l3_provider_semantics_c pipe-abort-in)
+    add_test(NAME l3_c_provider_shared_in_deadline COMMAND l3_provider_semantics_c shared-in-deadline)
+    add_test(NAME l3_c_provider_disconnect_late COMMAND l3_provider_semantics_c disconnect-late)
+    add_test(NAME l3_c_provider_submit_sync_copy COMMAND l3_provider_semantics_c submit-sync-copy)
+    add_test(NAME l3_c_provider_control_direction COMMAND l3_provider_semantics_c control-direction)
+    add_test(NAME l3_c_provider_pipe_timeout COMMAND l3_provider_semantics_c pipe-timeout)
+    add_test(NAME l3_c_provider_pipe_timeout_deadline COMMAND l3_provider_semantics_c pipe-timeout-deadline)
+    add_test(NAME l3_c_provider_sync_abort_resubmit COMMAND l3_provider_semantics_c sync-abort-resubmit)
+    add_test(NAME l3_c_provider_two_contexts COMMAND l3_provider_semantics_c two-contexts)
+    add_test(NAME l3_c_exception_entry COMMAND l3_exception_log_c entry)
+    add_test(NAME l3_c_exception_open_alloc COMMAND l3_exception_log_c open-alloc)
+    add_test(NAME l3_c_exception_transfer_alloc COMMAND l3_exception_log_c transfer-alloc)
+    add_test(NAME l3_c_exception_claim COMMAND l3_exception_log_c claim-exception)
+    add_test(NAME l3_c_exception_cancel COMMAND l3_exception_log_c cancel-exception)
+    add_test(NAME l3_c_exception_completion_copy COMMAND l3_exception_log_c completion-copy)
+    add_test(NAME l3_c_exception_release_claim COMMAND l3_exception_log_c release-claim)
+    add_test(NAME l3_c_exception_ts_deliver COMMAND l3_exception_log_c ts-deliver)
+    add_test(NAME l3_c_exception_logging COMMAND l3_exception_log_c logging)
+    add_test(NAME l3_c_exception_reentry COMMAND l3_exception_log_c reentry)
+    add_test(NAME l3_c_exception_stderr COMMAND l3_exception_log_c stderr)
+    add_test(NAME l3_c_exception_cleanup_enqueue COMMAND l3_exception_log_c cleanup-enqueue)
+    add_test(NAME l3_c_exception_cleanup_registry COMMAND l3_exception_log_c cleanup-registry)
+    add_test(NAME l3_c_exception_cleanup_open_enqueue COMMAND l3_exception_log_c cleanup-open-enqueue)
+    add_test(NAME l3_c_exception_cleanup_open_registry COMMAND l3_exception_log_c cleanup-open-registry)
+    add_test(NAME l3_cpp_exception_logger COMMAND l3_exception_log_cpp)
+    add_test(NAME l3_c_product_separated COMMAND l3_product_integration_c separated)
+    add_test(NAME l3_c_product_factory COMMAND l3_product_integration_c factory)
+    add_test(NAME l3_c_product_factory_fail COMMAND l3_product_integration_c factory-fail)
+    add_test(NAME l3_c_product_missing COMMAND l3_product_integration_c missing)
+    add_test(NAME l3_c_product_args_factory COMMAND l3_product_integration_c args-factory)
+    add_test(NAME l3_c_product_args_manifest_reject COMMAND l3_product_integration_c args-manifest-reject)
+    add_test(NAME l3_c_product_init_fail COMMAND l3_product_integration_c init-fail)
+    add_test(NAME l3_c_product_init_transfer_ok COMMAND l3_product_integration_c init-transfer-ok)
+    add_test(NAME l3_c_product_init_transfer_fail COMMAND l3_product_integration_c init-transfer-fail)
+    add_test(NAME l3_c_product_queue_capacity COMMAND l3_product_integration_c capacity)
+    add_test(NAME l3_c_g8_reader_lnb COMMAND l3_product_integration_c g8)
+    add_test(NAME l3_c_b2_caller_cancel COMMAND l3_b2_progress_c caller-cancel)
+    add_test(NAME l3_c_b2_blocked_cancel_deadline COMMAND l3_b2_progress_c blocked-cancel-deadline)
+    add_test(NAME l3_c_b2_may_block_submit COMMAND l3_b2_progress_c may-block-submit)
+    add_test(NAME l3_c_b2_recovery_submit COMMAND l3_b2_progress_c recovery-submit)
+    add_test(NAME l3_c_b2_release_block_close COMMAND l3_b2_progress_c release-block-close)
+endif()

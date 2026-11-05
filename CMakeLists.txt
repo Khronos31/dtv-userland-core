@@ -37,6 +37,22 @@ option(DTV_USERLAND_UNIX_PCSC_ASICEN_PROFILE
     "Build the Unix PC/SC IFD adapter with the ASICEN product profile" OFF)
 option(DTV_USERLAND_UNIX_PCSC_TORNE_PROFILE
     "Build the Unix PC/SC IFD adapter with the torne product profile" OFF)
+option(DTV_USERLAND_BUILD_L3_OWNER
+    "Build the isolated L3 owner/product integration prototype library" OFF)
+
+if(DTV_USERLAND_BUILD_L3_OWNER)
+    find_package(Threads REQUIRED)
+    add_library(dtv_userland_l3_owner STATIC
+        prototype/l3_owner/src/owner_engine.cpp
+        prototype/l3_owner/src/c_api.cpp)
+    target_include_directories(dtv_userland_l3_owner
+        PUBLIC prototype/l3_owner/include
+        PRIVATE prototype/l3_owner/src)
+    target_compile_features(dtv_userland_l3_owner PUBLIC cxx_std_17)
+    target_link_libraries(dtv_userland_l3_owner PUBLIC Threads::Threads)
+    set_target_properties(dtv_userland_l3_owner PROPERTIES
+        CXX_EXTENSIONS OFF)
+endif()
 
 add_library(dtv_userland_core STATIC
     src/error.cpp
