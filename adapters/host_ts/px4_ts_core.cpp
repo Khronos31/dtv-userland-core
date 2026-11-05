@@ -687,7 +687,7 @@ void print_px4_ts_usage(const TsClientProfile& profile, void* output) noexcept
                  "      --version\n", profile.tool_name);
 }
 
-int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
+constexpr int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
 {
     if (kind == Px4TsFailureKind::ts_integrity) return 8;
     if (kind == Px4TsFailureKind::output) return 70;
@@ -708,11 +708,13 @@ int px4_ts_exit_status(Error error, Px4TsFailureKind kind) noexcept
     case Error::CARD_REMOVED:
     case Error::BUFFER_TOO_SMALL: return 9;
     case Error::FIRMWARE_REJECTED: return 10;
-    case Error::RESOURCE_LIMIT: return 4;
+    case Error::RESOURCE_LIMIT: return 70;
     case Error::INTERNAL: return 70;
     }
     return 70;
 }
+
+static_assert(px4_ts_exit_status(Error::RESOURCE_LIMIT, Px4TsFailureKind::ipc) == 70);
 
 void print_px4_ts_run_diagnostic(
     std::FILE* output, const char* tool_name, Error error,
