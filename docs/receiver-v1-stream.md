@@ -1,30 +1,9 @@
-# Receiver v1 stream lifecycle
+# Receiver v1 ストリームのライフサイクル
 
-`dtv::receiver` keeps the legacy stream entrance and the v1 entrance as
-separate contract modes. Configure v1 before the first ACQUIRE. A successful
-tune publishes a current tune revision; START must use that revision and
-returns a new stream ID and token with a finite arm deadline.
+`dtv::receiver` は、従来のストリーム契約入口と v1 契約入口を別個の独立した動作モードとして維持する。v1 を利用する場合は、初回の ACQUIRE 呼び出しより前に v1 構成を設定しなければならない。選局処理（tune）が成功すると最新の選局リビジョン（tune revision）が公開される。後続の START 要求は必ずそのリビジョン番号を指定して呼び出さなければならず、有限の準備期限（arm deadline）を伴う新しいストリーム ID およびアタッチ用トークンが返却される。
 
-The data worker reserves the exact START identity, calls `prepare_attach_v1()`
-to start capture and attach the data plane, then calls `commit_attach_v1()`
-only after the attachment is active. The service acknowledges the stream only
-after that commit succeeds. Abort and STOP retain the stream's terminal result
-and transfer physical cleanup to at most one owner. `cleanup_owner` on the
-returned STOP result identifies the caller that issued this cleanup; a final
-result by itself does not mean that hardware is quiesced.
+データワーカーは厳密な START の識別情報を確保した上で、まず `prepare_attach_v1()` を呼び出してキャプチャ処理を開始しデータプレーンの接続準備を行う。そして、アタッチメントがアクティブ状態となったことを確認した後にのみ `commit_attach_v1()` を呼び出す。サービス側は、この確定コミットが成功した後に初めてストリームの正式受諾をクライアントへ応答（acknowledge）する。処理中断（abort）および STOP 要求は、該当ストリームの終端結果（terminal result）を保持し、物理クリーンアップの実行責任を最大 1 つの所有者へ引き渡す。返却された STOP 結果内の `cleanup_owner` フラグは、このクリーンアップ責任を引き受けた呼び出し側を識別する。終端結果レコードが得られたこと単体は、ハードウェアの動作が完全に停止（quiesce: quiesced）したことを意味しない。
 
-When `cleanup_owner` is true, the assigned worker calls
-`run_stream_cleanup_v1()` with the exact ticket. It serializes against prepare,
-re-reads physical capture/attachment ownership after acquiring the receiver
-mutex, and performs the required stop/detach before recording quiescence.
-`complete_stream_cleanup_v1()` is a metadata-only completion path for a caller
-that has already performed and verified the physical cleanup elsewhere. It
-does not stop capture or detach a data session; its `quiesced` argument records
-the caller's observation and must not be set true before that physical cleanup
-is complete.
+`cleanup_owner` が true の場合、割り当てられたワーカーは該当ストリームの正確なアタッチチケット（exact ticket: `StreamAttachTicket`）を伴って `run_stream_cleanup_v1()` を実行する。本処理は prepare 処理に対して直列化され、受信機ミューテックスの取得後に物理キャプチャおよびデータアタッチメントの所有権を再確認した上で、必要な停止およびデタッチ処理を実行し、ハードウェアの停止（quiesce: 静止状態）を記録する。これに対し、`complete_stream_cleanup_v1()` は、他の実行経路において既に物理的なクリーンアップが実施・検証されている呼び出し側のための、メタデータ専用の完了通知パスである。自らキャプチャ停止やセッションデタッチを行うことはない。その `quiesced` 引数は呼び出し側自身の観測結果を記録するためのものであり、実際の物理クリーンアップが完全に完了する前に true を設定してはならない。
 
-The engine uses `TuneReadiness` for strict exact-Hz tuning. Legacy kHz tuning
-continues to poll lock. `terminal_lock` requires a valid positive backend lock
-measurement, `commands` records command-only verification, and `ts_sync`
-requires the backend synchronization result. A missing terminal-lock sample is
-an error; it is not inferred from a successful programming command.
+受信機エンジン（`ReceiverEngine`）は、厳密な Hz 単位での正確な選局検証を行うために `TuneReadiness` を採用している。従来の kHz 単位による選局処理は引き続きロック状態のポーリングを継続する。`terminal_lock` はバックエンドからロック成立を確認した有効な正の測定値（positive lock measurement）が得られることを要求し、`commands` はコマンド送信のみの検証結果を記録し、`ts_sync` はバックエンドにおける TS 同期結果を要求する。terminal-lock の観測サンプルが欠落している場合、またはロック未成立の観測値である場合は選局エラーとして扱い、プログラミングコマンドの送信成功のみからロック成立を推定することは決してない。

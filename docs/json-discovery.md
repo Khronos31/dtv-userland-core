@@ -1,11 +1,8 @@
-# Discovery JSON projection
+# userland.discovery JSON 出力仕様
 
-`discovery_json.h` projects a complete scan result into the public
-`userland.discovery` JSON shape. It consumes a scan envelope rather than a
-single `ListResponse`, so enclosure grouping and serial uniqueness are decided
-over the same observed scan.
+ヘッダーファイル `discovery_json.h` は、ハードウェアスキャン全体の観測結果を、公開仕様で定義された `userland.discovery` JSON 形式へとマッピング（変換出力）する。単一の `ListResponse` ではなく、スキャン全体の包括的な観測データ（scan envelope）を入力として受け取るため、同一スキャン内で観測された全デバイスにわたり、筐体のグルーピングおよびシリアル番号の一意性を整合性高く判定する。
 
-The output keeps the physical hierarchy:
+出力される JSON は、以下のとおり実機の物理的な階層構造を保持する:
 
 ```json
 {
@@ -36,57 +33,21 @@ The output keeps the physical hierarchy:
 }
 ```
 
-IDs are JSON numbers. VID and PID are one lowercase hexadecimal `VID:PID`
-string. A device whose receiver inventory is unknown omits `receivers`; a
-known zero-receiver device emits an empty array. The projector only emits
-enclosures and devices supplied by the scan and never invents missing parents
-or children.
+識別子（ID）は JSON の数値として出力する。VID および PID は小文字の 16 進数表記による `VID:PID` 文字列とする。受信機構成が未知のデバイスでは `receivers` フィールドを省略し、受信機が 0 個であることが確認されているデバイスでは空配列（`[]`）を出力する。本エンコーダ（discovery_json）はスキャン処理によって実際に提供された筐体およびデバイスのみを出力し、架空の要素を補完することはない。
 
-Enclosure `id` and USB function `id` use the same identifier meanings as the
-STATUS projection. In receiver records, `receiver` is the receiver number and
-`device` references the containing USB function id; `local` is the receiver's
-local index on that device. Reader `device` also references a USB function id.
-Candidate `device` is the legacy device slot within the candidate observation,
-not the enclosure id or an assertion that the candidate is a child device.
+筐体の `id` および USB ファンクションの `id` は、STATUS JSON における各識別子と同じセマンティクスを持つ。受信機レコードにおいて、`receiver` は同一筐体内（across the whole enclosure）で一意な受信機番号であり、`device` はその受信機を収容している親 USB ファンクション ID を参照する。`local` はその親デバイス（USB ファンクション）内部での受信機のローカルインデックスを表す。リーダーレコードの `device` も親 USB ファンクション ID を参照する。候補（candidates）レコード内の `device` は、重複観測における旧来のデバイススロット番号であり、筐体 ID ではなく、また候補が直属の子デバイスであることを主張するものでもない。
 
-`serial_unique` describes how to select this enclosure when starting a daemon:
-`true` means `--device serial:…` can select it, while `false` means to use
-`--device usb:…` with its USB path because a duplicate enclosure or matching
-serial makes serial selection ambiguous. `null` retains the existing meaning:
-the serial was not observed, or the scan was incomplete and no duplicate was
-observed. For an observed serial, a duplicate status or matching serial is
-false even in an incomplete scan. A non-duplicate observed serial is true only
-after a complete scan. This describes uniqueness among enclosures in this
-scan, not a global guarantee.
+`serial_unique` は、デーモン起動時に該当筐体をどのように特定・選択すべきかを示す指標である:
+- `true`: `--device serial:…` のシリアル番号指定によって一意に選択可能であることを意味する。
+- `false`: 同一シリアルを持つ別筐体の存在やシリアル競合により指定が曖昧となるため、USB 物理バスパスを指定する `--device usb:…` を使用すべきであることを意味する。
+- `null`: 既存仕様のセマンティクスを維持する。すなわち、シリアル番号自体が観測されなかったか、あるいはスキャンが不完全な状態で終了し重複の有無を確定できなかったことを意味する。
 
-Earlier daemon startup accepted only serial selection. M1UR and S1UR units can
-share the serial `000000000000001`, making that selection ambiguous; the
-`--device`/`--usb-path` options were added for USB-path selection and are now
-represented by the unified `--device serial:`/`usb:` forms.
+実際にシリアル番号が観測された場合、たとえ不完全なスキャンであっても、重複状態が検出されたり一致する別シリアルが確認された段階で直ちに false となる。重複のない観測シリアルが true と確定するのは、スキャン全体が完全に完了した後に限られる。この一意性はあくまで「今回のスキャンで観測された筐体間」における相対的な保証であり、未来永劫の絶対的一意性を保証するものではない。
 
-scan.complete and scan.issues describe enumeration of the whole scan.
-Issues carry a stable code and human-readable detail. Enclosure status
-describes grouping and is independent: ready, incomplete, duplicate, or
-invalid_observation (or unknown when the adapter cannot classify it).
-candidates preserves alternative USB observations for
-a duplicate enclosure; those observations are not asserted as its child
-devices. Each candidate carries its device slot, nullable serial and nullable
-bus/address/port. USB observations that cannot be assigned to an enclosure
-remain in ungrouped_usb_devices, with nullable serial/model/location, VID:PID
-and a status of usable, unsupported, invalid_serial, insufficient_speed,
-invalid_topology, open_failed, or unknown.
+初期のデーモン実装ではシリアル番号による機器選択のみを受け付けていた。しかし、M1UR や S1UR などの特定機種ではハードウェア固定の共通シリアル番号 `000000000000001` が複数個体に共有されている場合があり、シリアル指定だけでは個体を一意に特定できない問題が生じた。これに対応するため、USB 物理トポロジによる指定オプション `--device`/`--usb-path` が追加され、現在は統一された `--device serial:` および `--device usb:` の形式へと統合されている。
 
-`lnb_15v_supported` is the enclosure's static LNB capability; it is `null`
-when unknown and is not the current `lnb_15v_enabled` status. `readers` is
-omitted while the reader inventory is unknown, and is an array (including
-`[]`) when that inventory is known. Each reader identifies its reader number
-and the observed device that supplies it. Receiver numbers must be unique
-across the whole enclosure, including within one device.
+`scan.complete` および `scan.issues` は、スキャン処理全体の網羅性と検出された問題を表現する。issues 内の各項目は、固定のエラーコード文字列と人間が読める詳細メッセージを保持する。筐体の `status` はデバイスのグルーピング状態を表し、独立して判定される（`ready`、`incomplete`、`duplicate`、`invalid_observation`、またはアダプターが分類不能な場合の `unknown`）。`candidates` は重複した筐体観測に対する代替の USB 観測データを保持するが、それらが子デバイスとして確定したことを意味しない。各候補データはデバイススロット番号、null 許容のシリアル番号、および null 許容の bus/address/port 情報を保持する。特定の筐体に割り当てられなかった孤立 USB デバイスは `ungrouped_usb_devices` に留まり、null 許容の serial/model/location、VID:PID、およびデバイス状態（`usable`、`unsupported`、`invalid_serial`、`insufficient_speed`、`invalid_topology`、`open_failed`、`unknown` のいずれか）を出力する。
 
-`discovery_json_size` validates and measures the whole input. The encoder
-validates and measures before writing, returns `BUFFER_TOO_SMALL` for a short
-output, and leaves the output unchanged on either failure. The API is part of
-the existing `dtv::json` library; it adds no writer-only target. Scan arrays
-are borrowed pointer/count pairs, so the adapter can supply every observed
-enclosure without a fixed discovery-count limit; keep the pointed-to arrays
-unchanged for the duration of either call.
+`lnb_15v_supported` は筐体の静的な LNB 給電能力を示すフラグである。能力が不明な場合は `null` となり、現在動的に給電されているかを示す `lnb_15v_enabled` ステータスとは明確に区別される。`readers` はリーダー構成が未知である間は出力を省略し、構成が判明している場合は配列（0 件の場合は空配列 `[]`）を出力する。各リーダー項目はリーダー番号と、それを提供する観測デバイス ID を明記する。受信機番号は、同一デバイス内のみならず、筐体全体を通じて重複なく一意でなければならない。
+
+`discovery_json_size` は入力データ全体を検証した上で出力電文のバイトサイズを正確に計測する。エンコーダは実際の書き込みに先立ち完全な検証とサイズ計測を実行し、出力先バッファが不足している場合は `BUFFER_TOO_SMALL` を返し、いずれの失敗時にも出力先バッファの内容を変更しない。この API は既存の `dtv::json` ライブラリの一部として提供され、出力専用の追加バイナリターゲットを新設することはない。スキャン結果の配列は借用されたポインタと要素数のペアとして渡されるため、アダプター層は固定の検出件数上限に縛られることなく観測された全筐体データを引き渡すことができる。関数の実行期間中、ポインタが指し示す入力配列の内容を変更してはならない。
